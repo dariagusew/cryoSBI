@@ -36,7 +36,6 @@ class MLPEMBEDDING(nn.Module):
             nn.Linear(128, output_dimension)
         )
     def forward(self, x):
-        
         return self.net(x)
 
 @add_embedding("RESNET18")

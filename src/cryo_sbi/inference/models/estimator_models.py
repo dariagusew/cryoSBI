@@ -162,6 +162,8 @@ class NLEWithEmbedding(nn.Module):
         num_hidden_flow: int = 2,
         hidden_flow_dim: int = 128,
         flow: nn.Module = zuko.flows.MAF,
+        theta_shift: float = 0.0,
+        theta_scale: float = 1.0,
         **kwargs,
     ) -> None:
         """
@@ -179,7 +181,10 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             None
         """
-
+        # Remove unused arguments so they don't get passed to NPE/flow
+        kwargs.pop("theta_shift", None)
+        kwargs.pop("theta_scale", None)
+        
         super().__init__()
 
         self.nle = NPE(

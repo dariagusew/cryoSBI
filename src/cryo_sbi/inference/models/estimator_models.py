@@ -145,3 +145,76 @@ class NPEWithEmbedding(nn.Module):
 
         samples_standardized = self.flow(x).sample(shape)
         return self.standardize.transform(samples_standardized)
+
+class NLEWithEmbedding(nn.Module):
+    """Neural Likelihood Estimation with embedding net
+
+    Attributes:
+        nle (NLE): NLE model
+        embedding (nn.Module): embedding net
+    """
+
+    def __init__(
+        self,
+        embedding_net: nn.Module,
+        output_embedding_dim: int,
+        num_transforms: int = 4,
+        num_hidden_flow: int = 2,
+        hidden_flow_dim: int = 128,
+        flow: nn.Module = zuko.flows.MAF,
+        **kwargs,
+    ) -> None:
+        """
+        Neural Likelihood Estimation with embedding net.
+
+        Args:
+            embedding_net (nn.Module): embedding net
+            output_embedding_dim (int): output embedding dimension
+            num_transforms (int, optional): number of transforms. Defaults to 4.
+            num_hidden_flow (int, optional): number of hidden layers in flow. Defaults to 2.
+            hidden_flow_dim (int, optional): hidden dimension in flow. Defaults to 128.
+            flow (nn.Module, optional): flow. Defaults to zuko.flows.MAF.
+            kwargs: additional arguments for the flow
+
+        Returns:
+            None
+        """
+
+        super().__init__()
+
+        self.nle = NPE(
+            1,
+            output_embedding_dim,
+            transforms=num_transforms,
+            build=flow,
+            hidden_features=[*[hidden_flow_dim] * num_hidden_flow, 128, 64],
+            **kwargs,
+        )
+
+        self.embedding = embedding_net()
+
+    def forward(self, theta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the NLE model
+
+        Args:
+            theta (torch.Tensor): Conformational parameters (conditioning variable).
+            x (torch.Tensor): Image whose likelihood we model.
+
+        Returns:
+            torch.Tensor: Log-likelihood
+        """
+
+        return self.nle(x, self.embedding(theta))
+
+    def flow(self, theta: torch.Tensor):
+        """
+        Conditions the posterior on an image.
+
+        Args:
+            theta (torch.Tensor): Conformational parameters to condition on.
+
+        Returns:
+            zuko.flows.Flow: Likelihood
+        """
+        return self.nle.flow(self.embedding(theta))

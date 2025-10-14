@@ -31,11 +31,12 @@ class MLPEMBEDDING(nn.Module):
     def __init__(self, output_dimension: int):
         super(MLPEMBEDDING, self).__init__()
         self.net = nn.Sequential(
-            nn.Linear(1000, 128),
+            nn.Linear(4096, 128),
             nn.ReLU(),
             nn.Linear(128, output_dimension)
         )
     def forward(self, x):
+        x = x.view(x.size(0), -1)
         return self.net(x)
 
 @add_embedding("RESNET18")

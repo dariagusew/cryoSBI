@@ -27,17 +27,20 @@ def add_embedding(name):
     return add
 
 @add_embedding("MLP")
-class MLPEMBEDDING(nn.Module):
-    def __init__(self, output_dimension: int):
-        super(MLPEMBEDDING, self).__init__()
+class ModelMLPEmbedding(nn.Module):
+    def __init__(self, output_dim):
+        super().__init__()
         self.net = nn.Sequential(
             nn.Linear(4096, 128),
             nn.ReLU(),
-            nn.Linear(128, output_dimension)
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
         )
-    def forward(self, x):
-        x = x.view(x.size(0), -1)
-        return self.net(x)
+
+    def forward(self, m):
+        return self.net(m)
+
 
 @add_embedding("RESNET18")
 class ResNet18_Encoder(nn.Module):

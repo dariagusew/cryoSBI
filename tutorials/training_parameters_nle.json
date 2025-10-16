@@ -7,8 +7,8 @@
     "MODEL": "NSF",
     "LEARNING_RATE": 0.0003,
     "CLIP_GRADIENT": 5.0,
-    "THETA_SHIFT": 50,
-    "THETA_SCALE": 50,
+    "THETA_SHIFT": 0,
+    "THETA_SCALE": 1,
     "BATCH_SIZE": 32
 }
 

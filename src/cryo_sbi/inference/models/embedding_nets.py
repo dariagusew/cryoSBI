@@ -27,19 +27,46 @@ def add_embedding(name):
     return add
 
 @add_embedding("MLP")
-class ModelMLPEmbedding(nn.Module):
+class MLP(nn.Module):
     def __init__(self, output_dim):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(4096, 128),
-            nn.ReLU(),
-            nn.Linear(128, 128),
-            nn.ReLU(),
-            nn.Linear(128, output_dim)
+        self.node_mlp = nn.Sequential(
+            nn.Linear(1, 32), 
+            nn.LeakyReLU(),
+            nn.Linear(32, 128)
+        )
+        self.global_mlp = nn.Sequential(
+            nn.Linear(128, output_dim),
+            nn.LeakyReLU()
         )
 
-    def forward(self, m):
-        return self.net(m)
+    def forward(self, positions):
+        """
+        positions: [B, N, 3] tensor of coordinates
+                   B = batch size (number of models in batch)
+                   N = number of beads (4 in your case)
+        Returns:
+            [B, output_dim] embedding
+        """
+        #  Pairwise distances: rotationally invariant
+        dists = torch.cdist(positions, positions)  # [B, N, N]
+        
+        #  Simple node-level summary: mean distance to other nodes
+        h = dists.mean(dim=-1)  # [B, N]
+
+        #  Prepare for node-level MLP: last dim = 1
+        h = h.unsqueeze(-1)     # [B, N, 1]
+
+        #  Node-level MLP applied per node
+        h = self.node_mlp(h)    # [B, N, 128]
+
+        #  Global pooling over nodes
+        h = h.mean(dim=1)       # [B, 128]
+
+        #  Global MLP to produce final embedding
+        out = self.global_mlp(h)  # [B, output_dim]
+        return out
+
 
 
 @add_embedding("RESNET18")

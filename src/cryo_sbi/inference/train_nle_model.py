@@ -81,7 +81,6 @@ def nle_train_no_saving(
     Returns:
         None
     """
-    print('Hello')
     train_config = json.load(open(train_config))
     check_train_params(train_config)
     image_config = json.load(open(image_config))
@@ -115,9 +114,7 @@ def nle_train_no_saving(
     estimator = load_model(
         train_config, model_state_dict, device, train_from_checkpoint
     )
-    #loss = NPELoss(estimator)
-    def NLELoss(theta, x):
-        return -estimator(theta, x).mean()
+    loss = NPELoss(estimator)
     
     optimizer = optim.AdamW(
         estimator.parameters(), lr=train_config["LEARNING_RATE"], weight_decay=0.001
@@ -155,17 +152,19 @@ def nle_train_no_saving(
                     pixel_size,
                 )
                 
-                indexed_model = models[indices]
+                models_selected = models[indices.round().long().flatten()]
 
                 for _models, _images in zip(
-                    indexed_model.split(train_config["BATCH_SIZE"]),
+                    models_selected.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
                 ):
+                    positions = _models.permute(0, 2, 1)
+                    flat_images = _images.view(_images.size(0),-1)
                     losses.append(
                         step(
-                            NLELoss(
-                                _models.to(device), #conditioned on model
-                                _images.to(device), #image
+                            loss(
+                                positions.to(device), #conditioned on model
+                                flat_images.to(device), #image flattened
                             )
                         )
                     )

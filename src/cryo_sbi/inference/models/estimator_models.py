@@ -181,9 +181,6 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             None
         """
-        # Remove unused arguments so they don't get passed to NPE/flow
-        kwargs.pop("theta_shift", None)
-        kwargs.pop("theta_scale", None)
         
         super().__init__()
 
@@ -197,6 +194,7 @@ class NLEWithEmbedding(nn.Module):
         )
 
         self.embedding = embedding_net()
+        self.standardize = Standardize(theta_shift, theta_scale)
 
     def forward(self, theta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """
@@ -209,13 +207,10 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             torch.Tensor: Log-likelihood
         """
-
-        return self.nle(x, self.embedding(theta))
+        return self.nle(self.standardize(x), self.embedding(theta))
 
     def flow(self, theta: torch.Tensor):
         """
-        Conditions the posterior on an image.
-
         Args:
             theta (torch.Tensor): Conformational parameters to condition on.
 

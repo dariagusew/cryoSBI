@@ -81,7 +81,7 @@ def nle_train_no_saving(
     Returns:
         None
     """
-
+    print('Hello')
     train_config = json.load(open(train_config))
     check_train_params(train_config)
     image_config = json.load(open(image_config))
@@ -115,7 +115,6 @@ def nle_train_no_saving(
     estimator = load_model(
         train_config, model_state_dict, device, train_from_checkpoint
     )
-
     #loss = NPELoss(estimator)
     def NLELoss(theta, x):
         return -estimator(theta, x).mean()
@@ -155,15 +154,18 @@ def nle_train_no_saving(
                     num_pixels,
                     pixel_size,
                 )
-                for _indices, _images in zip(
-                    indices.split(train_config["BATCH_SIZE"]),
+                
+                indexed_model = models[indices]
+
+                for _models, _images in zip(
+                    indexed_model.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
                 ):
                     losses.append(
                         step(
                             NLELoss(
-                                _indices.to(device),
-                                _images.to(device),
+                                _models.to(device), #conditioned on model
+                                _images.to(device), #image
                             )
                         )
                     )

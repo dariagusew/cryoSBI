@@ -31,9 +31,9 @@ class MLP(nn.Module):
     def __init__(self, output_dim):
         super().__init__()
         self.node_mlp = nn.Sequential(
-            nn.Linear(1, 16), 
+            nn.Linear(1, 32), 
             nn.LeakyReLU(),
-            nn.Linear(16, 128)
+            nn.Linear(32, 128)
         )
         self.global_mlp = nn.Sequential(
             nn.Linear(128, output_dim),
@@ -44,7 +44,7 @@ class MLP(nn.Module):
         """
         positions: [B, N, 3] tensor of coordinates
                    B = batch size (number of models in batch)
-                   N = number of beads (4 in your case)
+                   N = number of beads 
         Returns:
             [B, output_dim] embedding
         """

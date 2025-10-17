@@ -1,0 +1,11 @@
+{
+    "N_PIXELS": 128,
+    "PIXEL_SIZE": 1.5,
+    "SIGMA": [0.5, 5.0],
+    "MODEL_FILE": "/projects/dynaplix/people/zvh378/cryoSBI/tutorials/GS0/data/GS0/3/model.pt",
+    "SHIFT": 25.0,
+    "DEFOCUS": [0.5, 2.0],
+    "SNR": [0.001, 0.5],
+    "AMP": 0.1,
+    "B_FACTOR": [1.0, 100.0]
+}

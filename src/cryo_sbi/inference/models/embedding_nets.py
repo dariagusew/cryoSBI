@@ -31,9 +31,9 @@ class MLP(nn.Module):
     def __init__(self, output_dim):
         super().__init__()
         self.node_mlp = nn.Sequential(
-            nn.Linear(1, 32), 
+            nn.Linear(1, 16), 
             nn.LeakyReLU(),
-            nn.Linear(32, 128)
+            nn.Linear(16, 128)
         )
         self.global_mlp = nn.Sequential(
             nn.Linear(128, output_dim),

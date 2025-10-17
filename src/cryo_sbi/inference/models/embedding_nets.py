@@ -30,11 +30,15 @@ def add_embedding(name):
 class MLP(nn.Module):
     def __init__(self, output_dim):
         super().__init__()
-        self.node_mlp = nn.Sequential(
+        #NN per node (bead)
+        self.node_mlp = nn.Sequential( 
             nn.Linear(1, 32), 
             nn.LeakyReLU(),
-            nn.Linear(32, 128)
+            nn.Linear(32, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 128)
         )
+        #NN pooled representation on all nodes to produce final embedds
         self.global_mlp = nn.Sequential(
             nn.Linear(128, output_dim),
             nn.LeakyReLU()
@@ -51,13 +55,13 @@ class MLP(nn.Module):
         #  Pairwise distances: rotationally invariant
         dists = torch.cdist(positions, positions)  # [B, N, N]
         
-        #  Simple node-level summary: mean distance to other nodes
+        #  Mean distance to other nodes
         h = dists.mean(dim=-1)  # [B, N]
 
         #  Prepare for node-level MLP: last dim = 1
         h = h.unsqueeze(-1)     # [B, N, 1]
 
-        #  Node-level MLP applied per node
+        #  Node-level MLP applied per node (node level representation)
         h = self.node_mlp(h)    # [B, N, 128]
 
         #  Global pooling over nodes
@@ -67,7 +71,61 @@ class MLP(nn.Module):
         out = self.global_mlp(h)  # [B, output_dim]
         return out
 
+@add_embedding('GNN')
+class GNN(nn.Module):
+    def __init__(self, output_dim, hidden_dim=128, num_layers=2):
+        super().__init__()
+        self.num_layers = num_layers
+        
+        # Node-level MLPs for each GNN layer
+        self.node_mlps = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LeakyReLU()
+            ) for _ in range(num_layers)
+        ])
+        
+        # Initial transformation: coordinates -> hidden_dim
+        self.input_mlp = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.LeakyReLU()
+        )
+        
+        # Global MLP
+        self.global_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim),
+            nn.LeakyReLU()
+        )
 
+    def forward(self, positions):
+        """
+        positions: [B, N, 3] tensor of 3D coordinates
+        Returns: [B, output_dim] graph-level embedding
+        """
+        B, N, _ = positions.shape
+        
+        # Initial node features from 3D coordinates
+        h = self.input_mlp(positions)  # [B, N, hidden_dim]
+        
+        # Pairwise distances
+        dists = torch.cdist(positions, positions)  # [B, N, N]
+        
+        # GNN layers (all-to-all message passing)
+        for layer in range(self.num_layers):
+            # Compute weighted sum of all nodes
+            # Here weight = 1 / (1 + distance)
+            weights = 1 / (1 + dists)             # [B, N, N]
+            messages = torch.matmul(weights, h) / (N-1)  # [B, N, hidden_dim]
+            
+            # Update node features
+            h = self.node_mlps[layer](messages)   # [B, N, hidden_dim]
+        
+        # Global pooling over nodes
+        h_global = h.mean(dim=1)  # [B, hidden_dim]
+        
+        # Final graph embedding
+        out = self.global_mlp(h_global)  # [B, output_dim]
+        return out
 
 @add_embedding("RESNET18")
 class ResNet18_Encoder(nn.Module):

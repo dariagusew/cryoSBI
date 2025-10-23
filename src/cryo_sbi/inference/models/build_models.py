@@ -56,7 +56,7 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
 
 def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
     """
-    Function to build NPE estimator with embedding net
+    Function to build NLE estimator with embedding net
     from config_file
 
     Args:
@@ -64,7 +64,7 @@ def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
         embedding_kwargs (dict): kwargs for embedding net
 
     Returns:
-        estimator (nn.Module): NPE estimator
+        estimator (nn.Module): NLE estimator
     """
 
     if config["MODEL"] == "MAF":

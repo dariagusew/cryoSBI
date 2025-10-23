@@ -53,22 +53,26 @@ class MLP(nn.Module):
             [B, output_dim] embedding
         """
         #  Pairwise distances: rotationally invariant
-        dists = torch.cdist(positions, positions)  # [B, N, N]
+        #dists = torch.cdist(positions, positions)  # [B, N, N]
         
+        dists = torch.stack([torch.cdist(p, p) for p in positions])
+        
+       
         #  Mean distance to other nodes
         h = dists.mean(dim=-1)  # [B, N]
-
+        
         #  Prepare for node-level MLP: last dim = 1
         h = h.unsqueeze(-1)     # [B, N, 1]
-
+       
         #  Node-level MLP applied per node (node level representation)
         h = self.node_mlp(h)    # [B, N, 128]
-
+        
         #  Global pooling over nodes
         h = h.mean(dim=1)       # [B, 128]
-
+       
         #  Global MLP to produce final embedding
         out = self.global_mlp(h)  # [B, output_dim]
+       
         return out
 
 @add_embedding('GNN')

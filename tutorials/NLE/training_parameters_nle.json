@@ -1,5 +1,5 @@
 {
-    "EMBEDDING": "GNN",
+    "EMBEDDING": "MLP",
     "OUT_DIM": 128,
     "NUM_TRANSFORM": 3,
     "NUM_HIDDEN_FLOW": 3,
@@ -7,8 +7,8 @@
     "MODEL": "NSF",
     "LEARNING_RATE": 0.0003,
     "CLIP_GRADIENT": 5.0,
-    "THETA_SHIFT": 0,
-    "THETA_SCALE": 1,
+    "THETA_SHIFT": 50,
+    "THETA_SCALE": 50,
     "BATCH_SIZE": 32
 }
 

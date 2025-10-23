@@ -114,8 +114,8 @@ def nle_train_no_saving(
     estimator = load_model(
         train_config, model_state_dict, device, train_from_checkpoint
     )
+
     loss = NPELoss(estimator)
-    
     optimizer = optim.AdamW(
         estimator.parameters(), lr=train_config["LEARNING_RATE"], weight_decay=0.001
     )
@@ -152,19 +152,20 @@ def nle_train_no_saving(
                     pixel_size,
                 )
                 
-                models_selected = models[indices.round().long().flatten()]
 
-                for _models, _images in zip(
-                    models_selected.split(train_config["BATCH_SIZE"]),
+                for _indices, _images in zip(
+                    indices.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
-                ):
-                    positions = _models.permute(0, 2, 1)
-                    flat_images = _images.view(_images.size(0),-1)
+                ):  
+                    models_selected = models[_indices.round().long().flatten()]
+                    positions = models_selected.view(models_selected.size(0), -1, 3)
+                    flat_images = _images.view(_images.size(0), -1) 
+                    
                     losses.append(
                         step(
                             loss(
-                                positions.to(device), #conditioned on model
-                                flat_images.to(device), #image flattened
+                                flat_images.to(device, non_blocking=True), #image flattened
+                                positions.to(device, non_blocking=True),#conditioned on model 
                             )
                         )
                     )

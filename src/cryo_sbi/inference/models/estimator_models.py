@@ -194,7 +194,6 @@ class NLEWithEmbedding(nn.Module):
         )
 
         self.embedding = embedding_net()
-        self.standardize = Standardize(theta_shift, theta_scale)
 
     def forward(self, theta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """
@@ -207,7 +206,7 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             torch.Tensor: Log-likelihood
         """
-        return self.nle(self.standardize(x), self.embedding(theta))
+        return self.nle(x, self.embedding(theta))
 
     def flow(self, theta: torch.Tensor):
         """

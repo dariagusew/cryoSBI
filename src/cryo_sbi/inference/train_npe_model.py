@@ -151,10 +151,12 @@ def npe_train_no_saving(
                     num_pixels,
                     pixel_size,
                 )
+                
                 for _indices, _images in zip(
                     indices.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
                 ):
+                    
                     losses.append(
                         step(
                             loss(

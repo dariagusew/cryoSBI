@@ -195,13 +195,13 @@ class NLEWithEmbedding(nn.Module):
 
         self.embedding = embedding_net()
 
-    def forward(self, theta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """
         Forward pass of the NLE model
 
         Args:
-            theta (torch.Tensor): Conformational parameters (conditioning variable).
             x (torch.Tensor): Image whose likelihood we model.
+            theta (torch.Tensor): Conformational parameters (conditioning variable).
 
         Returns:
             torch.Tensor: Log-likelihood

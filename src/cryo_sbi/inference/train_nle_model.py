@@ -151,21 +151,23 @@ def nle_train_no_saving(
                     num_pixels,
                     pixel_size,
                 )
-                
+                #print('shape images',images.shape)
 
                 for _indices, _images in zip(
                     indices.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
                 ):  
+                    
                     models_selected = models[_indices.round().long().flatten()]
-                    positions = models_selected.view(models_selected.size(0), -1, 3)
+                    
+                    
                     flat_images = _images.view(_images.size(0), -1) 
                     
                     losses.append(
                         step(
                             loss(
                                 flat_images.to(device, non_blocking=True), #image flattened
-                                positions.to(device, non_blocking=True),#conditioned on model 
+                                models_selected.to(device, non_blocking=True), #conditioned on model 
                             )
                         )
                     )

@@ -53,10 +53,7 @@ class MLP(nn.Module):
             [B, output_dim] embedding
         """
         #  Pairwise distances: rotationally invariant
-        #dists = torch.cdist(positions, positions)  # [B, N, N]
-        
-        dists = torch.stack([torch.cdist(p, p) for p in positions])
-        
+        dists = torch.cdist(positions, positions)  # [B, N, N]
        
         #  Mean distance to other nodes
         h = dists.mean(dim=-1)  # [B, N]

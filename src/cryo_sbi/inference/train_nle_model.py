@@ -151,7 +151,7 @@ def nle_train_no_saving(
                     num_pixels,
                     pixel_size,
                 )
-                #print('shape images',images.shape)
+                
 
                 for _indices, _images in zip(
                     indices.split(train_config["BATCH_SIZE"]),

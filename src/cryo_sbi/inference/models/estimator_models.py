@@ -157,7 +157,7 @@ class NLEWithEmbedding(nn.Module):
     def __init__(
         self,
         embedding_net: nn.Module,
-        embedding_net_2: nn.Module,
+        #embedding_net_2: nn.Module,
         output_embedding_dim: int,
         num_transforms: int = 4,
         num_hidden_flow: int = 2,

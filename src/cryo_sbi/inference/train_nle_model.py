@@ -43,8 +43,6 @@ def load_model(
     estimator.to(device=device)
     return estimator
 
-
-
 def nle_train_no_saving(
     image_config: str,
     train_config: str,
@@ -159,14 +157,17 @@ def nle_train_no_saving(
                 ):  
                     
                     models_selected = models[_indices.round().long().flatten()]
+                    #print('models_selected',models_selected.shape)
+                    models_selected = models_selected.transpose(1, 2)
+                    #print('models_selected',models_selected.shape)
                     
-                    
-                    flat_images = _images.view(_images.size(0), -1) 
+                    #flat_images = _images.view(_images.size(0), -1) 
+                    #print('flat_images',flat_images.shape)
                     
                     losses.append(
                         step(
                             loss(
-                                flat_images.to(device, non_blocking=True), #image flattened
+                                _images.to(device, non_blocking=True), #image flattened
                                 models_selected.to(device, non_blocking=True), #conditioned on model 
                             )
                         )

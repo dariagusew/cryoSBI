@@ -1,5 +1,5 @@
 {
-    "EMBEDDING": "MLP",
+    "EMBEDDING": "GNN",
     "OUT_DIM": 128,
     "NUM_TRANSFORM": 3,
     "NUM_HIDDEN_FLOW": 3,

@@ -82,9 +82,9 @@ def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
         embedding = partial(
             EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM"], **embedding_kwargs
         )
-        #embedding_2 = partial(
-        #    EMBEDDING_NETS[config["EMBEDDING_2"]], config["OUT_DIM"], **embedding_kwargs
-        #)
+        embedding_2 = partial(
+            EMBEDDING_NETS[config["EMBEDDING_2"]], config["OUT_DIM"], **embedding_kwargs
+        )
     
     except KeyError:
         raise NotImplementedError(
@@ -94,7 +94,7 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
 
     estimator = estimator_models.NLEWithEmbedding(
         embedding_net=embedding,
-        #embedding_net_2=embedding_2,
+        embedding_net_2=embedding_2,
         output_embedding_dim=config["OUT_DIM"],
         num_transforms=config["NUM_TRANSFORM"],
         num_hidden_flow=config["NUM_HIDDEN_FLOW"],

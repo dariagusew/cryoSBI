@@ -157,7 +157,7 @@ class NLEWithEmbedding(nn.Module):
     def __init__(
         self,
         embedding_net: nn.Module,
-        #embedding_net_2: nn.Module,
+        embedding_net_2: nn.Module,
         output_embedding_dim: int,
         num_transforms: int = 4,
         num_hidden_flow: int = 2,
@@ -195,7 +195,7 @@ class NLEWithEmbedding(nn.Module):
         )
 
         self.embedding = embedding_net()
-        #self.embedding_2 = embedding_net_2()
+        self.embedding_2 = embedding_net_2()
 
     def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """
@@ -213,8 +213,7 @@ class NLEWithEmbedding(nn.Module):
         #print('images', x.shape)
         #print('theta',theta.shape)
         #print('embedded theta', self.embedding(theta).shape)
-        #return self.nle(self.embedding_2(x), self.embedding(theta))
-        return self.nle(x, self.embedding(theta))
+        return self.nle(self.embedding_2(x), self.embedding(theta))
 
     def flow(self, theta: torch.Tensor):
         """

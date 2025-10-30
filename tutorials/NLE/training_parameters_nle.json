@@ -1,11 +1,12 @@
 {
     "EMBEDDING": "GNN",
+    "EMBEDDING_2": "ConvEncoder_Tutorial",
     "OUT_DIM": 128,
     "NUM_TRANSFORM": 3,
     "NUM_HIDDEN_FLOW": 3,
     "HIDDEN_DIM_FLOW": 128,
     "MODEL": "NSF",
-    "LEARNING_RATE": 0.0003,
+    "LEARNING_RATE": 0.0009,
     "CLIP_GRADIENT": 5.0,
     "THETA_SHIFT": 50,
     "THETA_SCALE": 50,

@@ -71,62 +71,95 @@ class MLP(nn.Module):
         out = self.global_mlp(h)  # [B, output_dim]
        
         return out
-
+ 
 @add_embedding('GNN')
 class GNN(nn.Module):
-    def __init__(self, output_dim, hidden_dim=128, num_layers=2):
+    def __init__(self, in_dim=1, hidden_dim=64, output_dimension=128):
         super().__init__()
-        self.num_layers = num_layers
-        
-        # Node-level MLPs for each GNN layer
-        self.node_mlps = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LeakyReLU()
-            ) for _ in range(num_layers)
-        ])
-        
-        # Initial transformation: coordinates -> hidden_dim
-        self.input_mlp = nn.Sequential(
-            nn.Linear(3, hidden_dim),
-            nn.LeakyReLU()
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
         )
-        
-        # Global MLP
-        self.global_mlp = nn.Sequential(
-            nn.Linear(hidden_dim, output_dim),
-            nn.LeakyReLU()
+        #print(self.edge_mlp)
+        self.node_mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, output_dimension)
         )
 
-    def forward(self, positions):
+    @staticmethod
+    def batch_coords_to_graph(coords_batch, cutoff=5):
         """
-        positions: [B, N, 3] tensor of 3D coordinates
-        Returns: [B, output_dim] graph-level embedding
+        Fully vectorized graph construction.
+        coords_batch: [B, N, 3]
+        Returns:
+            x: [B*N,1] node features
+            edge_index: [2, total_edges]
+            edge_attr: [total_edges,1]
+            batch: [B*N] node-to-graph mapping
         """
-        B, N, _ = positions.shape
+        B, N, _ = coords_batch.shape
+        device = coords_batch.device
+
+        # Node features
+        x = torch.ones(B * N, 1, device=device)
+        batch = torch.arange(B, device=device).repeat_interleave(N)
+
+        # Compute all pairwise distances per graph using broadcasting
+        coords_i = coords_batch.unsqueeze(2)  # [B,N,1,3]
+        coords_j = coords_batch.unsqueeze(1)  # [B,1,N,3]
+        dist = torch.norm(coords_i - coords_j, dim=-1)  # [B,N,N]
+
+        # Mask: no self-loops and within cutoff
+        mask = (dist < cutoff) & (~torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0))
+        # Get edge indices and attributes
+        b_idx, i_idx, j_idx = mask.nonzero(as_tuple=True)  # b, src, tgt
+        edge_index = torch.stack([i_idx + b_idx * N, j_idx + b_idx * N], dim=0)  # [2, total_edges]
+        edge_attr = dist[b_idx, i_idx, j_idx].unsqueeze(-1)  # [total_edges,1]
+
+        return x, edge_index, edge_attr, batch
+
+    def forward(self, coords_batch, cutoff=5):
+        B, N, _ = coords_batch.shape
+        #print('B, N, _',B, N, _)
+        device = coords_batch.device
+
+        # Build graph
+        x, edge_index, edge_attr, batch = self.batch_coords_to_graph(coords_batch, cutoff)
         
-        # Initial node features from 3D coordinates
-        h = self.input_mlp(positions)  # [B, N, hidden_dim]
-        
-        # Pairwise distances
-        dists = torch.cdist(positions, positions)  # [B, N, N]
-        
-        # GNN layers (all-to-all message passing)
-        for layer in range(self.num_layers):
-            # Compute weighted sum of all nodes
-            # Here weight = 1 / (1 + distance)
-            weights = 1 / (1 + dists)             # [B, N, N]
-            messages = torch.matmul(weights, h) / (N-1)  # [B, N, hidden_dim]
-            
-            # Update node features
-            h = self.node_mlps[layer](messages)   # [B, N, hidden_dim]
-        
-        # Global pooling over nodes
-        h_global = h.mean(dim=1)  # [B, hidden_dim]
-        
-        # Final graph embedding
-        out = self.global_mlp(h_global)  # [B, output_dim]
-        return out
+        #print('x, edge_index, edge_attr, batch',x.shape, edge_index.shape, edge_attr.shape, batch.shape)
+        #print(edge_attr.shape)  # [num_edges, 1]
+        # Edge MLP
+        messages = self.edge_mlp(edge_attr)  # [total_edges, hidden_dim]
+        #print('messages',messages.shape)
+
+        # Aggregate messages per node
+        target_nodes = edge_index[1]
+        node_messages = torch.zeros((B*N, messages.shape[1]), device=device)
+        counts = torch.zeros(B*N, device=device)
+        node_messages = node_messages.index_add(0, target_nodes, messages)
+        counts = counts.index_add(0, target_nodes, torch.ones_like(target_nodes, dtype=torch.float))
+        counts = counts.clamp(min=1.0).unsqueeze(-1)
+        node_features = node_messages / counts
+        #print(node_features.shape)
+
+        # Node MLP
+        node_embeddings = self.node_mlp(node_features)  # [B*N, out_dim]
+        #print('node_embeddings',node_embeddings.shape)
+        # Graph-level mean pooling
+        graph_embeddings = torch.zeros((B, node_embeddings.shape[1]), device=device)
+        graph_embeddings = graph_embeddings.index_add(0, batch, node_embeddings)
+        counts_graph = torch.zeros(B, device=device)
+        counts_graph = counts_graph.index_add(0, batch, torch.ones(B*N, device=device))
+        counts_graph = counts_graph.clamp(min=1.0).unsqueeze(-1)
+        graph_embeddings = graph_embeddings / counts_graph
+
+        #print('graph_embeddings',graph_embeddings.shape)
+        #print(edge_attr.shape)  # [num_edges, 1]
+        #print(self.edge_mlp[0].in_features)  # should be 1
+
+        return graph_embeddings
 
 @add_embedding("RESNET18")
 class ResNet18_Encoder(nn.Module):

@@ -71,17 +71,26 @@ class MLP(nn.Module):
         out = self.global_mlp(h)  # [B, output_dim]
        
         return out
- 
+
 @add_embedding('GNN')
 class GNN(nn.Module):
-    def __init__(self, in_dim=1, hidden_dim=64, output_dimension=128):
+    def __init__(self, output_dimension, hidden_dim=None, cutoff=10.0):
         super().__init__()
+
+        # Auto-regulate: default hidden_dim to output_dimension
+        if hidden_dim is None:
+            hidden_dim = output_dimension
+
+        self.cutoff = cutoff
+        self.hidden_dim = hidden_dim
+        self.output_dimension = output_dimension
+
         self.edge_mlp = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
-        #print(self.edge_mlp)
+
         self.node_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -89,7 +98,7 @@ class GNN(nn.Module):
         )
 
     @staticmethod
-    def batch_coords_to_graph(coords_batch, cutoff=5):
+    def batch_coords_to_graph(coords_batch, cutoff=10):
         """
         Fully vectorized graph construction.
         coords_batch: [B, N, 3]
@@ -120,19 +129,15 @@ class GNN(nn.Module):
 
         return x, edge_index, edge_attr, batch
 
-    def forward(self, coords_batch, cutoff=5):
+    def forward(self, coords_batch):
         B, N, _ = coords_batch.shape
-        #print('B, N, _',B, N, _)
         device = coords_batch.device
 
-        # Build graph
-        x, edge_index, edge_attr, batch = self.batch_coords_to_graph(coords_batch, cutoff)
+        # Build graph using instance cutoff
+        x, edge_index, edge_attr, batch = self.batch_coords_to_graph(coords_batch, self.cutoff)
         
-        #print('x, edge_index, edge_attr, batch',x.shape, edge_index.shape, edge_attr.shape, batch.shape)
-        #print(edge_attr.shape)  # [num_edges, 1]
         # Edge MLP
         messages = self.edge_mlp(edge_attr)  # [total_edges, hidden_dim]
-        #print('messages',messages.shape)
 
         # Aggregate messages per node
         target_nodes = edge_index[1]
@@ -142,11 +147,10 @@ class GNN(nn.Module):
         counts = counts.index_add(0, target_nodes, torch.ones_like(target_nodes, dtype=torch.float))
         counts = counts.clamp(min=1.0).unsqueeze(-1)
         node_features = node_messages / counts
-        #print(node_features.shape)
 
         # Node MLP
-        node_embeddings = self.node_mlp(node_features)  # [B*N, out_dim]
-        #print('node_embeddings',node_embeddings.shape)
+        node_embeddings = self.node_mlp(node_features)  # [B*N, output_dimension]
+
         # Graph-level mean pooling
         graph_embeddings = torch.zeros((B, node_embeddings.shape[1]), device=device)
         graph_embeddings = graph_embeddings.index_add(0, batch, node_embeddings)
@@ -154,10 +158,6 @@ class GNN(nn.Module):
         counts_graph = counts_graph.index_add(0, batch, torch.ones(B*N, device=device))
         counts_graph = counts_graph.clamp(min=1.0).unsqueeze(-1)
         graph_embeddings = graph_embeddings / counts_graph
-
-        #print('graph_embeddings',graph_embeddings.shape)
-        #print(edge_attr.shape)  # [num_edges, 1]
-        #print(self.edge_mlp[0].in_features)  # should be 1
 
         return graph_embeddings
 

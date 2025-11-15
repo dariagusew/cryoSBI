@@ -1,11 +1,11 @@
 {
     "N_PIXELS": 64,
-    "PIXEL_SIZE": 1.0,
-    "SIGMA": [1.5, 1.5],
+    "PIXEL_SIZE": 1.5,
+    "SIGMA": [0.5, 5.0],
     "MODEL_FILE": "models.pt",
     "SHIFT": 0.0,
     "DEFOCUS": [0.5, 2.0],
-    "SNR": [0.001, 0.5],
+    "SNR": [0.01, 0.5],
     "AMP": 0.1,
     "B_FACTOR": [1.0, 1.0]
 }

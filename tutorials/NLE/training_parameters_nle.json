@@ -1,13 +1,13 @@
 {
-    "EMBEDDING_X": "ConvEncoder_Tutorial",
+    "EMBEDDING_X": "RESNET18",
     "EMBEDDING_THETA": "GNN",
-    "OUT_DIM_X": 128,
-    "OUT_DIM_THETA": 128,
-    "NUM_TRANSFORM": 3,
-    "NUM_HIDDEN_FLOW": 3,
-    "HIDDEN_DIM_FLOW": 128,
+    "OUT_DIM_X": 256,
+    "OUT_DIM_THETA": 256,
+    "NUM_TRANSFORM": 5,
+    "NUM_HIDDEN_FLOW": 10,
+    "HIDDEN_DIM_FLOW": 256,
     "MODEL": "NSF",
     "LEARNING_RATE": 0.0003,
     "CLIP_GRADIENT": 5.0,
-    "BATCH_SIZE": 32
+    "BATCH_SIZE": 256
 }

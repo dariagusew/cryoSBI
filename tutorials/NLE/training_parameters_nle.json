@@ -1,6 +1,6 @@
 {
     "EMBEDDING_X": "RESNET18",
-    "EMBEDDING_THETA": "GNN",
+    "EMBEDDING_THETA": "MLP",
     "OUT_DIM_X": 256,
     "OUT_DIM_THETA": 256,
     "NUM_TRANSFORM": 5,

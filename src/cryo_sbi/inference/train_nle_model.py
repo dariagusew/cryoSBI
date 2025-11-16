@@ -21,7 +21,7 @@ import cryo_sbi.utils.image_utils as img_utils
 
 
 def load_model(
-    train_config: str, model_state_dict: str, device: str, train_from_checkpoint: bool
+    train_config: str, model_state_dict: str, device: str, train_from_checkpoint: bool, pretrained_theta_path: str = None
 ) -> torch.nn.Module:
     """
     Load model from checkpoint or from scratch.
@@ -31,10 +31,11 @@ def load_model(
         model_state_dict (str): path to model state dict
         device (str): device to load model to
         train_from_checkpoint (bool): whether to load model from checkpoint or from scratch
+        pretrained_theta_path (str, optional): path to pre-trained theta embedding weights
     """
 
     check_train_params(train_config)
-    estimator = build_nle_flow_model(train_config)
+    estimator = build_nle_flow_model(train_config, pretrained_theta_path=pretrained_theta_path)
     if train_from_checkpoint:
         if not isinstance(model_state_dict, str):
             raise Warning("No model state dict specified! --model_state_dict is empty")
@@ -51,6 +52,8 @@ def nle_train_no_saving(
     loss_file: str,
     train_from_checkpoint: bool = False,
     model_state_dict: Union[str, None] = None,
+    pretrained_theta_path: Union[str, None] = None,
+    freeze_theta_embedding_epochs: int = 0,
     n_workers: int = 1,
     device: str = "cpu",
     saving_frequency: int = 20,
@@ -68,6 +71,8 @@ def nle_train_no_saving(
         loss_file (str): path to loss file
         train_from_checkpoint (bool, optional): train from checkpoint. Defaults to False.
         model_state_dict (str, optional): path to pretrained model state dict. Defaults to None.
+        pretrained_theta_path (str, optional): path to pre-trained theta embedding weights. Defaults to None.
+        freeze_theta_embedding_epochs (int, optional): freeze theta embedding for first N epochs. Defaults to 0.
         n_workers (int, optional): number of workers. Defaults to 1.
         device (str, optional): training device. Defaults to "cpu".
         saving_frequency (int, optional): frequency of saving model. Defaults to 20.
@@ -110,8 +115,19 @@ def nle_train_no_saving(
     )
 
     estimator = load_model(
-        train_config, model_state_dict, device, train_from_checkpoint
+        train_config, 
+        model_state_dict, 
+        device, 
+        train_from_checkpoint,
+        pretrained_theta_path=pretrained_theta_path
     )
+
+    # Optionally freeze theta embedding for initial epochs
+    if pretrained_theta_path is not None and freeze_theta_embedding_epochs > 0:
+        print(f"Freezing theta embedding for first {freeze_theta_embedding_epochs} epochs")
+        for param in estimator.embedding_theta.parameters():
+            param.requires_grad = False
+    # =============================================================
 
     loss = NPELoss(estimator)
     optimizer = optim.AdamW(
@@ -120,10 +136,25 @@ def nle_train_no_saving(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
-    print("Training neural netowrk:")
+    print("Training neural network:")
     estimator.train()
     with tqdm(range(epochs), unit="epoch") as tq:
         for epoch in tq:
+
+            # Unfreeze theta embedding after initial epochs
+            if epoch == freeze_theta_embedding_epochs and pretrained_theta_path is not None and freeze_theta_embedding_epochs > 0:
+                print(f"\nUnfreezing theta embedding at epoch {epoch}")
+                for param in estimator.embedding_theta.parameters():
+                    param.requires_grad = True
+                # Recreate optimizer to include unfrozen parameters
+                optimizer = optim.AdamW(
+                    estimator.parameters(), 
+                    lr=train_config["LEARNING_RATE"], 
+                    weight_decay=0.001
+                )
+                step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
+            # =============================================================
+
             losses = []
             for parameters in islice(prior_loader, 100):
                 (

@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from functools import partial
 import zuko
@@ -54,13 +55,14 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
 
     return estimator
 
-def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
+def build_nle_flow_model(config: dict, pretrained_theta_path: str = None, **embedding_kwargs) -> nn.Module:
     """
     Function to build NLE estimator with embedding net
     from config_file
 
     Args:
         config (dict): config file
+        pretrained_theta_path (str, optional): path to pre-trained theta embedding weights
         embedding_kwargs (dict): kwargs for embedding net
 
     Returns:
@@ -103,6 +105,24 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
         flow=model,
         **{"activation": partial(nn.LeakyReLU, 0.1)},
     )
+
+    # ==================================================
+    # Load pre-trained theta embedding weights if provided
+    if pretrained_theta_path is not None:
+        print(f"Loading pre-trained theta embedding weights from {pretrained_theta_path}")
+        checkpoint = torch.load(pretrained_theta_path)
+        
+        # Handle both checkpoint dict and raw state_dict
+        if isinstance(checkpoint, dict) and 'mlp_state_dict' in checkpoint:
+            state_dict = checkpoint['mlp_state_dict']
+            print(f"  Loaded from checkpoint (epoch {checkpoint.get('epoch', 'unknown')}, "
+                  f"val_acc={checkpoint.get('val_acc', 'N/A'):.2f}%)" if 'val_acc' in checkpoint else "  Loaded from checkpoint")
+        else:
+            state_dict = checkpoint
+        
+        estimator.embedding_theta.load_state_dict(state_dict)
+        print("✓ Pre-trained theta embedding weights loaded successfully")
+    # ==================================================
 
     return estimator
 

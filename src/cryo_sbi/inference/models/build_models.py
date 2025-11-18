@@ -81,13 +81,35 @@ def build_nle_flow_model(config: dict, pretrained_theta_path: str = None, **embe
         )
 
     try:
+        # Prepare theta embedding kwargs from config
+        theta_kwargs = {}
+        
+        # Extract GNN-specific parameters from config if they exist
+        if config.get("EMBEDDING_THETA") == "GNN":
+            if "GNN_CUTOFF" in config:
+                theta_kwargs["cutoff"] = config["GNN_CUTOFF"]
+                print(f"Using GNN cutoff from config: {config['GNN_CUTOFF']}")
+            if "GNN_HIDDEN_DIM" in config:
+                theta_kwargs["hidden_dim"] = config["GNN_HIDDEN_DIM"]
+                print(f"Using GNN hidden_dim from config: {config['GNN_HIDDEN_DIM']}")
+        
+        # Override with any manually provided embedding_kwargs (takes precedence)
+        theta_kwargs.update(embedding_kwargs)
+        
+        # Build embeddings
+        # For image embedding (e.g., ResNet18): only needs output_dimension
         embedding_x = partial(
-            EMBEDDING_NETS[config["EMBEDDING_X"]], config["OUT_DIM_X"], **embedding_kwargs
+            EMBEDDING_NETS[config["EMBEDDING_X"]], 
+            config["OUT_DIM_X"]
         )
+        
+        # For theta embedding (e.g., GNN or MLP): needs output_dimension + specific kwargs
         embedding_theta = partial(
-            EMBEDDING_NETS[config["EMBEDDING_THETA"]], config["OUT_DIM_THETA"], **embedding_kwargs
+            EMBEDDING_NETS[config["EMBEDDING_THETA"]], 
+            config["OUT_DIM_THETA"],  # This becomes the first positional arg (output_dimension)
+            **theta_kwargs             # These become keyword args (cutoff=..., hidden_dim=...)
         )
-    
+
     except KeyError:
         raise NotImplementedError(
             f"Model : {config['EMBEDDING']} has not been implemented yet! \

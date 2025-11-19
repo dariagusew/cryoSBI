@@ -72,6 +72,68 @@ class MLP(nn.Module):
        
         return out
 
+@add_embedding("MLP_Enhanced")
+class MLP_Enhanced(nn.Module):
+    def __init__(self, output_dim):
+        super().__init__()
+        
+        # Process distance matrix features
+        self.dist_mlp = nn.Sequential(
+            nn.Linear(5, 64),  # 5 statistical features per node
+            nn.LeakyReLU(),
+            nn.Linear(64, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 256)
+        )
+        
+        # Global aggregation
+        self.global_mlp = nn.Sequential(
+            nn.Linear(256, 256),
+            nn.LeakyReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, output_dim),
+            nn.LeakyReLU()
+        )
+
+    def forward(self, positions):
+        """
+        positions: [B, N, 3]
+        """
+        # Pairwise distances
+        dists = torch.cdist(positions, positions)  # [B, N, N]
+        
+        # Extract MULTIPLE features per node (not just mean!)
+        features = []
+        
+        # 1. Mean distance
+        features.append(dists.mean(dim=-1, keepdim=True))  # [B, N, 1]
+        
+        # 2. Std distance (captures variation)
+        features.append(dists.std(dim=-1, keepdim=True))  # [B, N, 1]
+        
+        # 3. Min distance (nearest neighbor)
+        features.append(dists.min(dim=-1, keepdim=True)[0])  # [B, N, 1]
+        
+        # 4. Max distance (furthest point)
+        features.append(dists.max(dim=-1, keepdim=True)[0])  # [B, N, 1]
+        
+        # 5. Median distance
+        features.append(dists.median(dim=-1, keepdim=True)[0])  # [B, N, 1]
+        
+        h = torch.cat(features, dim=-1)  # [B, N, 5]
+        
+        # Process through MLP
+        h = self.dist_mlp(h)  # [B, N, 256]
+        
+        # Global pooling
+        h = h.mean(dim=1)  # [B, 256]
+        
+        # Final embedding
+        out = self.global_mlp(h)  # [B, output_dim]
+        
+        return out
+
+
 @add_embedding('GNN')
 class GNN(nn.Module):
     def __init__(self, output_dimension, hidden_dim=None, cutoff=10.0):

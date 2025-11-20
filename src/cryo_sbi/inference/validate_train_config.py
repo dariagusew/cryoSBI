@@ -10,8 +10,10 @@ def check_train_params(config: dict) -> None:
     """
 
     needed_keys = [
-        "EMBEDDING",
-        "OUT_DIM",
+        "EMBEDDING_X",
+        "EMBEDDING_THETA",
+        "OUT_DIM_X",
+        "OUT_DIM_THETA",
         "NUM_TRANSFORM",
         "NUM_HIDDEN_FLOW",
         "HIDDEN_DIM_FLOW",
@@ -19,8 +21,6 @@ def check_train_params(config: dict) -> None:
         "LEARNING_RATE",
         "CLIP_GRADIENT",
         "BATCH_SIZE",
-        "THETA_SHIFT",
-        "THETA_SCALE",
     ]
 
     for key in needed_keys:

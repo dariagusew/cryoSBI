@@ -155,9 +155,13 @@ def nle_train_no_saving(
                     indices.split(train_config["BATCH_SIZE"]),
                     images.split(train_config["BATCH_SIZE"]),
                 ):  
-                    
+                    print('_indices',_indices.shape)
+                    print('_images',_images.shape)
+                    print('indices',indices.shape)
+                    print('images',images.shape)
                     models_selected = models[_indices.round().long().flatten()]
-                    #print('models_selected',models_selected.shape)
+                    print('models',models.shape)
+                    print('models_selected',models_selected.shape)
                     models_selected = models_selected.transpose(1, 2)
                     #print('models_selected',models_selected.shape)
                     

@@ -1,5 +1,6 @@
 import torch
 import json
+import numpy as np
 from cryo_sbi.inference.models import build_models
 
 
@@ -26,11 +27,14 @@ def evaluate_log_prob(
     """
 
     # batching images if necessary
+    
     if images.shape[0] > batch_size and batch_size > 0:
         images = torch.split(images, split_size_or_sections=batch_size, dim=0)
+         
     else:
         batch_size = images.shape[0]
         images = [images]
+
 
     # theta dimensions [num_eval, num_images, 1]
     if theta.ndim == 3:

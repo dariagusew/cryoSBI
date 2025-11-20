@@ -156,23 +156,24 @@ class NLEWithEmbedding(nn.Module):
 
     def __init__(
         self,
-        embedding_net: nn.Module,
-        embedding_net_2: nn.Module,
-        output_embedding_dim: int,
+        embedding_net_x: nn.Module,
+        embedding_net_theta: nn.Module,
+        output_embedding_dim_x: int,
+        output_embedding_dim_theta: int,
         num_transforms: int = 4,
         num_hidden_flow: int = 2,
         hidden_flow_dim: int = 128,
         flow: nn.Module = zuko.flows.MAF,
-        theta_shift: float = 0.0,
-        theta_scale: float = 1.0,
         **kwargs,
     ) -> None:
         """
         Neural Likelihood Estimation with embedding net.
 
         Args:
-            embedding_net (nn.Module): embedding net
-            output_embedding_dim (int): output embedding dimension
+            embedding_net_x (nn.Module):      embedding net for image
+            embedding_net_theta (nn.Module):  embedding net for conformation
+            output_embedding_dim_x (int):     output embedding dimension image
+            output_embedding_dim_theta (int): output embedding dimension conformation
             num_transforms (int, optional): number of transforms. Defaults to 4.
             num_hidden_flow (int, optional): number of hidden layers in flow. Defaults to 2.
             hidden_flow_dim (int, optional): hidden dimension in flow. Defaults to 128.
@@ -186,16 +187,16 @@ class NLEWithEmbedding(nn.Module):
         super().__init__()
 
         self.nle = NPE(
-            1,
-            output_embedding_dim,
+            output_embedding_dim_x,
+            output_embedding_dim_theta,
             transforms=num_transforms,
             build=flow,
             hidden_features=[*[hidden_flow_dim] * num_hidden_flow, 128, 64],
             **kwargs,
         )
 
-        self.embedding = embedding_net()
-        self.embedding_2 = embedding_net_2()
+        self.embedding_x     = embedding_net_x()
+        self.embedding_theta = embedding_net_theta()
 
     def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """
@@ -208,12 +209,8 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             torch.Tensor: Log-likelihood
         """
-        #print(self.embedding)
-        #print(self.nle)
-        #print('images', x.shape)
-        #print('theta',theta.shape)
-        #print('embedded theta', self.embedding(theta).shape)
-        return self.nle(self.embedding_2(x), self.embedding(theta))
+       
+        return self.nle(self.embedding_x(x), self.embedding_theta(theta))
 
     def flow(self, theta: torch.Tensor):
         """
@@ -223,4 +220,4 @@ class NLEWithEmbedding(nn.Module):
         Returns:
             zuko.flows.Flow: Likelihood
         """
-        return self.nle.flow(self.embedding(theta))
+        return self.nle.flow(self.embedding_theta(theta))

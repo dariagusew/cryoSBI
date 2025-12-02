@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 import torchvision.transforms as transforms
+import numpy as np
 
 from cryo_sbi.utils.image_utils import LowPassFilter, Mask
 
@@ -70,67 +71,6 @@ class MLP(nn.Module):
         #  Global MLP to produce final embedding
         out = self.global_mlp(h)  # [B, output_dim]
        
-        return out
-
-@add_embedding("MLP_Enhanced")
-class MLP_Enhanced(nn.Module):
-    def __init__(self, output_dim):
-        super().__init__()
-        
-        # Process distance matrix features
-        self.dist_mlp = nn.Sequential(
-            nn.Linear(5, 64),  # 5 statistical features per node
-            nn.LeakyReLU(),
-            nn.Linear(64, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 256)
-        )
-        
-        # Global aggregation
-        self.global_mlp = nn.Sequential(
-            nn.Linear(256, 256),
-            nn.LeakyReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, output_dim),
-            nn.LeakyReLU()
-        )
-
-    def forward(self, positions):
-        """
-        positions: [B, N, 3]
-        """
-        # Pairwise distances
-        dists = torch.cdist(positions, positions)  # [B, N, N]
-        
-        # Extract MULTIPLE features per node (not just mean!)
-        features = []
-        
-        # 1. Mean distance
-        features.append(dists.mean(dim=-1, keepdim=True))  # [B, N, 1]
-        
-        # 2. Std distance (captures variation)
-        features.append(dists.std(dim=-1, keepdim=True))  # [B, N, 1]
-        
-        # 3. Min distance (nearest neighbor)
-        features.append(dists.min(dim=-1, keepdim=True)[0])  # [B, N, 1]
-        
-        # 4. Max distance (furthest point)
-        features.append(dists.max(dim=-1, keepdim=True)[0])  # [B, N, 1]
-        
-        # 5. Median distance
-        features.append(dists.median(dim=-1, keepdim=True)[0])  # [B, N, 1]
-        
-        h = torch.cat(features, dim=-1)  # [B, N, 5]
-        
-        # Process through MLP
-        h = self.dist_mlp(h)  # [B, N, 256]
-        
-        # Global pooling
-        h = h.mean(dim=1)  # [B, 256]
-        
-        # Final embedding
-        out = self.global_mlp(h)  # [B, output_dim]
-        
         return out
 
 
@@ -624,6 +564,176 @@ class ConvEncoder(nn.Module):
         x = self.main(x)
         return x.view(x.size(0), -1)  # flatten
 
+
+@add_embedding("SPATIAL_CRYO")
+class SpatialCryoEncoder(nn.Module):
+    """
+    Lightweight spatial encoder for cryo-EM images
+    Inspired by CryoDRGN's ConvEncoder but flexible for any image size
+    
+    Architecture:
+    - All-convolutional design (no heavy FC layers)
+    - Progressive downsampling: D → D/2 → ... → 4 → 1
+    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
+    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
+    
+    Parameters:
+    - D=64:  ~300K  (CryoDRGN scale)
+    - D=128: ~1.75M (6x lighter than ResNet18)
+    - D=256: ~7M    (still lighter than ResNet18)
+    """
+    def __init__(self, output_dimension: int, D: int = 128):
+        super(SpatialCryoEncoder, self).__init__()
+        
+        self.D = D
+        self.output_dimension = output_dimension
+        
+        # Base channel dimension (CryoDRGN choice)
+        ndf = 16
+        
+        # Calculate downsampling stages: D → 4
+        import math
+        n_stages = int(math.log2(D)) - 2
+        
+        if n_stages < 1:
+            raise ValueError(f"Image size D={D} too small. Minimum D=8.")
+        
+        layers = []
+        in_channels = 1
+        
+        # Progressive downsampling with exponential channel growth
+        for i in range(n_stages):
+            out_channels = ndf * (2 ** i)
+            layers.extend([
+                nn.Conv2d(in_channels, out_channels, 
+                         kernel_size=4, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            ])
+            in_channels = out_channels
+        
+        # Final convolutional layer: 4x4 → 1x1
+        # This eliminates the need for large FC layers
+        layers.append(
+            nn.Conv2d(in_channels, output_dimension,
+                     kernel_size=4, stride=1, padding=0, bias=False)
+        )
+        
+        self.conv_encoder = nn.Sequential(*layers)
+        
+        # Output normalization for stable flow training
+        self.output_norm = nn.LayerNorm(output_dimension)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [B, D, D] or [B, 1, D, D] images
+        
+        Returns:
+            embeddings: [B, output_dimension]
+        """
+        # Ensure 4D input [B, 1, D, D]
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        
+        # Convolutional encoding
+        x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
+        
+        # Flatten to [B, output_dim]
+        x = x.view(x.size(0), -1)
+        
+        # Normalize for flow training
+        x = self.output_norm(x)
+        
+        return x
+
+@add_embedding("SPATIAL_CRYO_FFT_FILTER")
+class SpatialCryoFFTEncoder(nn.Module):
+    """
+    Lightweight spatial encoder with FFT preprocessing for noisy cryo-EM images
+    Combines SPATIAL_CRYO's efficient architecture with FFT low-pass filtering
+    
+    Architecture:
+    - FFT low-pass filter preprocessing (removes high-frequency noise)
+    - All-convolutional design (no heavy FC layers)
+    - Progressive downsampling: D → D/2 → ... → 4 → 1
+    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
+    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
+    - LayerNorm output for stable flow training
+    
+    Parameters:
+    - D=128: ~1.75M params (default, optimized for 128x128 images)
+    - Cutoff=25: FFT filter cutoff frequency (same as RESNET18_FFT_FILTER)
+    """
+    def __init__(self, output_dimension: int, D: int = 128):
+        super(SpatialCryoFFTEncoder, self).__init__()
+        
+        self.D = D
+        self.output_dimension = output_dimension
+        
+        # FFT low-pass filter (matches RESNET18_FFT_FILTER for D=128)
+        self._fft_filter = LowPassFilter(D, 25)
+        
+        # Base channel dimension (CryoDRGN choice)
+        ndf = 16
+        
+        # Calculate downsampling stages: D → 4
+        import math
+        n_stages = int(math.log2(D)) - 2
+        
+        if n_stages < 1:
+            raise ValueError(f"Image size D={D} too small. Minimum D=8.")
+        
+        layers = []
+        in_channels = 1
+        
+        # Progressive downsampling with exponential channel growth
+        for i in range(n_stages):
+            out_channels = ndf * (2 ** i)
+            layers.extend([
+                nn.Conv2d(in_channels, out_channels, 
+                         kernel_size=4, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            ])
+            in_channels = out_channels
+        
+        # Final convolutional layer: 4x4 → 1x1
+        layers.append(
+            nn.Conv2d(in_channels, output_dimension,
+                     kernel_size=4, stride=1, padding=0, bias=False)
+        )
+        
+        self.conv_encoder = nn.Sequential(*layers)
+        
+        # Output normalization for stable flow training
+        self.output_norm = nn.LayerNorm(output_dimension)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [B, D, D] or [B, 1, D, D] images
+        
+        Returns:
+            embeddings: [B, output_dimension]
+        """
+        # Apply FFT low-pass filter (removes high-frequency noise)
+        x = self._fft_filter(x)
+        
+        # Ensure 4D input [B, 1, D, D]
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
+        
+        # Convolutional encoding
+        x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
+        
+        # Flatten to [B, output_dim]
+        x = x.view(x.size(0), -1)
+        
+        # Normalize for flow training
+        x = self.output_norm(x)
+        
+        return x
 
 if __name__ == "__main__":
     pass

@@ -53,7 +53,7 @@ def load_model(
 
         try:
             pretrained_state = torch.load(pretrained_embedding_path, map_location='cpu')
-            estimator.embedding.load_state_dict(pretrained_state)
+            estimator.embedding.load_state_dict(pretrained_state, strict=False)
             print("✅ Pretrained embedding loaded successfully")
         except Exception as e:
             print(f"❌ Error loading pretrained embedding: {e}")

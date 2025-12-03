@@ -1,6 +1,10 @@
 import argparse
+from typing import Union, Optional
 from cryo_sbi.inference.train_npe_model import (
-    npe_train_no_saving, nle_train_no_saving
+    npe_train_no_saving
+)
+from cryo_sbi.inference.train_nle_model import (
+    nle_train_no_saving
 )
 
 
@@ -101,6 +105,37 @@ def cl_nle_train_no_saving():
         required=False,
         default=1024,
     )
+    cl_parser.add_argument(
+        "--pretrained_embedding_path",
+        action="store",
+        type=str,
+        required=False,
+        default=None,
+    )
+    
+    cl_parser.add_argument(
+        "--freeze_embedding",
+        action="store",
+        type=bool,
+        required=False,
+        default=False,
+    )
+
+    cl_parser.add_argument(
+        "--use_differential_lr",
+        action="store",
+        type=bool,
+        required=False,
+        default=False,
+    )
+
+    cl_parser.add_argument(
+        "--embedding_lr_factor",
+        action="store",
+        type=float,
+        required=False,
+        default=0.01,
+    )
 
     args = cl_parser.parse_args()
 
@@ -116,4 +151,8 @@ def cl_nle_train_no_saving():
         device=args.train_device,
         saving_frequency=args.saving_freq,
         simulation_batch_size=args.simulation_batch_size,
+        pretrained_embedding_path=args.pretrained_embedding_path,
+        freeze_embedding=args.freeze_embedding,
+        use_differential_lr=args.use_differential_lr,
+        embedding_lr_factor=args.embedding_lr_factor
     )

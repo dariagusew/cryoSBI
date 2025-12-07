@@ -1,16 +1,16 @@
 import torch
 import zuko
+import numpy as np
 from torch.distributions.distribution import Distribution
 from torch.utils.data import DataLoader, Dataset, IterableDataset
-
+from scipy.spatial.transform import Rotation as R
 
 def gen_quat() -> torch.Tensor:
     """
     Generate a random quaternion.
 
     Returns:
-        quat (np.ndarray): Random quaternion
-
+        quat (torch.Tensor): Random quaternion
     """
     count = 0
     while count < 1:
@@ -19,128 +19,132 @@ def gen_quat() -> torch.Tensor:
         if 0.2 <= norm <= 1.0:
             quat /= norm
             count += 1
-
     return quat
 
-
-def get_image_priors(
-    max_index, image_config: dict, device="cuda"
-) -> zuko.distributions.BoxUniform:
+def compute_covariance_matrix(coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Return uniform prior in 1d from 0 to 19
-
+    Compute covariance matrix for a point cloud to find principal axes.
+    
     Args:
-        max_index (int): max index of the 1d prior
-
+        coords: [3, Natoms] torch tensor
+        
     Returns:
-        zuko.distributions.BoxUniform: prior
+        eigenvalues: Sorted eigenvalues
+        eigenvectors: Corresponding eigenvectors
     """
-    if isinstance(image_config["SIGMA"], list) and len(image_config["SIGMA"]) == 2:
-        lower = torch.tensor(
-            [[image_config["SIGMA"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["SIGMA"][1]]], dtype=torch.float32, device=device
-        )
+    coords_centered = coords - coords.mean(dim=1, keepdim=True)
+    cov = (coords_centered @ coords_centered.T) / coords_centered.shape[1]
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    return eigenvalues, eigenvectors
 
-        assert lower <= upper, "Lower bound must be smaller or equal than upper bound."
 
-        sigma_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+class PreferredOrientationPrior:
+    """
+    Generate preferred orientations based on molecular shape.
+    The direction with smallest variance (thinnest dimension) should be 
+    perpendicular to the grid, corresponding to the largest moment of inertia.
+    """
+    def __init__(self, models: list[torch.Tensor], wobble_angle: float = 15.0, device: str = 'cpu'):
+        """
+        Args:
+            models: List of torch tensors, each of shape [3, Natoms]
+            wobble_angle: Degrees of deviation from preferred orientation
+            device: torch device
+        """
+        self.device = device
+        self.wobble_angle = wobble_angle
 
-    shift_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor(
-            [-image_config["SHIFT"], -image_config["SHIFT"]],
-            dtype=torch.float32,
-            device=device,
-        ),
-        upper=torch.tensor(
-            [image_config["SHIFT"], image_config["SHIFT"]],
-            dtype=torch.float32,
-            device=device,
-        ),
-        ndims=1,
-    )
+        # Precompute base quaternions for each model (stored as numpy array)
+        base_quats_list = []
+        for model in models:
+            model_cpu = model.cpu() if model.device.type != 'cpu' else model
+            eigenvalues, eigenvectors = compute_covariance_matrix(model_cpu)
+            # Smallest variance direction should align with z
+            preferred_z = eigenvectors[:, 0].numpy()
+            
+            # Compute base rotation and immediately convert to quaternion
+            base_rotation = self._align_vector_to_z(preferred_z)
+            base_quats_list.append(base_rotation.as_quat())  # [x, y, z, w]
+        
+        # Store as numpy array [num_models, 4] for vectorized indexing
+        self.base_quaternions = np.stack(base_quats_list)
 
-    if isinstance(image_config["DEFOCUS"], list) and len(image_config["DEFOCUS"]) == 2:
-        lower = torch.tensor(
-            [[image_config["DEFOCUS"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["DEFOCUS"][1]]], dtype=torch.float32, device=device
-        )
+    def sample(self, shape: tuple, model_indices: torch.Tensor) -> torch.Tensor:
+        """
+        Sample preferred orientation quaternions.
 
-        assert lower > 0.0, "The lower bound for DEFOCUS must be positive."
-        assert lower <= upper, "Lower bound must be smaller or equal than upper bound."
+        Args:
+            shape: tuple, batch shape
+            model_indices: torch tensor of model indices [batch_size]
 
-        defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        Returns:
+            torch tensor of quaternions [batch_size, 4] in [w, x, y, z] format
+        """
+        batch_size = shape[0]
+        model_indices_np = model_indices.cpu().numpy().astype(int).flatten()
+        
+        # Vectorized random generation
+        wobble_angles = np.random.randn(batch_size, 3) * np.radians(self.wobble_angle)
+        z_angles = np.random.uniform(0, 2 * np.pi, size=batch_size)
+        
+        # Create rotation vectors for z-rotation
+        z_rotvecs = np.zeros((batch_size, 3))
+        z_rotvecs[:, 2] = z_angles
+        
+        # Batch create wobbles and z_rotations
+        wobbles = R.from_euler('xyz', wobble_angles)
+        z_rotations = R.from_rotvec(z_rotvecs)
+        
+        # Vectorized indexing - get base quaternions for selected models
+        base_quats = self.base_quaternions[model_indices_np]  # [batch_size, 4]
+        
+        # Single conversion to batch Rotation object
+        base_rots = R.from_quat(base_quats)
+        
+        # Batch composition: z_rotation * wobble * base_rotation
+        final_rotations = z_rotations * wobbles * base_rots
+        
+        # Batch quaternion extraction
+        quats = final_rotations.as_quat()  # [batch_size, 4] in [x, y, z, w]
+        
+        # Reorder to [w, x, y, z]
+        quats_reordered = np.column_stack([quats[:, 3], quats[:, :3]])
+        
+        # Single device transfer
+        return torch.from_numpy(quats_reordered.astype(np.float32)).to(self.device)
 
-    if (
-        isinstance(image_config["B_FACTOR"], list)
-        and len(image_config["B_FACTOR"]) == 2
-    ):
-        lower = torch.tensor(
-            [[image_config["B_FACTOR"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["B_FACTOR"][1]]], dtype=torch.float32, device=device
-        )
+    def _align_vector_to_z(self, vector: np.ndarray) -> R:
+        """
+        Create rotation that aligns vector with z-axis [0, 0, 1].
+        
+        Args:
+            vector: 3D vector to align with z-axis
+            
+        Returns:
+            scipy Rotation object
+        """
+        z_axis = np.array([0, 0, 1])
+        v = np.cross(vector, z_axis)
+        s = np.linalg.norm(v)
+        c = np.dot(vector, z_axis)
 
-        assert lower > 0.0, "The lower bound for B_FACTOR must be positive."
-        assert lower <= upper, "Lower bound must be smaller or equal than upper bound."
+        if s < 1e-6:  # Already aligned
+            return R.identity() if c > 0 else R.from_euler('x', 180, degrees=True)
 
-        b_factor_prior = zuko.distributions.BoxUniform(
-            lower=lower, upper=upper, ndims=1
-        )
-
-    if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:
-        lower = torch.tensor(
-            [[image_config["SNR"][0]]], dtype=torch.float32, device=device
-        ).log10()
-        upper = torch.tensor(
-            [[image_config["SNR"][1]]], dtype=torch.float32, device=device
-        ).log10()
-
-        assert lower <= upper, "Lower bound must be smaller or equal than upper bound."
-
-        snr_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
-
-    amp_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
-        upper=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
-        ndims=1,
-    )
-
-    index_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([0], dtype=torch.float32, device=device),
-        upper=torch.tensor([max_index], dtype=torch.float32, device=device),
-    )
-    quaternion_prior = QuaternionPrior(device)
-    if (
-        image_config.get("ROTATIONS")
-        and isinstance(image_config["ROTATIONS"], list)
-        and len(image_config["ROTATIONS"]) == 4
-    ):
-        test_quat = image_config["ROTATIONS"]
-        quaternion_prior = QuaternionTestPrior(test_quat, device)
-
-    return ImagePrior(
-        index_prior,
-        quaternion_prior,
-        sigma_prior,
-        shift_prior,
-        defocus_prior,
-        b_factor_prior,
-        amp_prior,
-        snr_prior,
-        device=device,
-    )
+        # Rodrigues' rotation formula
+        vx = np.array([[0, -v[2], v[1]],
+                      [v[2], 0, -v[0]],
+                      [-v[1], v[0], 0]])
+        rot_matrix = np.eye(3) + vx + vx @ vx * (1 - c) / (s**2)
+        return R.from_matrix(rot_matrix)
 
 
 class QuaternionPrior:
-    def __init__(self, device) -> None:
+    """Random quaternion prior."""
+    def __init__(self, device: str):
         self.device = device
 
-    def sample(self, shape) -> torch.Tensor:
+    def sample(self, shape: tuple) -> torch.Tensor:
         quats = torch.stack(
             [gen_quat().to(self.device) for _ in range(shape[0])], dim=0
         )
@@ -148,11 +152,12 @@ class QuaternionPrior:
 
 
 class QuaternionTestPrior:
-    def __init__(self, quat, device) -> None:
+    """Fixed quaternion for testing."""
+    def __init__(self, quat: list[float], device: str):
         self.device = device
         self.quat = torch.tensor(quat, device=device)
 
-    def sample(self, shape) -> torch.Tensor:
+    def sample(self, shape: tuple) -> torch.Tensor:
         quats = torch.stack([self.quat for _ in range(shape[0])], dim=0)
         return quats
 
@@ -168,8 +173,8 @@ class ImagePrior:
         b_factor_prior,
         amp_prior,
         snr_prior,
-        device,
-    ) -> None:
+        device: str,
+    ):
         self.priors = [
             index_prior,
             quaternion_prior,
@@ -181,9 +186,148 @@ class ImagePrior:
             snr_prior,
         ]
 
-    def sample(self, shape) -> torch.Tensor:
-        samples = [prior.sample(shape) for prior in self.priors]
-        return samples
+    def sample(self, shape: tuple) -> list:
+        # Sample index first
+        indices = self.priors[0].sample(shape)
+        
+        # If quaternion prior supports model-specific sampling, pass indices
+        if isinstance(self.priors[1], PreferredOrientationPrior):
+            quaternions = self.priors[1].sample(shape, model_indices=indices)
+        else:
+            quaternions = self.priors[1].sample(shape)
+        
+        # Sample other parameters
+        other_samples = [prior.sample(shape) for prior in self.priors[2:]]
+        
+        return [indices, quaternions] + other_samples
+
+
+def get_image_priors(
+    max_index: int, 
+    image_config: dict, 
+    models: list[torch.Tensor] = None,
+    device: str = "cpu"
+) -> ImagePrior:
+    """
+    Return priors for image generation.
+    
+    Args:
+        max_index: Maximum model index (typically len(models) - 1)
+        image_config: Configuration dictionary
+        models: List of 3D models [3, Natoms] for computing preferred orientations (optional)
+        device: torch device (typically "cpu" for prior generation)
+    
+    Returns:
+        ImagePrior: Combined prior object
+    """
+    # Sigma prior
+    if isinstance(image_config["SIGMA"], list) and len(image_config["SIGMA"]) == 2:
+        lower = torch.tensor(
+            [[image_config["SIGMA"][0]]], dtype=torch.float32, device=device
+        )
+        upper = torch.tensor(
+            [[image_config["SIGMA"][1]]], dtype=torch.float32, device=device
+        )
+        if lower > upper:
+            raise ValueError(f"SIGMA lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+        sigma_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
+    # Shift prior
+    shift_prior = zuko.distributions.BoxUniform(
+        lower=torch.tensor(
+            [-image_config["SHIFT"], -image_config["SHIFT"]],
+            dtype=torch.float32,
+            device=device,
+        ),
+        upper=torch.tensor(
+            [image_config["SHIFT"], image_config["SHIFT"]],
+            dtype=torch.float32,
+            device=device,
+        ),
+        ndims=1,
+    )
+
+    # Defocus prior
+    if isinstance(image_config["DEFOCUS"], list) and len(image_config["DEFOCUS"]) == 2:
+        lower = torch.tensor(
+            [[image_config["DEFOCUS"][0]]], dtype=torch.float32, device=device
+        )
+        upper = torch.tensor(
+            [[image_config["DEFOCUS"][1]]], dtype=torch.float32, device=device
+        )
+        if lower <= 0.0:
+            raise ValueError("DEFOCUS lower bound must be positive")
+        if lower > upper:
+            raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+        defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
+    # B-factor prior
+    if isinstance(image_config["B_FACTOR"], list) and len(image_config["B_FACTOR"]) == 2:
+        lower = torch.tensor(
+            [[image_config["B_FACTOR"][0]]], dtype=torch.float32, device=device
+        )
+        upper = torch.tensor(
+            [[image_config["B_FACTOR"][1]]], dtype=torch.float32, device=device
+        )
+        if lower <= 0.0:
+            raise ValueError("B_FACTOR lower bound must be positive")
+        if lower > upper:
+            raise ValueError(f"B_FACTOR lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+        b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
+    # SNR prior
+    if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:
+        lower = torch.tensor(
+            [[image_config["SNR"][0]]], dtype=torch.float32, device=device
+        ).log10()
+        upper = torch.tensor(
+            [[image_config["SNR"][1]]], dtype=torch.float32, device=device
+        ).log10()
+        if lower > upper:
+            raise ValueError(f"SNR lower bound must be ≤ upper bound")
+        snr_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
+    # Amplitude prior
+    amp_prior = zuko.distributions.BoxUniform(
+        lower=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
+        upper=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
+        ndims=1,
+    )
+
+    # Index prior
+    index_prior = zuko.distributions.BoxUniform(
+        lower=torch.tensor([0], dtype=torch.float32, device=device),
+        upper=torch.tensor([max_index], dtype=torch.float32, device=device),
+    )
+    
+    # Quaternion prior - choose based on configuration
+    # Check for preferred orientations
+    if models is not None and image_config.get("USE_PREFERRED_ORIENTATIONS", False):
+        wobble_angle = image_config.get("WOBBLE_ANGLE", 15.0)  # Default 15 degrees
+        quaternion_prior = PreferredOrientationPrior(models, wobble_angle, device)
+    # Check for fixed test quaternion
+    elif (
+        image_config.get("ROTATIONS")
+        and isinstance(image_config["ROTATIONS"], list)
+        and len(image_config["ROTATIONS"]) == 4
+    ):
+        test_quat = image_config["ROTATIONS"]
+        quaternion_prior = QuaternionTestPrior(test_quat, device)
+    # Default to random quaternions
+    else:
+        quaternion_prior = QuaternionPrior(device)
+
+    return ImagePrior(
+        index_prior,
+        quaternion_prior,
+        sigma_prior,
+        shift_prior,
+        defocus_prior,
+        b_factor_prior,
+        amp_prior,
+        snr_prior,
+        device=device,
+    )
 
 
 class PriorDataset(IterableDataset):
@@ -193,7 +337,6 @@ class PriorDataset(IterableDataset):
         batch_shape: torch.Size = (),
     ):
         super().__init__()
-
         self.prior = prior
         self.batch_shape = batch_shape
 

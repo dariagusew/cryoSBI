@@ -23,9 +23,11 @@ def cryo_em_simulator(
     snr,
     num_pixels,
     pixel_size,
+    voltage,
+    cs
 ):
     """
-    Simulates a bacth of cryo-electron microscopy (cryo-EM) images of a set of given coars-grained models.
+    Simulates a batch of cryo-electron microscopy (cryo-EM) images of a set of given coars-grained models.
 
     Args:
         models (torch.Tensor): A tensor of coars grained models (num_models, 3, num_beads).
@@ -39,6 +41,8 @@ def cryo_em_simulator(
         snr (float): The signal-to-noise ratio of the simulated image.
         num_pixels (int): The number of pixels in the simulated image.
         pixel_size (float): The size of each pixel in the simulated image.
+        voltage (float): Electron voltage in kV
+        cs (float): Spherical aberration in mm
 
     Returns:
         torch.Tensor: A tensor of the simulated cryo-EM image.
@@ -52,7 +56,7 @@ def cryo_em_simulator(
         num_pixels,
         pixel_size,
     )
-    image = apply_ctf(image, defocus, b_factor, amp, pixel_size)
+    image = apply_ctf(image, defocus, b_factor, amp, pixel_size, voltage, cs)
     image = add_noise(image, snr)
     image = gaussian_normalize_image(image)
     return image
@@ -63,13 +67,15 @@ class CryoEmSimulator:
         self._device = device
         self._load_params(config_fname)
         self._load_models()
-        self._priors = get_image_priors(self.max_index, self._config, device=device)
+        self._priors = get_image_priors(self.max_index, self._config, models=self._models, device=device)
         self._num_pixels = torch.tensor(
             self._config["N_PIXELS"], dtype=torch.float32, device=device
         )
         self._pixel_size = torch.tensor(
             self._config["PIXEL_SIZE"], dtype=torch.float32, device=device
         )
+        self._voltage = self._config.get("VOLTAGE", 300.0)
+        self._cs = self._config.get("SPHERICAL_ABERRATION", 0.0)
 
     def _load_params(self, config_fname: str) -> None:
         """
@@ -170,6 +176,8 @@ class CryoEmSimulator:
                 *batch_parameters,
                 self._num_pixels,
                 self._pixel_size,
+                self._voltage,
+                self._cs
             )
             images.append(batch_images.cpu())
 

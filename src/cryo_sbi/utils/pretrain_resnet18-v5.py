@@ -218,7 +218,9 @@ def pretrain_unsupervised(
     
     num_pixels = torch.tensor(image_config["N_PIXELS"], dtype=torch.float32, device=device)
     pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
-    
+    voltage = image_config.get("VOLTAGE", 300.0)
+    cs = image_config.get("SPHERICAL_ABERRATION", 0.0)   
+ 
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
@@ -271,6 +273,8 @@ def pretrain_unsupervised(
                     snr.to(device),
                     num_pixels,
                     pixel_size,
+                    voltage,
+                    cs
                 )
                 
                 # Train on mini-batches

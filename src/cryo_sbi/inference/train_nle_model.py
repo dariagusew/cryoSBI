@@ -151,7 +151,7 @@ def nle_train_no_saving(
     else:
         models = torch.load(image_config["MODEL_FILE"]).to(device).to(torch.float32)
 
-    image_prior = get_image_priors(len(models) - 1, image_config, device="cpu")
+    image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
     prior_loader = PriorLoader(
         image_prior, batch_size=simulation_batch_size, num_workers=n_workers
     )
@@ -162,6 +162,9 @@ def nle_train_no_saving(
     pixel_size = torch.tensor(
         image_config["PIXEL_SIZE"], dtype=torch.float32, device=device
     )
+
+    voltage = image_config.get("VOLTAGE", 300.0)
+    cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
 
     # Load model with optional pretrained embedding
     estimator = load_model(
@@ -260,6 +263,8 @@ def nle_train_no_saving(
                     snr.to(device, non_blocking=True),
                     num_pixels,
                     pixel_size,
+                    voltage,
+                    cs
                 )
                 
 

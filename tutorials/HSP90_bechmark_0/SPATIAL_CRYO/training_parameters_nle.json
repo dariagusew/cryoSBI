@@ -1,0 +1,13 @@
+{
+    "EMBEDDING": "SPATIAL_CRYO",
+    "OUT_DIM": 256,
+    "NUM_TRANSFORM": 5,
+    "NUM_HIDDEN_FLOW": 2,
+    "HIDDEN_DIM_FLOW": 256,
+    "MODEL": "NSF",
+    "LEARNING_RATE": 1e-3,
+    "CLIP_GRADIENT": 1.0,
+    "THETA_SHIFT": 9.5,
+    "THETA_SCALE": 9.5,
+    "BATCH_SIZE": 512
+}

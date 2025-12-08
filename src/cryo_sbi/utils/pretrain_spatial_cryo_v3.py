@@ -499,95 +499,95 @@ def pretrain_spatial_cryo(
 # COMMAND LINE INTERFACE
 # ============================================================================
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Unsupervised pre-training for SPATIAL_CRYO encoder with L2 regularization'
-    )
+# def main():
+#     parser = argparse.ArgumentParser(
+#         description='Unsupervised pre-training for SPATIAL_CRYO encoder with L2 regularization'
+#     )
     
-    # Required arguments
-    parser.add_argument('--image_config', type=str, required=True,
-                       help='Path to image config JSON')
+#     # Required arguments
+#     parser.add_argument('--image_config', type=str, required=True,
+#                        help='Path to image config JSON')
     
-    # Embedding architecture
-    parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO',
-                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER'],
-                       help='Embedding architecture. Choices: SPATIAL_CRYO, SPATIAL_CRYO_FFT_FILTER')
+#     # Embedding architecture
+#     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO',
+#                        choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER'],
+#                        help='Embedding architecture. Choices: SPATIAL_CRYO, SPATIAL_CRYO_FFT_FILTER')
     
-    # Training arguments
-    parser.add_argument('--epochs', type=int, default=100,
-                       help='Number of training epochs (default: 100)')
-    parser.add_argument('--batch_size', type=int, default=512,
-                       help='Training batch size (default: 512)')
-    parser.add_argument('--lr', type=float, default=2e-4,
-                       help='Learning rate (default: 0.0002)')
-    parser.add_argument('--embedding_dim', type=int, default=256,
-                       help='Embedding dimension (default: 256)')
-    parser.add_argument('--l2_weight', type=float, default=0.0,
-                       help='L2 regularization weight on embeddings (default: 0.0)')
+#     # Training arguments
+#     parser.add_argument('--epochs', type=int, default=100,
+#                        help='Number of training epochs (default: 100)')
+#     parser.add_argument('--batch_size', type=int, default=512,
+#                        help='Training batch size (default: 512)')
+#     parser.add_argument('--lr', type=float, default=2e-4,
+#                        help='Learning rate (default: 0.0002)')
+#     parser.add_argument('--embedding_dim', type=int, default=256,
+#                        help='Embedding dimension (default: 256)')
+#     parser.add_argument('--l2_weight', type=float, default=0.0,
+#                        help='L2 regularization weight on embeddings (default: 0.0)')
     
-    # Output arguments
-    parser.add_argument('--output', type=str, default='pretrained_spatial_cryo.pt',
-                       help='Output path for pretrained weights')
+#     # Output arguments
+#     parser.add_argument('--output', type=str, default='pretrained_spatial_cryo.pt',
+#                        help='Output path for pretrained weights')
     
-    # Device
-    parser.add_argument('--device', type=str, default='cuda',
-                       help='Device: "cpu", "cuda", "cuda:0", "cuda:1", etc.')
+#     # Device
+#     parser.add_argument('--device', type=str, default='cuda',
+#                        help='Device: "cpu", "cuda", "cuda:0", "cuda:1", etc.')
     
-    # Other
-    parser.add_argument('--simulation_batch_size', type=int, default=1024,
-                       help='Simulation batch size (default: 1024)')
-    parser.add_argument('--batches_per_epoch', type=int, default=100,
-                       help='Number of simulation batches per epoch (default: 100)')
-    parser.add_argument('--check_frequency', type=int, default=5,
-                       help='Print detailed stats every N epochs (default: 5)')
+#     # Other
+#     parser.add_argument('--simulation_batch_size', type=int, default=1024,
+#                        help='Simulation batch size (default: 1024)')
+#     parser.add_argument('--batches_per_epoch', type=int, default=100,
+#                        help='Number of simulation batches per epoch (default: 100)')
+#     parser.add_argument('--check_frequency', type=int, default=5,
+#                        help='Print detailed stats every N epochs (default: 5)')
     
-    args = parser.parse_args()
+#     args = parser.parse_args()
     
-    # Validate device
-    if args.device.startswith('cuda'):
-        if not torch.cuda.is_available():
-            print(f"❌ CUDA not available! Falling back to CPU")
-            args.device = 'cpu'
-        else:
-            if ':' in args.device:
-                gpu_id = int(args.device.split(':')[1])
-                if gpu_id >= torch.cuda.device_count():
-                    print(f"❌ GPU {gpu_id} not available!")
-                    print(f"   Available GPUs: 0-{torch.cuda.device_count()-1}")
-                    print(f"   Falling back to cuda:0")
-                    args.device = 'cuda:0'
+#     # Validate device
+#     if args.device.startswith('cuda'):
+#         if not torch.cuda.is_available():
+#             print(f"❌ CUDA not available! Falling back to CPU")
+#             args.device = 'cpu'
+#         else:
+#             if ':' in args.device:
+#                 gpu_id = int(args.device.split(':')[1])
+#                 if gpu_id >= torch.cuda.device_count():
+#                     print(f"❌ GPU {gpu_id} not available!")
+#                     print(f"   Available GPUs: 0-{torch.cuda.device_count()-1}")
+#                     print(f"   Falling back to cuda:0")
+#                     args.device = 'cuda:0'
             
-            print(f"✅ Using device: {args.device}")
-            if torch.cuda.is_available():
-                print(f"   GPU: {torch.cuda.get_device_name(args.device)}")
+#             print(f"✅ Using device: {args.device}")
+#             if torch.cuda.is_available():
+#                 print(f"   GPU: {torch.cuda.get_device_name(args.device)}")
     
-    # Run pretraining
-    model, final_loss = pretrain_spatial_cryo(
-        image_config_path=args.image_config,
-        embedding_name=args.embedding,
-        device=args.device,
-        embedding_dim=args.embedding_dim,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        simulation_batch_size=args.simulation_batch_size,
-        save_path=args.output,
-        n_batches_per_epoch=args.batches_per_epoch,
-        check_frequency=args.check_frequency,
-        l2_weight=args.l2_weight,
-    )
+#     # Run pretraining
+#     model, final_loss = pretrain_spatial_cryo(
+#         image_config_path=args.image_config,
+#         embedding_name=args.embedding,
+#         device=args.device,
+#         embedding_dim=args.embedding_dim,
+#         epochs=args.epochs,
+#         batch_size=args.batch_size,
+#         lr=args.lr,
+#         simulation_batch_size=args.simulation_batch_size,
+#         save_path=args.output,
+#         n_batches_per_epoch=args.batches_per_epoch,
+#         check_frequency=args.check_frequency,
+#         l2_weight=args.l2_weight,
+#     )
     
-    if model is None:
-        return 1
+#     if model is None:
+#         return 1
     
-    print(f"\n✅ Unsupervised pre-training complete!")
-    print(f"   Architecture: {args.embedding}")
-    print(f"   L2 regularization weight: {args.l2_weight}")
-    print(f"   Final reconstruction loss: {final_loss:.6f}")
-    print(f"   Encoder weights saved to: {args.output}")
+#     print(f"\n✅ Unsupervised pre-training complete!")
+#     print(f"   Architecture: {args.embedding}")
+#     print(f"   L2 regularization weight: {args.l2_weight}")
+#     print(f"   Final reconstruction loss: {final_loss:.6f}")
+#     print(f"   Encoder weights saved to: {args.output}")
     
-    return 0
+#     return 0
 
 
-if __name__ == "__main__":
-    exit(main())
+# if __name__ == "__main__":
+#     exit(main())

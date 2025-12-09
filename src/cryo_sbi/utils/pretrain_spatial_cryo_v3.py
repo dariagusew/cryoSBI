@@ -278,7 +278,7 @@ def pretrain_spatial_cryo(
     
     # Setup data generation
     print("  Setting up data generation...")
-    image_prior = get_image_priors(len(models) - 1, image_config, device="cpu")
+    image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
     prior_loader = PriorLoader(
         image_prior, 
         batch_size=simulation_batch_size, 

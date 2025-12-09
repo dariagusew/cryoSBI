@@ -2,6 +2,7 @@ import torch
 import zuko
 import numpy as np
 from torch.distributions.distribution import Distribution
+from torch.distributions import constraints
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 from scipy.spatial.transform import Rotation as R
 
@@ -20,6 +21,29 @@ def gen_quat() -> torch.Tensor:
             quat /= norm
             count += 1
     return quat
+
+class LogTransform(zuko.distributions.Transform):
+    r"""
+    Transform via the mapping :math:`y = \log(x)`.
+    """
+    domain = constraints.positive
+    codomain = constraints.real
+    bijective = True
+    sign = +1
+
+    def __eq__(self, other):
+        return isinstance(other, LogTransform)
+
+    def _call(self, x):
+        return x.log()
+
+    def _inverse(self, y):
+        return y.exp()
+
+    def log_abs_det_jacobian(self, x, y):
+        # d(log(x))/dx = 1/x
+        # log|1/x| = -log(x)
+        return -x.log()
 
 def compute_covariance_matrix(coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -277,15 +301,20 @@ def get_image_priors(
 
     # SNR prior
     if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:
+        # removed log10() from boundaries
         lower = torch.tensor(
             [[image_config["SNR"][0]]], dtype=torch.float32, device=device
-        ).log10()
+        ) #.log10()
         upper = torch.tensor(
             [[image_config["SNR"][1]]], dtype=torch.float32, device=device
-        ).log10()
+        ) #.log10()
         if lower > upper:
             raise ValueError(f"SNR lower bound must be ≤ upper bound")
-        snr_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # check if you want uniform SNR, otherwise back to old log-uniform/Jeffreys
+        if image_config.get("USE_UNIFORM_SNR", False):
+           snr_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        else:
+           snr_prior = zuko.distributions.TransformedUniform(LogTransform(), lower, upper)
 
     # Amplitude prior
     amp_prior = zuko.distributions.BoxUniform(
@@ -300,7 +329,7 @@ def get_image_priors(
         upper=torch.tensor([max_index], dtype=torch.float32, device=device),
     )
     
-    # Quaternion prior - choose based on configuration
+    # Quaternion prior
     # Check for preferred orientations
     if models is not None and image_config.get("USE_PREFERRED_ORIENTATIONS", False):
         wobble_angle = image_config.get("WOBBLE_ANGLE", 15.0)  # Default 15 degrees

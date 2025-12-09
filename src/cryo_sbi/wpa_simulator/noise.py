@@ -62,10 +62,10 @@ def add_noise(
     signal_std = torch.std(image[:, mask], dim=[-1])  # (batch,)
     
     # Calculate noise standard deviation from power SNR
-    # remember that SNR were converted in log10() in priors.py
-    # therefore the SNR distribution is uniform in log-space (more realistic)
     # SNR = σ²_signal / σ²_noise → σ_noise = σ_signal / sqrt(SNR) [batch, 1, 1]
-    noise_std = signal_std.reshape(-1, 1, 1) / torch.sqrt(torch.pow(torch.tensor(10.0, device=device), snr))
+    # Now we sample the correct prior distribution:
+    # Default Log-Uniform (Jeffreys) - Uniform with USE_UNIFORM_SNR=true
+    noise_std = signal_std.reshape(-1, 1, 1) / torch.sqrt(snr)
     
     # Generate noise map [batch, npixels, npixels]
     noise = torch.randn_like(image)

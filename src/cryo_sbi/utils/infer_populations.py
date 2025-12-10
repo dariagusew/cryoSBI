@@ -156,7 +156,6 @@ def evaluate_likelihood_pairwise(
     """
     estimator.eval()
     estimator.to(device)
-    images = images.to(device)
     
     N_images = len(images)
     N_models = len(models)
@@ -181,11 +180,11 @@ def evaluate_likelihood_pairwise(
             mod_idx = pair_indices % N_models   # [batch_size]
             
             # Gather the corresponding images and model indices
-            batch_images = images[img_idx]  # [batch_size, H, W]
+            batch_images = images[img_idx.cpu()]  # [batch_size, H, W]
             batch_indices = model_indices[mod_idx].unsqueeze(-1)  # [batch_size, 1]
             
             # Single forward pass!
-            log_p = estimator(batch_images, batch_indices)  # [batch_size]
+            log_p = estimator(batch_images.to(device), batch_indices)  # [batch_size]
             
             # Place results in the correct positions
             log_probs.view(-1)[pair_start:pair_end] = log_p
@@ -357,21 +356,19 @@ class PopulationOptimizer:
             torch.save(models_ensemble, "models_ensemble.pt")
             
             # 2. Simulate images
-            simulator = CryoEmSimulator(sim_config)
+            simulator = CryoEmSimulator(sim_config, device=self.device)
             images, parameters = simulator.simulate(
                 num_sim=num_sim, 
                 return_parameters=True,
                 batch_size=batch_size
             )
             
-            #images = images.to(self.device)
-            
             # 3. Compute likelihood matrix
             log_probs_matrix = evaluate_likelihood_pairwise(
                 self.estimator,
                 images,
                 self.models,
-                batch_size_pairs=10000,
+                batch_size_pairs=20000,
                 device=self.device
             ).T  # transpose to [n_models x n_images]
             

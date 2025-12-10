@@ -257,7 +257,7 @@ def cli_pinfer_populations():
 
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress messages")
 
-    parser.add_argument("--batch_size",type=int, default=1, help="Batching for simulatin cryo images")
+    parser.add_argument("--batch_size",type=int, default=10000, help="Batching for simulatin cryo images")
 
     args = parser.parse_args()
 

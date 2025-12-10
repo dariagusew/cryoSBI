@@ -6,22 +6,6 @@ from torch.distributions import constraints
 from torch.utils.data import DataLoader, Dataset, IterableDataset
 from scipy.spatial.transform import Rotation as R
 
-def gen_quat() -> torch.Tensor:
-    """
-    Generate a random quaternion.
-
-    Returns:
-        quat (torch.Tensor): Random quaternion
-    """
-    count = 0
-    while count < 1:
-        quat = 2 * torch.rand(size=(4,)) - 1
-        norm = torch.sqrt(torch.sum(quat**2))
-        if 0.2 <= norm <= 1.0:
-            quat /= norm
-            count += 1
-    return quat
-
 class LogTransform(zuko.distributions.Transform):
     r"""
     Transform via the mapping :math:`y = \log(x)`.
@@ -169,9 +153,19 @@ class QuaternionPrior:
         self.device = device
 
     def sample(self, shape: tuple) -> torch.Tensor:
-        quats = torch.stack(
-            [gen_quat().to(self.device) for _ in range(shape[0])], dim=0
-        )
+        """
+        Sample random orientation quaternions.
+
+        Args:
+            shape: tuple, batch shape
+
+        Returns:
+            torch tensor of quaternions [batch_size, 4] in [w, x, y, z] format
+        """
+        # this is batch calculated and uniform
+        quats = torch.randn(shape[0], 4, device=self.device)
+        quats /= torch.norm(quats, dim=-1, keepdim=True)
+
         return quats
 
 

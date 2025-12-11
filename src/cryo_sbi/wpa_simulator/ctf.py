@@ -65,9 +65,8 @@ def apply_ctf(
     )
    
     # Apply envelope function [num_batch, num_pixels, num_pixels]
-    # we divide by 2, instead of usual 4, for consistency with cryoSBI
-    # the standard factor for the envelope term modulating the "amplitude" should be 4!
-    envelope = torch.exp(-b_factor_reshaped * k2 * 0.5)
+    # unlike cryoSBI, we divide Bfactor by 4 as it is the standard for the envelope term modulating an "amplitude"
+    envelope = torch.exp(-b_factor_reshaped * k2 * 0.25)
     # Division by amp as in cryoSBI removed - images are normalized after
     ctf = ctf * envelope
    

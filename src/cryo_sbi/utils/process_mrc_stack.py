@@ -235,7 +235,8 @@ def process_mrc_stack(
     normalize='per_particle',
     voxel_size=None,
     device='cuda',
-    max_size_gb=None
+    max_size_gb=None,
+    stride=1
 ):
     """
     Process MRC particle stack: fix header and downsample.
@@ -282,11 +283,18 @@ def process_mrc_stack(
     print(f"✓ Loaded successfully: {msg}")
     print(f"  Shape: {data.shape} (nz={data.shape[0]}, ny={data.shape[1]}, nx={data.shape[2]})")
     print(f"  Dtype: {data.dtype}")
-    print(f"  Range: [{data.min():.3f}, {data.max():.3f}]")
-    print(f"  Mean: {data.mean():.3f}, Std: {data.std():.3f}")
+    #print(f"  Range: [{data.min():.3f}, {data.max():.3f}]")
+    #print(f"  Mean: {data.mean():.3f}, Std: {data.std():.3f}")
     
     nz, ny, nx = data.shape
-    
+
+    # Select particle indices based on stride
+    particle_indices = np.arange(0, nz, stride)
+    n_output_particles = len(particle_indices)
+
+    print(f"  Stride: {stride} (reading every {stride} particle(s))")
+    print(f"  Output particles: {n_output_particles} / {nz}")
+
     # Determine voxel size
     if voxel_size is None:
         try:
@@ -305,10 +313,10 @@ def process_mrc_stack(
     print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
     
     # Prepare output array
-    print(f"\n⚙️  Processing {nz} particles...")
+    print(f"\n⚙️  Processing {n_output_particles} particles (stride={stride})...")
     print(f"  Batch size: {batch_size}")
     print(f"  Target size: {target_size}x{target_size}")
-    
+
     # Explain normalization
     if normalize == 'per_particle':
         print(f"  Normalization: Per-particle Z-score (each particle: mean=0, std=1)")
@@ -316,8 +324,8 @@ def process_mrc_stack(
         print(f"  Normalization: Global Z-score (all particles normalized by same mean/std)")
     else:
         print(f"  Normalization: None (original values preserved)")
-    
-    processed_data = np.zeros((nz, target_size, target_size), dtype=np.float32)
+   
+    processed_data = np.zeros((n_output_particles, target_size, target_size), dtype=np.float32)
     
     # For global normalization, we need to collect all data first or compute statistics
     if normalize == 'global':
@@ -327,13 +335,16 @@ def process_mrc_stack(
         print(f"    Global mean: {global_mean:.3f}, Global std: {global_std:.3f}")
     
     # Process in batches
-    n_batches = (nz + batch_size - 1) // batch_size
-    
-    with tqdm(total=nz, desc="Processing", unit="particles") as pbar:
-        for i in range(0, nz, batch_size):
-            end_idx = min(i + batch_size, nz)
-            batch = data[i:end_idx]
+    n_batches = (n_output_particles + batch_size - 1) // batch_size
+  
+    with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
+        for i in range(0, n_output_particles, batch_size):
+            end_idx = min(i + batch_size, n_output_particles)
             
+            # GET BATCH USING STRIDE INDICES
+            batch_indices = particle_indices[i:end_idx]
+            batch = data[batch_indices]
+
             # Convert to torch tensor and move to GPU
             batch_tensor = torch.from_numpy(batch.astype(np.float32)).to(device)
             
@@ -376,7 +387,6 @@ def process_mrc_stack(
             mrc.update_header_stats()
             
             print(f"✓ File written successfully")
-            print(f"  Output size: {output_path.stat().st_size / 1e6:.2f} MB")
             
     except Exception as e:
         print(f"❌ Failed to write MRC: {str(e)}")
@@ -429,8 +439,8 @@ Examples:
   # No normalization (preserve original values)
   python process_mrc_stack.py input.mrc output.mrc 128 --normalize none
   
-  # Global normalization
-  python process_mrc_stack.py input.mrc output.mrc 64 --normalize global
+  # Read every 2nd particle (stride=2)
+  python process_mrc_stack.py input.mrc output.mrc 128 --stride 2
   
   # With custom parameters
   python process_mrc_stack.py input.mrc output.mrc 64 --batch-size 64 --voxel-size 1.5
@@ -451,6 +461,8 @@ Examples:
                        help='Normalization method (default: per_particle)')
     parser.add_argument('--voxel-size', type=float, default=None,
                        help='Pixel size in Angstroms (default: read from header)')
+    parser.add_argument('--stride', type=int, default=1,
+                       help='Read every Nth particle (default: 1, read all)')
     parser.add_argument('--device', type=str, default='cuda',
                        choices=['cuda', 'cpu'],
                        help='Device to use (default: cuda)')
@@ -467,6 +479,10 @@ Examples:
     if args.size <= 0 or args.size > 2048:
         print(f"❌ Error: Invalid output size: {args.size} (must be 1-2048)")
         sys.exit(1)
+
+    if args.stride < 1:
+        print(f"❌ Error: Invalid stride: {args.stride} (must be >= 1)")
+        sys.exit(1)
     
     # Process
     success = process_mrc_stack(
@@ -477,8 +493,9 @@ Examples:
         normalize=args.normalize,
         voxel_size=args.voxel_size,
         device=args.device,
-        max_size_gb=args.max_size_gb
-    )
+        max_size_gb=args.max_size_gb,
+        stride=args.stride
+   )
     
     sys.exit(0 if success else 1)
 

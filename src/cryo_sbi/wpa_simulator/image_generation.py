@@ -2,31 +2,42 @@ import numpy as np
 import torch
 
 def gen_rot_matrix(quats: torch.Tensor) -> torch.Tensor:
-    # TODO add docstring explaining the quaternion convention qr, qx, qy, qz
     """
-    Generate a rotation matrix from a quaternion.
+    Generate rotation matrices from quaternions
+
+    Quaternion convention: [qw, qx, qy, qz] where qw is the real/scalar part
+    and (qx, qy, qz) is the imaginary/vector part.
 
     Args:
-        quat (torch.Tensor): Quaternion (n_batch, 4)
+        quats (torch.Tensor): Quaternions of shape (n_batch, 4)
+                             Convention: [qw, qx, qy, qz]
 
     Returns:
-        rot_matrix (torch.Tensor): Rotation matrix
+        rot_matrix (torch.Tensor): Rotation matrices of shape (n_batch, 3, 3)
     """
-
-    rot_matrix = torch.zeros((quats.shape[0], 3, 3), device=quats.device)
-
-    rot_matrix[:, 0, 0] = 1 - 2 * (quats[:, 2] ** 2 + quats[:, 3] ** 2)
-    rot_matrix[:, 0, 1] = 2 * (quats[:, 1] * quats[:, 2] - quats[:, 3] * quats[:, 0])
-    rot_matrix[:, 0, 2] = 2 * (quats[:, 1] * quats[:, 3] + quats[:, 2] * quats[:, 0])
-
-    rot_matrix[:, 1, 0] = 2 * (quats[:, 1] * quats[:, 2] + quats[:, 3] * quats[:, 0])
-    rot_matrix[:, 1, 1] = 1 - 2 * (quats[:, 1] ** 2 + quats[:, 3] ** 2)
-    rot_matrix[:, 1, 2] = 2 * (quats[:, 2] * quats[:, 3] - quats[:, 1] * quats[:, 0])
-
-    rot_matrix[:, 2, 0] = 2 * (quats[:, 1] * quats[:, 3] - quats[:, 2] * quats[:, 0])
-    rot_matrix[:, 2, 1] = 2 * (quats[:, 2] * quats[:, 3] + quats[:, 1] * quats[:, 0])
-    rot_matrix[:, 2, 2] = 1 - 2 * (quats[:, 1] ** 2 + quats[:, 2] ** 2)
-
+    # Extract quaternion components
+    qw, qx, qy, qz = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+    
+    # Precompute squared terms (each computed once)
+    qx2 = qx ** 2
+    qy2 = qy ** 2
+    qz2 = qz ** 2
+    
+    # Precompute products
+    qxqy = qx * qy
+    qxqz = qx * qz
+    qyqz = qy * qz
+    qwqx = qw * qx
+    qwqy = qw * qy
+    qwqz = qw * qz
+    
+    # Build rotation matrix using stack (single operation)
+    rot_matrix = torch.stack([
+        torch.stack([1 - 2 * (qy2 + qz2), 2 * (qxqy - qwqz), 2 * (qxqz + qwqy)], dim=1),
+        torch.stack([2 * (qxqy + qwqz), 1 - 2 * (qx2 + qz2), 2 * (qyqz - qwqx)], dim=1),
+        torch.stack([2 * (qxqz - qwqy), 2 * (qyqz + qwqx), 1 - 2 * (qx2 + qy2)], dim=1)
+    ], dim=1)
+    
     return rot_matrix
 
 
@@ -35,45 +46,66 @@ def project_density(
     quats: torch.Tensor,
     sigma: torch.Tensor,
     shift: torch.Tensor,
-    num_pixels: int,
-    pixel_size: float,
+    num_pixels: torch.Tensor,
+    pixel_size: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Generate a 2D projections from a set of coordinates.
+    Generate 2D projections from a set of 3D coordinates
+
+    Projects 3D atomic coordinates onto a 2D plane after rotation, where each atom
+    is represented as a Gaussian with standard deviation sigma. The projection is
+    computed on a regular grid.
 
     Args:
-        coords (torch.Tensor): Coordinates of the atoms in the images
-        sigma (float): Standard deviation of the Gaussian function used to model electron density.
-        num_pixels (int): Number of pixels along one image size.
-        pixel_size (float): Pixel size in Angstrom
+        coords (torch.Tensor): Coordinates of shape (num_batch, 3, num_atoms)
+        quats (torch.Tensor): Quaternions of shape (num_batch, 4) defining rotations
+        sigma (torch.Tensor): Standard deviation of Gaussian (can be scalar or per-batch)
+        shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
+        num_pixels (torch.Tensor): Number of pixels along one image dimension
+        pixel_size (torch.Tensor): Pixel size in Angstrom
 
     Returns:
-        image (torch.Tensor): Images generated from the coordinates
+        image (torch.Tensor): Projected images of shape (num_batch, num_pixels, num_pixels)
     """
-
     num_batch, _, num_atoms = coords.shape
-    norm = 1 / (2 * torch.pi * sigma**2 * num_atoms)
+    
+    # Precompute normalization factor
+    norm = 1.0 / (2 * torch.pi * sigma**2 * num_atoms)
 
+    # Convert num_pixels to int
+    num_pixels = int(num_pixels.item())
+   
+    # Create grid using linspace
     grid_min = -pixel_size * num_pixels * 0.5
     grid_max = pixel_size * num_pixels * 0.5
-
+    grid = torch.linspace(grid_min, grid_max - pixel_size, num_pixels, 
+                         device=coords.device, dtype=coords.dtype)
+    
+    # Generate rotation matrices
     rot_matrix = gen_rot_matrix(quats)
-    grid = torch.arange(grid_min, grid_max, pixel_size, device=coords.device)[
-        0 : num_pixels.long()
-    ].repeat(
-        num_batch, 1
-    )  # [0: num_pixels.long()] is needed due to single precision error in some cases
-
+    
+    # Apply rotation to coordinates
     coords_rot = torch.bmm(rot_matrix, coords)
-    coords_rot[:, :2, :] += shift.unsqueeze(-1)
-
-    gauss_x = torch.exp_(
-        -0.5 * (((grid.unsqueeze(-1) - coords_rot[:, 0, :].unsqueeze(1)) / sigma) ** 2)
-    )
-    gauss_y = torch.exp_(
-        -0.5 * (((grid.unsqueeze(-1) - coords_rot[:, 1, :].unsqueeze(1)) / sigma) ** 2)
-    ).transpose(1, 2)
-
-    image = torch.bmm(gauss_x, gauss_y) * norm.reshape(-1, 1, 1)
-
+    
+    # Apply shift to x and y coordinates
+    coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
+    
+    # Precompute -0.5 / sigma^2 for Gaussian
+    gauss_coeff = -0.5 / (sigma ** 2)
+    
+    # Compute Gaussian in x direction
+    # Shape: (num_batch, num_pixels, num_atoms)
+    dx = grid.unsqueeze(0).unsqueeze(-1) - coords_rot[:, 0, :].unsqueeze(1)
+    gauss_x = torch.exp(gauss_coeff.view(-1, 1, 1) * dx ** 2)
+    
+    # Compute Gaussian in y direction
+    # Shape: (num_batch, num_atoms, num_pixels)
+    dy = grid.unsqueeze(0).unsqueeze(0) - coords_rot[:, 1, :].unsqueeze(-1)
+    gauss_y = torch.exp(gauss_coeff.view(-1, 1, 1) * dy ** 2)
+    
+    # Matrix multiplication to get 2D projection
+    # (num_batch, num_pixels, num_atoms) @ (num_batch, num_atoms, num_pixels)
+    # -> (num_batch, num_pixels, num_pixels)
+    image = torch.bmm(gauss_x, gauss_y) * norm.view(-1, 1, 1)
+    
     return image

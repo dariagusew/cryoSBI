@@ -33,14 +33,14 @@ def cryo_em_simulator(
         models (torch.Tensor): A tensor of coars grained models (num_models, 3, num_beads).
         index (torch.Tensor): A tensor of indices to select the models to simulate.
         quaternion (torch.Tensor): A tensor of quaternions to rotate the models.
-        sigma (float): The standard deviation of the Gaussian kernel used to project the density.
+        sigma (torch.Tensor): The standard deviation of the Gaussian kernel used to project the density.
         shift (torch.Tensor): A tensor of shifts to apply to the models.
-        defocus (float): The defocus value of the contrast transfer function (CTF).
-        b_factor (float): The B-factor of the CTF.
-        amp (float): The amplitude contrast of the CTF.
-        snr (float): The signal-to-noise ratio of the simulated image.
-        num_pixels (int): The number of pixels in the simulated image.
-        pixel_size (float): The size of each pixel in the simulated image.
+        defocus (torch.Tensor): The defocus value of the contrast transfer function (CTF).
+        b_factor (torch.Tensor): The B-factor of the CTF.
+        amp (torch.Tensor): The amplitude contrast of the CTF.
+        snr (torch.Tensor): The signal-to-noise ratio of the simulated image.
+        num_pixels (torch.Tensor): The number of pixels in the simulated image.
+        pixel_size (torch.Tensor): The size of each pixel in the simulated image.
         voltage (float): Electron voltage in kV
         cs (float): Spherical aberration in mm
 

@@ -514,7 +514,9 @@ def pretrain_spatial_cryo(
             batch_size=simulation_batch_size, 
             num_workers=4
         )
-    
+        # create iterator
+        synthetic_iter = iter(synthetic_loader)
+ 
     # Setup real data if needed
     real_loader = None
     real_loader_iter = None
@@ -527,6 +529,7 @@ def pretrain_spatial_cryo(
                 batch_size=simulation_batch_size,
                 num_workers=4
             )
+            # create iterator
             real_loader_iter = iter(real_loader)
         except Exception as e:
             print(f"❌ Error loading real images: {e}")
@@ -601,13 +604,6 @@ def pretrain_spatial_cryo(
     
     # Training loop
     print("\nStarting training...\n")
-
-    # Set loaders 
-    if training_mode in ['synthetic', 'mixed']:
-        synthetic_iter = iter(synthetic_loader)
-   
-    if training_mode in ['real', 'mixed']:
-        real_loader_iter = iter(real_loader)
 
     with tqdm(range(epochs), desc="Pretraining") as tq:
         for epoch in tq:

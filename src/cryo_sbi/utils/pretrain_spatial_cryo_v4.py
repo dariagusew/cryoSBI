@@ -37,6 +37,7 @@ from tqdm import tqdm
 from itertools import islice
 from torch.autograd import Function
 from torch.utils.data import Dataset, DataLoader
+from pathlib import Path
 
 try:
     import mrcfile

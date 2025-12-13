@@ -1,29 +1,44 @@
 """
-pretrain_spatial_cryo_v4.py
+pretrain_spatial_cryo_v5.py
 
-Unsupervised pre-training of SPATIAL_CRYO encoder.
-- Mode 1 (no real images): Reconstruction only (like v3)
-- Mode 2 (with real images): Reconstruction + Domain adaptation
+Simplified unsupervised pre-training of SPATIAL_CRYO encoder.
+Supports 3 training modes:
+- 'synthetic': Train on simulated images only
+- 'real': Train on real images only  
+- 'mixed': Train on both (50/50 mix)
 
-Usage (reconstruction only):
+Can resume from checkpoint for fine-tuning with different data mix.
+
+Usage (train on synthetic):
     python pretrain_spatial_cryo.py \
         --image_config config.json \
+        --training_mode synthetic \
         --embedding SPATIAL_CRYO_FFT_FILTER \
         --embedding_dim 256 \
         --epochs 100 \
-        --batch_size 512 \
-        --simulation_batch_size 1024
+        --batch_size 512
 
-Usage (with domain adaptation):
+Usage (fine-tune on real):
     python pretrain_spatial_cryo.py \
         --image_config config.json \
+        --training_mode real \
+        --real_images real_data.mrc \
+        --resume_from pretrained_spatial_cryo_full_model.pt \
+        --embedding SPATIAL_CRYO_FFT_FILTER \
+        --embedding_dim 256 \
+        --epochs 20 \
+        --batch_size 512 \
+        --lr 1e-4
+
+Usage (train on mixed):
+    python pretrain_spatial_cryo.py \
+        --image_config config.json \
+        --training_mode mixed \
         --real_images real_data.mrc \
         --embedding SPATIAL_CRYO_FFT_FILTER \
         --embedding_dim 256 \
         --epochs 100 \
-        --batch_size 512 \
-        --simulation_batch_size 1024 \
-        --lambda_domain 0.1
+        --batch_size 512
 """
 
 import argparse
@@ -35,7 +50,6 @@ import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
 from itertools import islice
-from torch.autograd import Function
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 
@@ -161,85 +175,6 @@ def open_mrc_robust(filepath, max_size_gb=None):
 
 
 # ============================================================================
-# GRADIENT REVERSAL LAYER
-# ============================================================================
-
-class GradientReversalFunction(Function):
-    """
-    Gradient Reversal Layer (GRL)
-    Forward: identity
-    Backward: multiply gradient by -lambda
-    """
-    @staticmethod
-    def forward(ctx, x, lambda_):
-        ctx.lambda_ = lambda_
-        return x.view_as(x)
-    
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.neg() * ctx.lambda_, None
-
-
-class GradientReversalLayer(nn.Module):
-    """Gradient reversal layer for domain adversarial training"""
-    def __init__(self, lambda_=1.0):
-        super().__init__()
-        self.lambda_ = lambda_
-    
-    def forward(self, x):
-        return GradientReversalFunction.apply(x, self.lambda_)
-    
-    def set_lambda(self, lambda_):
-        """Dynamically adjust reversal strength during training"""
-        self.lambda_ = lambda_
-
-
-# ============================================================================
-# DOMAIN DISCRIMINATOR
-# ============================================================================
-
-class DomainDiscriminator(nn.Module):
-    """
-    Discriminates between synthetic and real embeddings
-    Binary classifier: 0 = synthetic, 1 = real
-    """
-    def __init__(self, embedding_dim=128, hidden_dim=256, dropout=0.2):
-        super().__init__()
-        
-        self.grl = GradientReversalLayer(lambda_=1.0)
-        
-        self.network = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Dropout(dropout),
-            
-            nn.Linear(hidden_dim, 1)  # Binary output
-        )
-    
-    def forward(self, embedding, reverse_gradient=True):
-        """
-        Args:
-            embedding: [B, embedding_dim]
-            reverse_gradient: whether to apply gradient reversal
-        Returns:
-            logits: [B, 1] (0=synthetic, 1=real)
-        """
-        if reverse_gradient:
-            embedding = self.grl(embedding)
-        return self.network(embedding)
-    
-    def set_lambda(self, lambda_):
-        """Adjust gradient reversal strength"""
-        self.grl.set_lambda(lambda_)
-
-
-# ============================================================================
 # DECODER
 # ============================================================================
 
@@ -324,17 +259,16 @@ class SpatialCryoDecoder(nn.Module):
 # MODEL WRAPPER
 # ============================================================================
 
-class AdaptivePretrainModel(nn.Module):
+class SpatialCryoPretrainModel(nn.Module):
     """
-    SPATIAL_CRYO encoder + decoder + optional domain discriminator
+    SPATIAL_CRYO encoder + decoder for pretraining
     """
-    def __init__(self, embedding_name, embedding_dim, image_size, use_domain_adaptation=False):
+    def __init__(self, embedding_name, embedding_dim, image_size):
         super().__init__()
         
         self.embedding_name = embedding_name
         self.embedding_dim = embedding_dim
         self.image_size = image_size
-        self.use_domain_adaptation = use_domain_adaptation
         
         # Create encoder
         if embedding_name not in EMBEDDING_NETS:
@@ -348,37 +282,18 @@ class AdaptivePretrainModel(nn.Module):
         
         print(f"  Encoder: {embedding_name} (D={image_size})")
         print(f"  Decoder: SpatialCryoDecoder (symmetric)")
-        
-        if use_domain_adaptation:
-            self.discriminator = DomainDiscriminator(embedding_dim, hidden_dim=256, dropout=0.2)
-            print(f"  Discriminator: DomainDiscriminator (domain adaptation)")
-        else:
-            self.discriminator = None
-            print(f"  Discriminator: None (reconstruction only)")
     
-    def forward(self, x, return_domain_pred=False):
+    def forward(self, x):
         """
         Args:
             x: [B, H, W]
-            return_domain_pred: whether to return domain prediction
         Returns:
             embeddings: [B, embedding_dim]
             reconstruction: [B, 1, H, W]
-            domain_pred: [B, 1] (if return_domain_pred=True and discriminator exists)
         """
         embeddings = self.encoder(x)
         reconstruction = self.decoder(embeddings)
-        
-        if return_domain_pred and self.discriminator is not None:
-            domain_pred = self.discriminator(embeddings, reverse_gradient=True)
-            return embeddings, reconstruction, domain_pred
-        
         return embeddings, reconstruction
-    
-    def set_grl_lambda(self, lambda_):
-        """Adjust gradient reversal strength"""
-        if self.discriminator is not None:
-            self.discriminator.set_lambda(lambda_)
 
 
 # ============================================================================
@@ -447,10 +362,10 @@ class RealImageMRCDataset(Dataset):
     
     def __del__(self):
         """Clean up MRC file reference"""
-        # If mrc_data is a memmap or file handle, ensure it's properly closed
         if hasattr(self, 'mrc_data'):
             if isinstance(self.mrc_data, np.memmap):
                 del self.mrc_data
+
 
 def create_real_image_loader(mrc_path, batch_size=1024, num_workers=4):
     """
@@ -469,10 +384,10 @@ def create_real_image_loader(mrc_path, batch_size=1024, num_workers=4):
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,  # Random sampling
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
-        drop_last=True  # Ensure consistent batch sizes
+        drop_last=True
     )
     
     return dataloader
@@ -504,17 +419,12 @@ def count_parameters(model):
     encoder = sum(p.numel() for p in model.encoder.parameters())
     decoder = sum(p.numel() for p in model.decoder.parameters())
     
-    result = {
+    return {
         'total': total,
         'trainable': trainable,
         'encoder': encoder,
-        'decoder': decoder,
+        'decoder': decoder
     }
-    
-    if model.discriminator is not None:
-        result['discriminator'] = sum(p.numel() for p in model.discriminator.parameters())
-    
-    return result
 
 
 # ============================================================================
@@ -523,7 +433,9 @@ def count_parameters(model):
 
 def pretrain_spatial_cryo(
     image_config_path: str,
+    training_mode: str = 'synthetic',  # 'synthetic', 'real', or 'mixed'
     real_images_path: str = None,
+    resume_from: str = None,
     embedding_name: str = 'SPATIAL_CRYO_FFT_FILTER',
     device: str = 'cuda',
     embedding_dim: int = 128,
@@ -535,14 +447,15 @@ def pretrain_spatial_cryo(
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
     l2_weight: float = 0.0,
-    lambda_domain: float = 0.1,
 ):
     """
-    Unsupervised pre-training with optional domain adaptation
+    Unsupervised pre-training with flexible data sources
     
     Args:
         image_config_path: Path to image config JSON
-        real_images_path: Path to real images MRC file (optional, None = no domain adaptation)
+        training_mode: 'synthetic', 'real', or 'mixed'
+        real_images_path: Path to real images MRC file (required if mode='real' or 'mixed')
+        resume_from: Path to full model checkpoint to resume from (optional)
         embedding_name: Name of embedding architecture
         device: 'cuda', 'cuda:0', 'cuda:1', or 'cpu'
         embedding_dim: Output dimension of embedding
@@ -554,41 +467,59 @@ def pretrain_spatial_cryo(
         check_frequency: How often to print detailed stats
         n_batches_per_epoch: Number of simulation batches per epoch
         l2_weight: Weight for L2 regularization on embeddings
-        lambda_domain: Weight for domain adversarial loss (only used if real_images_path provided)
     
     Returns:
         model: Trained model
         final_loss: Final total loss
     """
     
-    use_domain_adaptation = real_images_path is not None
+    # Validate training mode
+    if training_mode not in ['synthetic', 'real', 'mixed']:
+        raise ValueError(f"training_mode must be 'synthetic', 'real', or 'mixed', got '{training_mode}'")
+    
+    if training_mode in ['real', 'mixed'] and real_images_path is None:
+        raise ValueError(f"training_mode='{training_mode}' requires --real_images")
     
     print("\n" + "="*70)
-    if use_domain_adaptation:
-        print(f"DOMAIN ADAPTIVE PRETRAINING: {embedding_name}")
-    else:
-        print(f"RECONSTRUCTION PRETRAINING: {embedding_name}")
+    print(f"PRETRAINING: {embedding_name}")
+    print(f"Training mode: {training_mode.upper()}")
+    if resume_from:
+        print(f"Resuming from: {resume_from}")
     print("="*70)
     
     # Load image config
     image_config = json.load(open(image_config_path))
     image_size = image_config["N_PIXELS"]
     
-    # Load conformational models
-    print("\nLoading conformational models...")
-    if image_config["MODEL_FILE"].endswith("npy"):
-        models = torch.from_numpy(np.load(image_config["MODEL_FILE"])).to(device).float()
-    else:
-        models = torch.load(image_config["MODEL_FILE"]).to(device).float()
+    # Setup synthetic data if needed
+    synthetic_loader = None
+    synthetic_iter = None
+    models = None
     
-    n_conformations = len(models)
-    print(f"  Number of conformations: {n_conformations}")
-    print(f"  Image size: {image_size}x{image_size}")
+    if training_mode in ['synthetic', 'mixed']:
+        print("\nLoading conformational models...")
+        if image_config["MODEL_FILE"].endswith("npy"):
+            models = torch.from_numpy(np.load(image_config["MODEL_FILE"])).to(device).float()
+        else:
+            models = torch.load(image_config["MODEL_FILE"]).to(device).float()
+        
+        n_conformations = len(models)
+        print(f"  Number of conformations: {n_conformations}")
+        print(f"  Image size: {image_size}x{image_size}")
+        
+        # Setup synthetic data generation
+        image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
+        synthetic_loader = PriorLoader(
+            image_prior, 
+            batch_size=simulation_batch_size, 
+            num_workers=4
+        )
     
-    # Load real images if provided
+    # Setup real data if needed
     real_loader = None
     real_loader_iter = None
-    if use_domain_adaptation:
+    
+    if training_mode in ['real', 'mixed']:
         print("\nLoading real images...")
         try:
             real_loader = create_real_image_loader(
@@ -599,23 +530,26 @@ def pretrain_spatial_cryo(
             real_loader_iter = iter(real_loader)
         except Exception as e:
             print(f"❌ Error loading real images: {e}")
-            print("Falling back to reconstruction-only mode")
-            use_domain_adaptation = False
-    else:
-        print("\nNo real images provided - reconstruction only mode")
+            return None, 0.0
     
-    # Build model
+    # Build or load model
     print(f"\nBuilding model with {embedding_name}...")
     try:
-        model = AdaptivePretrainModel(
+        model = SpatialCryoPretrainModel(
             embedding_name, 
             embedding_dim, 
-            image_size, 
-            use_domain_adaptation=use_domain_adaptation
+            image_size
         ).to(device)
     except ValueError as e:
         print(f"\n❌ Error: {e}")
         return None, 0.0
+    
+    # Load checkpoint if resuming
+    if resume_from:
+        print(f"\nLoading checkpoint from: {resume_from}")
+        checkpoint = torch.load(resume_from, map_location=device)
+        model.load_state_dict(checkpoint)
+        print("✅ Checkpoint loaded successfully")
     
     model.train()
     
@@ -631,56 +565,29 @@ def pretrain_spatial_cryo(
     print(f"  Total parameters: {params['total']:,}")
     print(f"  Encoder parameters: {params['encoder']:,}")
     print(f"  Decoder parameters: {params['decoder']:,}")
-    if 'discriminator' in params:
-        print(f"  Discriminator parameters: {params['discriminator']:,}")
     
-    # Setup optimizers
-    if use_domain_adaptation:
-        optimizer_main = optim.AdamW(
-            list(model.encoder.parameters()) + list(model.decoder.parameters()),
-            lr=lr, weight_decay=0.01
-        )
-        optimizer_discriminator = optim.AdamW(
-            model.discriminator.parameters(),
-            lr=lr * 2,  # Discriminator can learn faster
-            weight_decay=0.01
-        )
-    else:
-        optimizer_main = optim.AdamW(
-            model.parameters(),
-            lr=lr, weight_decay=0.01
-        )
-        optimizer_discriminator = None
+    # Setup optimizer
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
-    # Setup data generation
-    print("  Setting up data generation...")
-    image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
-    prior_loader = PriorLoader(
-        image_prior, 
-        batch_size=simulation_batch_size, 
-        num_workers=4
-    )
+    # Setup simulation parameters if needed
+    if training_mode in ['synthetic', 'mixed']:
+        num_pixels = torch.tensor(image_config["N_PIXELS"], dtype=torch.float32, device=device)
+        pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
+        voltage = image_config.get("VOLTAGE", 300.0)
+        cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
     
-    num_pixels = torch.tensor(image_config["N_PIXELS"], dtype=torch.float32, device=device)
-    pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
-    voltage = image_config.get("VOLTAGE", 300.0)
-    cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
- 
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
-    if use_domain_adaptation:
-        print(f"  Task: Reconstruction + Domain Adaptation")
-        print(f"  Domain adversarial weight: {lambda_domain}")
-    else:
-        print(f"  Task: Reconstruction Only")
+    print(f"  Training mode: {training_mode}")
     print(f"  L2 regularization weight: {l2_weight}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
-    print(f"  Simulation batch size: {simulation_batch_size}")
-    print(f"  Batches per epoch: {n_batches_per_epoch}")
-    print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
+    if training_mode in ['synthetic', 'mixed']:
+        print(f"  Simulation batch size: {simulation_batch_size}")
+        print(f"  Batches per epoch: {n_batches_per_epoch}")
+        print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
     print("="*70)
     
     # Training history
@@ -692,155 +599,94 @@ def pretrain_spatial_cryo(
         'emb_dist': []
     }
     
-    if use_domain_adaptation:
-        history['domain_loss'] = []
-        history['disc_loss'] = []
-        history['disc_accuracy'] = []
-    
     # Training loop
     print("\nStarting training...\n")
-    
+
+    # Set loaders 
+    if training_mode in ['synthetic', 'mixed']:
+        synthetic_iter = iter(synthetic_loader)
+   
+    if training_mode in ['real', 'mixed']:
+        real_loader_iter = iter(real_loader)
+
     with tqdm(range(epochs), desc="Pretraining") as tq:
         for epoch in tq:
-            
+
             model.train()
-            
-            # Adjust gradient reversal lambda (progressive schedule) if using domain adaptation
-            if use_domain_adaptation:
-                p = float(epoch) / epochs
-                lambda_grl = 2. / (1. + np.exp(-10 * p)) - 1
-                model.set_grl_lambda(lambda_grl)
-            
+
             epoch_loss = 0
             epoch_recon_loss = 0
             epoch_l2_loss = 0
-            epoch_domain_loss = 0
-            epoch_disc_loss = 0
-            epoch_disc_acc = 0
             n_batches = 0
-            
-            # Train on multiple simulation batches per epoch
-            for parameters in islice(prior_loader, n_batches_per_epoch):
-                (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
+ 
+            for batch_idx in range(n_batches_per_epoch):
                 
-                # Simulate images (inherently noisy from SNR)
-                images = cryo_em_simulator(
-                    models,
-                    indices.to(device, non_blocking=True),
-                    quaternions.to(device, non_blocking=True),
-                    res.to(device, non_blocking=True),
-                    shift.to(device, non_blocking=True),
-                    defocus.to(device, non_blocking=True),
-                    b_factor.to(device, non_blocking=True),
-                    amp.to(device, non_blocking=True),
-                    snr.to(device, non_blocking=True),
-                    num_pixels,
-                    pixel_size,
-                    voltage,
-                    cs
-                )
-
-                # Sample real images ONCE per simulation batch (if using domain adaptation)
-                if use_domain_adaptation:
+                # Get batch based on mode
+                if training_mode in ['synthetic', 'mixed']:
                     try:
-                        real_images_full = next(real_loader_iter)
+                        parameters = next(synthetic_iter)
+                    except StopIteration:
+                        synthetic_iter = iter(synthetic_loader)
+                        parameters = next(synthetic_iter)
+                    
+                    (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
+                    
+                    syn_images = cryo_em_simulator(
+                        models,
+                        indices.to(device, non_blocking=True),
+                        quaternions.to(device, non_blocking=True),
+                        res.to(device, non_blocking=True),
+                        shift.to(device, non_blocking=True),
+                        defocus.to(device, non_blocking=True),
+                        b_factor.to(device, non_blocking=True),
+                        amp.to(device, non_blocking=True),
+                        snr.to(device, non_blocking=True),
+                        num_pixels,
+                        pixel_size,
+                        voltage,
+                        cs
+                    )
+                
+                if training_mode in ['real', 'mixed']:
+                    try:
+                        real_images = next(real_loader_iter)
                     except StopIteration:
                         real_loader_iter = iter(real_loader)
-                        real_images_full = next(real_loader_iter)
+                        real_images = next(real_loader_iter)
                     
-                    real_images_full = real_images_full.to(device, non_blocking=True)
+                    real_images = real_images.to(device, non_blocking=True)
                 
-                # Split into mini-batches (with aligned synthetic/real pairs)
-                synthetic_batches = images.split(batch_size)
-                
-                if use_domain_adaptation:
-                    real_batches = real_images_full.split(batch_size)
-                else:
-                    real_batches = [None] * len(synthetic_batches)
-                
+                # Combine based on mode
+                if training_mode == 'synthetic':
+                    images = syn_images
+                elif training_mode == 'real':
+                    images = real_images
+                else:  # mixed
+                    # Mix 50/50
+                    half = len(syn_images) // 2
+                    images = torch.cat([syn_images[:half], real_images[:half]], dim=0)
+               
                 # Train on mini-batches
-                for batch_images, real_images in zip(synthetic_batches, real_batches):
+                for batch_images in images.split(batch_size):
                     
-                    if use_domain_adaptation:
-                        # ==========================================
-                        # Phase 1: Update discriminator
-                        # ==========================================
-                        optimizer_discriminator.zero_grad()
-                        
-                        # Encode both domains (stop gradient to encoder)
-                        with torch.no_grad():
-                            emb_syn = model.encoder(batch_images)
-                            emb_real = model.encoder(real_images)
-                        
-                        # Discriminator predictions (no gradient reversal)
-                        pred_syn = model.discriminator(emb_syn, reverse_gradient=False)
-                        pred_real = model.discriminator(emb_real, reverse_gradient=False)
-                        
-                        # Labels: 0 = synthetic, 1 = real
-                        labels_syn = torch.zeros_like(pred_syn)
-                        labels_real = torch.ones_like(pred_real)
-                        
-                        # Discriminator loss
-                        disc_loss = (
-                            F.binary_cross_entropy_with_logits(pred_syn, labels_syn) +
-                            F.binary_cross_entropy_with_logits(pred_real, labels_real)
-                        ) / 2
-                        
-                        disc_loss.backward()
-                        optimizer_discriminator.step()
-                        
-                        # Discriminator accuracy
-                        disc_acc = (
-                            ((pred_syn < 0).float().mean() +  # Correct if < 0 (synthetic)
-                             (pred_real > 0).float().mean())  # Correct if > 0 (real)
-                        ) / 2
+                    optimizer.zero_grad()
                     
-                    # ==========================================
-                    # Phase 2: Update encoder + decoder
-                    # ==========================================
-                    optimizer_main.zero_grad()
+                    # Forward pass
+                    embeddings, reconstruction = model(batch_images)
                     
-                    # Forward pass on synthetic (with reconstruction)
-                    embeddings_syn, reconstruction = model(batch_images, return_domain_pred=False)
-                    
-                    # Reconstruction loss (simple spatial MSE)
+                    # Reconstruction loss
                     recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
                     
-                    # L2 regularization on embeddings
-                    l2_loss = (embeddings_syn ** 2).mean()
+                    # L2 regularization
+                    l2_loss = (embeddings ** 2).mean()
                     
-                    # Total loss starts with reconstruction + L2
+                    # Total loss
                     loss = recon_loss + l2_weight * l2_loss
-                    
-                    # Add domain adversarial loss if using domain adaptation
-                    if use_domain_adaptation:
-                        # Forward pass for domain adaptation
-                        embeddings_syn_da = model.encoder(batch_images)
-                        embeddings_real = model.encoder(real_images)
-                        
-                        # Domain adversarial loss (with gradient reversal)
-                        domain_pred_syn = model.discriminator(embeddings_syn_da, reverse_gradient=True)
-                        domain_pred_real = model.discriminator(embeddings_real, reverse_gradient=True)
-                        
-                        # Encoder wants: synthetic predicted as real, real as synthetic
-                        domain_loss = (
-                            F.binary_cross_entropy_with_logits(
-                                domain_pred_syn, torch.ones_like(domain_pred_syn)
-                            ) +
-                            F.binary_cross_entropy_with_logits(
-                                domain_pred_real, torch.zeros_like(domain_pred_real)
-                            )
-                        ) / 2
-                        
-                        loss = loss + lambda_domain * domain_loss
-                        epoch_domain_loss += domain_loss.item()
-                        epoch_disc_loss += disc_loss.item()
-                        epoch_disc_acc += disc_acc.item()
                     
                     # Backward pass
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    optimizer_main.step()
+                    optimizer.step()
                     
                     # Track metrics
                     epoch_loss += loss.item()
@@ -858,27 +704,11 @@ def pretrain_spatial_cryo(
             history['l2_loss'].append(avg_l2_loss)
             
             # Update progress bar
-            if use_domain_adaptation:
-                avg_domain_loss = epoch_domain_loss / n_batches
-                avg_disc_loss = epoch_disc_loss / n_batches
-                avg_disc_acc = epoch_disc_acc / n_batches
-                
-                history['domain_loss'].append(avg_domain_loss)
-                history['disc_loss'].append(avg_disc_loss)
-                history['disc_accuracy'].append(avg_disc_acc)
-                
-                tq.set_postfix(
-                    loss=f"{avg_loss:.6f}",
-                    recon=f"{avg_recon_loss:.6f}",
-                    domain=f"{avg_domain_loss:.6f}",
-                    disc_acc=f"{avg_disc_acc:.3f}"
-                )
-            else:
-                tq.set_postfix(
-                    loss=f"{avg_loss:.6f}",
-                    recon=f"{avg_recon_loss:.6f}",
-                    l2=f"{avg_l2_loss:.4f}"
-                )
+            tq.set_postfix(
+                loss=f"{avg_loss:.6f}",
+                recon=f"{avg_recon_loss:.6f}",
+                l2=f"{avg_l2_loss:.4f}"
+            )
             
             # Detailed check every N epochs
             if epoch % check_frequency == 0:
@@ -890,7 +720,6 @@ def pretrain_spatial_cryo(
                     
                     emb_std, emb_dist = check_embedding_health(test_embs, device)
                     recon_error = F.mse_loss(test_recon.squeeze(1), test_imgs).item()
-                    test_l2 = (test_embs ** 2).mean().item()
                 
                 history['emb_std'].append(emb_std)
                 history['emb_dist'].append(emb_dist)
@@ -899,29 +728,22 @@ def pretrain_spatial_cryo(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
-                
-                if use_domain_adaptation:
-                    print(f"    Domain loss: {avg_domain_loss:.6f}")
-                    print(f"    Disc loss: {avg_disc_loss:.6f}")
-                    print(f"    Disc accuracy: {avg_disc_acc:.3f}")
-                    print(f"    GRL lambda: {lambda_grl:.3f}")
-                
                 print(f"    Reconstruction error (test): {recon_error:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
                 
                 model.train()
+
     
-    # Final embedding health check (ensure we have final epoch values)
+    # Final embedding health check
     print("\nComputing final embedding statistics...")
     model.eval()
     with torch.no_grad():
-        # Use synthetic images for final evaluation
         test_imgs = batch_images[:20]
         final_embs, final_recon = model(test_imgs)
         final_emb_std, final_emb_dist = check_embedding_health(final_embs, device)
     
-    # Update history with final values (if last epoch wasn't checked)
+    # Update history with final values
     if not history['emb_std'] or (epochs - 1) % check_frequency != 0:
         history['emb_std'].append(final_emb_std)
         history['emb_dist'].append(final_emb_dist)
@@ -938,30 +760,14 @@ def pretrain_spatial_cryo(
     
     print(f"\nFinal metrics:")
     print(f"  Embedding: {embedding_name}")
+    print(f"  Training mode: {training_mode}")
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     
-    if use_domain_adaptation:
-        final_domain = history['domain_loss'][-1]
-        final_disc_acc = history['disc_accuracy'][-1]
-        print(f"  Domain loss: {final_domain:.6f}")
-        print(f"  Discriminator accuracy: {final_disc_acc:.3f}")
-    
     # Quality assessment
     print("\nQuality assessment:")
-    
-    # Domain adaptation (only if used)
-    if use_domain_adaptation:
-        if final_disc_acc > 0.8:
-            print("  ❌ WARNING: Discriminator too strong (encoder not fooling it)")
-        elif final_disc_acc < 0.45:
-            print("  ❌ WARNING: Discriminator collapsed (too weak)")
-        elif 0.5 <= final_disc_acc <= 0.7:
-            print("  ✅ Excellent domain adaptation (discriminator confused)")
-        else:
-            print("  🟡 Moderate domain adaptation")
     
     # Reconstruction
     if final_recon > 0.1:
@@ -998,27 +804,21 @@ def pretrain_spatial_cryo(
     torch.save(model.encoder.state_dict(), save_path)
     print(f"✅ Encoder weights: {save_path}")
     
-    # Save full model (including decoder and discriminator)
+    # Save full model (encoder+decoder)
     full_model_path = save_path.replace('.pt', '_full_model.pt')
     torch.save(model.state_dict(), full_model_path)
-    if use_domain_adaptation:
-        print(f"✅ Full model (encoder+decoder+discriminator): {full_model_path}")
-    else:
-        print(f"✅ Full model (encoder+decoder): {full_model_path}")
+    print(f"✅ Full model (encoder+decoder): {full_model_path}")
     
     # Save training history
     history_path = save_path.replace('.pt', '_history.pt')
     history['embedding_name'] = embedding_name
     history['embedding_dim'] = embedding_dim
     history['image_size'] = image_size
+    history['training_mode'] = training_mode
     history['encoder_params'] = params['encoder']
     history['decoder_params'] = params['decoder']
-    if 'discriminator' in params:
-        history['discriminator_params'] = params['discriminator']
     history['l2_weight'] = l2_weight
-    history['use_domain_adaptation'] = use_domain_adaptation
-    if use_domain_adaptation:
-        history['lambda_domain'] = lambda_domain
+    history['resumed_from'] = resume_from
     torch.save(history, history_path)
     print(f"✅ Training history: {history_path}")
     
@@ -1033,16 +833,25 @@ def pretrain_spatial_cryo(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Adaptive pre-training for SPATIAL_CRYO encoder (with optional domain adaptation)'
+        description='Pre-training for SPATIAL_CRYO encoder'
     )
     
     # Required arguments
     parser.add_argument('--image_config', type=str, required=True,
                        help='Path to image config JSON')
     
-    # Optional real images for domain adaptation
+    # Training mode
+    parser.add_argument('--training_mode', type=str, default='synthetic',
+                       choices=['synthetic', 'real', 'mixed'],
+                       help='Training mode: synthetic, real, or mixed (default: synthetic)')
+    
+    # Real images (required for 'real' and 'mixed' modes)
     parser.add_argument('--real_images', type=str, default=None,
-                       help='Path to real images MRC file (optional, enables domain adaptation)')
+                       help='Path to real images MRC file (required for real/mixed modes)')
+    
+    # Resume from checkpoint
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to full model checkpoint to resume training from')
     
     # Embedding architecture
     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO_FFT_FILTER',
@@ -1060,8 +869,6 @@ def main():
                        help='Embedding dimension (default: 256)')
     parser.add_argument('--l2_weight', type=float, default=0.0,
                        help='L2 regularization weight on embeddings (default: 0.0)')
-    parser.add_argument('--lambda_domain', type=float, default=0.1,
-                       help='Domain adversarial loss weight (default: 0.1, only used with --real_images)')
     
     # Output arguments
     parser.add_argument('--output', type=str, default='pretrained_spatial_cryo.pt',
@@ -1099,18 +906,22 @@ def main():
             if torch.cuda.is_available():
                 print(f"   GPU: {torch.cuda.get_device_name(args.device)}")
     
-    # Validate real_images if provided
-    if args.real_images is not None:
-        if not MRCFILE_AVAILABLE:
-            print(f"❌ ERROR: --real_images provided but mrcfile not installed!")
-            print(f"   Install with: pip install mrcfile")
-            print(f"   Falling back to reconstruction-only mode")
-            args.real_images = None
+    # Validate training mode requirements
+    if args.training_mode in ['real', 'mixed'] and args.real_images is None:
+        print(f"❌ ERROR: --training_mode={args.training_mode} requires --real_images")
+        return 1
+    
+    if args.real_images is not None and not MRCFILE_AVAILABLE:
+        print(f"❌ ERROR: --real_images provided but mrcfile not installed!")
+        print(f"   Install with: pip install mrcfile")
+        return 1
     
     # Run pretraining
     model, final_loss = pretrain_spatial_cryo(
         image_config_path=args.image_config,
+        training_mode=args.training_mode,
         real_images_path=args.real_images,
+        resume_from=args.resume_from,
         embedding_name=args.embedding,
         device=args.device,
         embedding_dim=args.embedding_dim,
@@ -1122,22 +933,14 @@ def main():
         n_batches_per_epoch=args.batches_per_epoch,
         check_frequency=args.check_frequency,
         l2_weight=args.l2_weight,
-        lambda_domain=args.lambda_domain,
     )
     
     if model is None:
         return 1
     
-    if args.real_images is not None:
-        print(f"\n✅ Domain-adaptive pre-training complete!")
-        print(f"   Architecture: {args.embedding}")
-        print(f"   Mode: Reconstruction + Domain Adaptation")
-        print(f"   Domain adversarial weight: {args.lambda_domain}")
-    else:
-        print(f"\n✅ Reconstruction pre-training complete!")
-        print(f"   Architecture: {args.embedding}")
-        print(f"   Mode: Reconstruction Only")
-    
+    print(f"\n✅ Pre-training complete!")
+    print(f"   Architecture: {args.embedding}")
+    print(f"   Training mode: {args.training_mode}")
     print(f"   Final loss: {final_loss:.6f}")
     print(f"   Encoder weights saved to: {args.output}")
     
@@ -1146,3 +949,4 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+

@@ -402,12 +402,18 @@ class RealImageMRCDataset(Dataset):
         self.mrc_path = mrc_path
         self.cache_size = cache_size
         
-        # Open MRC to get metadata
-        mrc_data, success, method = open_mrc_robust(mrc_path)
- 
-        self.n_images = mrc_data.shape[0]
-        self.image_shape = mrc_data.shape[1:]
+        # Open MRC file ONCE and keep persistent reference
+        print(f"  Opening MRC file: {mrc_path}")
+        self.mrc_data, success, method = open_mrc_robust(mrc_path)
+        
+        if not success:
+            raise RuntimeError(f"Failed to open MRC file: {method}")
+        
+        self.n_images = self.mrc_data.shape[0]
+        self.image_shape = self.mrc_data.shape[1:]
+        
         print(f"  Loaded MRC: {self.n_images} images of shape {self.image_shape}")
+        print(f"  Loading method: {method}")
         
         # Cache for recently accessed images
         self.cache = {}
@@ -422,9 +428,8 @@ class RealImageMRCDataset(Dataset):
         if idx in self.cache:
             return self.cache[idx]
         
-        # Load from file
-        mrc_data, success, method = open_mrc_robust(self.mrc_path)
-        img = mrc_data[idx].astype(np.float32)
+        # Load from persistent MRC reference (no file opening!)
+        img = self.mrc_data[idx].astype(np.float32)
         
         # Normalize (zero mean, unit std)
         img = (img - img.mean()) / (img.std() + 1e-8)
@@ -439,7 +444,13 @@ class RealImageMRCDataset(Dataset):
         self.cache_order.append(idx)
         
         return self.cache[idx]
-
+    
+    def __del__(self):
+        """Clean up MRC file reference"""
+        # If mrc_data is a memmap or file handle, ensure it's properly closed
+        if hasattr(self, 'mrc_data'):
+            if isinstance(self.mrc_data, np.memmap):
+                del self.mrc_data
 
 def create_real_image_loader(mrc_path, batch_size=256, num_workers=4):
     """
@@ -715,20 +726,20 @@ def pretrain_spatial_cryo(
                 # Simulate images (inherently noisy from SNR)
                 images = cryo_em_simulator(
                     models,
-                    indices.to(device),
-                    quaternions.to(device),
-                    res.to(device),
-                    shift.to(device),
-                    defocus.to(device),
-                    b_factor.to(device),
-                    amp.to(device),
-                    snr.to(device),
+                    indices.to(device, non_blocking=True),
+                    quaternions.to(device, non_blocking=True),
+                    res.to(device, non_blocking=True),
+                    shift.to(device, non_blocking=True),
+                    defocus.to(device, non_blocking=True),
+                    b_factor.to(device, non_blocking=True),
+                    amp.to(device, non_blocking=True),
+                    snr.to(device, non_blocking=True),
                     num_pixels,
                     pixel_size,
                     voltage,
                     cs
                 )
-                
+
                 # Train on mini-batches
                 for batch_images in images.split(batch_size):
                     batch_images = batch_images.to(device)
@@ -741,7 +752,7 @@ def pretrain_spatial_cryo(
                             real_loader_iter = iter(real_loader)
                             real_images = next(real_loader_iter)
                         
-                        real_images = real_images.to(device)
+                        real_images = real_images.to(device, non_blocking=True)
                         
                         # Ensure same batch size
                         min_batch = min(len(batch_images), len(real_images))

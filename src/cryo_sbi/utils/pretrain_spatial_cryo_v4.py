@@ -593,7 +593,7 @@ def pretrain_spatial_cryo(
         try:
             real_loader = create_real_image_loader(
                 real_images_path, 
-                batch_size=batch_size,
+                batch_size=simulation_batch_size,
                 num_workers=4
             )
             real_loader_iter = iter(real_loader)
@@ -740,25 +740,28 @@ def pretrain_spatial_cryo(
                     cs
                 )
 
-                # Train on mini-batches
-                for batch_images in images.split(batch_size):
-                    batch_images = batch_images.to(device)
+                # Sample real images ONCE per simulation batch (if using domain adaptation)
+                if use_domain_adaptation:
+                    try:
+                        real_images_full = next(real_loader_iter)
+                    except StopIteration:
+                        real_loader_iter = iter(real_loader)
+                        real_images_full = next(real_loader_iter)
                     
-                    # Sample real images if using domain adaptation
+                    real_images_full = real_images_full.to(device, non_blocking=True)
+                
+                # Split into mini-batches (with aligned synthetic/real pairs)
+                synthetic_batches = images.split(batch_size)
+                
+                if use_domain_adaptation:
+                    real_batches = real_images_full.split(batch_size)
+                else:
+                    real_batches = [None] * len(synthetic_batches)
+                
+                # Train on mini-batches
+                for batch_images, real_images in zip(synthetic_batches, real_batches):
+                    
                     if use_domain_adaptation:
-                        try:
-                            real_images = next(real_loader_iter)
-                        except StopIteration:
-                            real_loader_iter = iter(real_loader)
-                            real_images = next(real_loader_iter)
-                        
-                        real_images = real_images.to(device, non_blocking=True)
-                        
-                        # Ensure same batch size
-                        min_batch = min(len(batch_images), len(real_images))
-                        batch_images = batch_images[:min_batch]
-                        real_images = real_images[:min_batch]
-                        
                         # ==========================================
                         # Phase 1: Update discriminator
                         # ==========================================

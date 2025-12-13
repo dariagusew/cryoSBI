@@ -452,7 +452,7 @@ class RealImageMRCDataset(Dataset):
             if isinstance(self.mrc_data, np.memmap):
                 del self.mrc_data
 
-def create_real_image_loader(mrc_path, batch_size=256, num_workers=4):
+def create_real_image_loader(mrc_path, batch_size=1024, num_workers=4):
     """
     Create dataloader for real images
     

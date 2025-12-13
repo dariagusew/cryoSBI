@@ -348,7 +348,6 @@ def pretrain_spatial_cryo(
                 
                 # Train on mini-batches
                 for batch_images in images.split(batch_size):
-                    batch_images = batch_images.to(device)
                     
                     # Forward pass
                     embeddings, reconstruction = model(batch_images)

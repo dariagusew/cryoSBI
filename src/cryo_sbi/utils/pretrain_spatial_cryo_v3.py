@@ -191,7 +191,7 @@ def count_parameters(model):
 
 def pretrain_spatial_cryo(
     image_config_path: str,
-    embedding_name: str = 'SPATIAL_CRYO',
+    embedding_name: str = 'SPATIAL_CRYO_FFT_FILTER',
     device: str = 'cuda',
     embedding_dim: int = 256,
     epochs: int = 100,

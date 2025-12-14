@@ -529,89 +529,78 @@ def process_mrc_stack(
         else:
             print(f"  Method: None (original values preserved)")
         
-        # Allocate output array
-        print(f"\n⚙️  Allocating output array ({mem_est['output_array_ram']:.2f} GB)...")
+        # Create output MRC file and process directly to it
+        print(f"\n⚙️  Creating output file ({mem_est['output_array_ram']:.2f} GB)...")
         try:
-            processed_data = np.zeros((n_output_particles, target_size, target_size), dtype=np.float32)
-            print(f"✓ Allocation successful")
-        except MemoryError:
-            print(f"❌ Failed to allocate output array - insufficient RAM")
-            return False
-        
-        # Process in batches
-        print(f"\n🚀 Processing particles...")
-        n_batches = (n_output_particles + batch_size - 1) // batch_size
-        
-        try:
-            with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
-                for i in range(0, n_output_particles, batch_size):
-                    end_idx = min(i + batch_size, n_output_particles)
+            with mrcfile.new(output_path, overwrite=True) as mrc:
+                # Create empty array in the file
+                mrc.set_data(np.zeros((n_output_particles, target_size, target_size), dtype=np.float32))
+                
+                print(f"✓ File created successfully")
+                
+                # Process in batches and write directly to mrc.data
+                print(f"\n🚀 Processing particles...")
+                n_batches = (n_output_particles + batch_size - 1) // batch_size
+                
+                try:
+                    with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
+                        for i in range(0, n_output_particles, batch_size):
+                            end_idx = min(i + batch_size, n_output_particles)
+                            
+                            # Get batch using stride indices (loads only this batch into RAM)
+                            batch_indices = particle_indices[i:end_idx]
+                            batch = data[batch_indices].astype(np.float32)  # Load batch
+                            
+                            # Convert to torch tensor and move to device
+                            batch_tensor = torch.from_numpy(batch).to(device)
+                            
+                            # Downsample if needed
+                            batch_tensor = downsample_gpu(batch_tensor, target_size)
+                            
+                            # Normalize
+                            batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
+                                                              global_stats=global_stats)
+                            
+                            # Write directly to mrc.data (no intermediate array)
+                            mrc.data[i:end_idx] = batch_tensor.cpu().numpy()
+                            
+                            # Clean up
+                            del batch, batch_tensor
+                            
+                            pbar.update(end_idx - i)
+                            
+                            # Clear GPU cache periodically
+                            if device == 'cuda' and (i // batch_size) % 10 == 0:
+                                torch.cuda.empty_cache()
                     
-                    # Get batch using stride indices (loads only this batch into RAM)
-                    batch_indices = particle_indices[i:end_idx]
-                    batch = data[batch_indices].astype(np.float32)  # Load batch
+                    print(f"✓ Processing complete")
+                    print(f"  Output shape: {mrc.data.shape}")
+                    print(f"  Output range: [{mrc.data.min():.3f}, {mrc.data.max():.3f}]")
                     
-                    # Convert to torch tensor and move to device
-                    batch_tensor = torch.from_numpy(batch).to(device)
-                    
-                    # Downsample if needed
-                    if ny != target_size or nx != target_size:
-                       batch_tensor = downsample_gpu(batch_tensor, target_size)
-
-                    # Normalize
-                    batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
-                                                      global_stats=global_stats)
-                    
-                    # Copy back to CPU and store
-                    processed_data[i:end_idx] = batch_tensor.cpu().numpy()
-                    
-                    # Clean up
-                    del batch, batch_tensor
-                    
-                    pbar.update(end_idx - i)
-                    
-                    # Clear GPU cache periodically
-                    if device == 'cuda' and (i // batch_size) % 10 == 0:
-                        torch.cuda.empty_cache()
-            
-            print(f"✓ Processing complete")
-            print(f"  Output shape: {processed_data.shape}")
-            print(f"  Output range: [{processed_data.min():.3f}, {processed_data.max():.3f}]")
-            
-        except KeyboardInterrupt:
-            print(f"\n\n⚠️  Processing interrupted by user")
-            return False
+                except KeyboardInterrupt:
+                    print(f"\n\n⚠️  Processing interrupted by user")
+                    return False
+                except Exception as e:
+                    print(f"\n\n❌ Error during processing: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    return False
+                
+                # Set correct voxel size
+                mrc.voxel_size = output_voxel_size
+                
+                # Update header from data (this fixes corrupted headers)
+                mrc.update_header_from_data()
+                mrc.update_header_stats()
+                
+                print(f"\n✓ File written successfully")
+                
         except Exception as e:
-            print(f"\n\n❌ Error during processing: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Failed to write MRC: {str(e)}")
             return False
     
     # Data memmap is now closed and cleaned up (exited context manager)
-    
-    # Write output MRC with corrected header
-    print(f"\n💾 Writing output: {output_path.name}")
-    
-    try:
-        with mrcfile.new(output_path, overwrite=True) as mrc:
-            mrc.set_data(processed_data.astype(np.float32))
-            
-            # Set correct voxel size
-            mrc.voxel_size = output_voxel_size
-            
-            # Update header from data (this fixes corrupted headers)
-            mrc.update_header_from_data()
-            mrc.update_header_stats()
-            
-            print(f"✓ File written successfully")
-            
-    except Exception as e:
-        print(f"❌ Failed to write MRC: {str(e)}")
-        return False
-    finally:
-        # Clean up processed data
-        del processed_data
-        gc.collect()
+    gc.collect()
     
     # Verify output
     print(f"\n🔍 Verifying output...")
@@ -629,7 +618,6 @@ def process_mrc_stack(
     print(f"{'=' * 80}\n")
     
     return True
-
 
 # ============================================================================
 # COMMAND LINE INTERFACE

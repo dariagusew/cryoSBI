@@ -531,7 +531,11 @@ def process_mrc_stack(
             with mrcfile.new(output_path, overwrite=True) as mrc:
                 # Create empty array in the file
                 mrc.set_data(np.zeros((n_output_particles, target_size, target_size), dtype=np.float32))
-                
+           
+                # Set metadata immediately (before processing)
+                mrc.voxel_size = output_voxel_size
+                mrc.update_header_from_data()  # Sets dimensions, mode, etc.
+     
                 print(f"✓ File created successfully")
                 
                 # Process in batches and write directly to mrc.data
@@ -582,12 +586,6 @@ def process_mrc_stack(
                     import traceback
                     traceback.print_exc()
                     return False
-                
-                # Set correct voxel size
-                mrc.voxel_size = output_voxel_size
-                
-                # Update header from data (this fixes corrupted headers)
-                mrc.update_header_from_data()
                 
                 print(f"\n✓ File written successfully")
                 

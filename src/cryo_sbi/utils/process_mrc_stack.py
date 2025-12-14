@@ -262,10 +262,6 @@ def downsample_gpu(images, target_size):
     Returns:
         Downsampled images as torch.Tensor
     """
-    N, H, W = images.shape
-    
-    if H == target_size and W == target_size:
-        return images
     
     # Add channel dimension for interpolate
     images_4d = images.unsqueeze(1)  # (N, 1, H, W)
@@ -555,7 +551,8 @@ def process_mrc_stack(
                             batch_tensor = torch.from_numpy(batch).to(device)
                             
                             # Downsample if needed
-                            batch_tensor = downsample_gpu(batch_tensor, target_size)
+                            if ny != target_size or nx != target_size:
+                               batch_tensor = downsample_gpu(batch_tensor, target_size)
                             
                             # Normalize
                             batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 

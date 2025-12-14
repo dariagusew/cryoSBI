@@ -447,7 +447,6 @@ def process_mrc_stack(
         sample_indices = np.linspace(0, data.shape[0]-1, min(10, data.shape[0]), dtype=int)
         sample_data = data[sample_indices]
         print(f"  Sample range: [{sample_data.min():.3f}, {sample_data.max():.3f}]")
-        print(f"  Sample mean: {sample_data.mean():.3f}, std: {sample_data.std():.3f}")
         del sample_data
         
         nz, ny, nx = data.shape
@@ -555,9 +554,10 @@ def process_mrc_stack(
                     # Convert to torch tensor and move to device
                     batch_tensor = torch.from_numpy(batch).to(device)
                     
-                    # Downsample
-                    batch_tensor = downsample_gpu(batch_tensor, target_size)
-                    
+                    # Downsample if needed
+                    if ny != target_size or nx != target_size:
+                       batch_tensor = downsample_gpu(batch_tensor, target_size)
+
                     # Normalize
                     batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
                                                       global_stats=global_stats)
@@ -577,7 +577,6 @@ def process_mrc_stack(
             print(f"✓ Processing complete")
             print(f"  Output shape: {processed_data.shape}")
             print(f"  Output range: [{processed_data.min():.3f}, {processed_data.max():.3f}]")
-            print(f"  Output mean: {processed_data.mean():.6f}, std: {processed_data.std():.6f}")
             
         except KeyboardInterrupt:
             print(f"\n\n⚠️  Processing interrupted by user")
@@ -622,7 +621,6 @@ def process_mrc_stack(
             print(f"  Shape: {mrc.data.shape}")
             print(f"  Voxel size: {mrc.voxel_size.x:.3f} Å")
             print(f"  Data range: [{mrc.data.min():.3f}, {mrc.data.max():.3f}]")
-            print(f"  Data mean: {mrc.data.mean():.6f}, std: {mrc.data.std():.6f}")
     except Exception as e:
         print(f"⚠️  Warning: Could not verify output: {str(e)}")
     

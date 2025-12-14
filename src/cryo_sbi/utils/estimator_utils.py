@@ -145,7 +145,7 @@ def load_estimator(
     """
 
     train_config = json.load(open(config_file_path))
-    estimator = flow_model(train_config)
+    estimator = flow_model(train_config, 128)
     #estimator = build_models.build_npe_flow_model(train_config)
     estimator.load_state_dict(
         torch.load(estimator_path, map_location=torch.device(device))

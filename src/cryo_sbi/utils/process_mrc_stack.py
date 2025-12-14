@@ -588,7 +588,6 @@ def process_mrc_stack(
                 
                 # Update header from data (this fixes corrupted headers)
                 mrc.update_header_from_data()
-                mrc.update_header_stats()
                 
                 print(f"\n✓ File written successfully")
                 

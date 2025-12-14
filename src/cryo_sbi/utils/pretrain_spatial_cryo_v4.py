@@ -675,8 +675,8 @@ def pretrain_spatial_cryo(
                     # Reconstruction loss
                     recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
                     
-                    # L2 regularization
-                    l2_loss = (embeddings ** 2).mean()
+                    # L2 regularization - per-sample norm
+                    l2_loss = (torch.norm(embeddings, dim=1) ** 2).mean()
                     
                     # Total loss
                     loss = recon_loss + l2_weight * l2_loss

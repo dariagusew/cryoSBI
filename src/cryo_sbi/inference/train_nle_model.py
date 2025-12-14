@@ -27,6 +27,7 @@ def load_model(
     train_from_checkpoint: bool,
     pretrained_embedding_path: Optional[str] = None,
     freeze_embedding: bool = False,
+    image_size: int = 128
 ) -> torch.nn.Module:
     """
     Load model from checkpoint or from scratch.
@@ -39,10 +40,11 @@ def load_model(
         train_from_checkpoint (bool): whether to load model from checkpoint
         pretrained_embedding_path (str, optional): path to pretrained embedding weights
         freeze_embedding (bool): if True, freeze embedding parameters
+        image_size (int): number pixel images to create embedding
     """
 
     check_train_params(train_config)
-    estimator = build_nle_flow_model(train_config)
+    estimator = build_nle_flow_model(train_config, image_size)
 
     # Load pretrained embedding if provided
     if pretrained_embedding_path is not None:
@@ -174,6 +176,7 @@ def nle_train_no_saving(
         train_from_checkpoint,
         pretrained_embedding_path=pretrained_embedding_path,
         freeze_embedding=freeze_embedding,
+        image_size = image_config["N_PIXELS"]
     )
 
     loss = NPELoss(estimator)

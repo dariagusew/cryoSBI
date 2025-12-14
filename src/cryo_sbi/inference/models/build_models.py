@@ -55,13 +55,14 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
 
     return estimator
 
-def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
+def build_nle_flow_model(config: dict, image_size: int, **embedding_kwargs) -> nn.Module:
     """
     Function to build NLE estimator with embedding net
     from config_file
 
     Args:
         config (dict): config file
+        image_size (int): number of pixels
         embedding_kwargs (dict): kwargs for embedding net
 
     Returns:
@@ -81,7 +82,7 @@ def build_nle_flow_model(config: dict, **embedding_kwargs) -> nn.Module:
 
     try:
         embedding = partial(
-            EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM"], **embedding_kwargs
+            EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM"], image_size, **embedding_kwargs
         )
     except KeyError:
         raise NotImplementedError(

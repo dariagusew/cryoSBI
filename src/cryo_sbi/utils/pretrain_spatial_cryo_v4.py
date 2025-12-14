@@ -180,8 +180,8 @@ def open_mrc_robust(filepath, max_size_gb=None):
 
 class SpatialCryoDecoder(nn.Module):
     """
-    Lightweight decoder that mirrors SPATIAL_CRYO encoder
-    All-convolutional design, symmetric architecture
+    Lightweight decoder that perfectly mirrors SPATIAL_CRYO_FFT_FILTER encoder
+    All-convolutional design, truly symmetric architecture
     """
     def __init__(self, embedding_dim, image_size):
         super().__init__()
@@ -189,33 +189,31 @@ class SpatialCryoDecoder(nn.Module):
         self.image_size = image_size
         self.embedding_dim = embedding_dim
         
-        # Calculate upsampling stages (mirror encoder)
+        # Calculate upsampling stages (must match encoder)
         import math
         n_stages = int(math.log2(image_size)) - 2
         
-        # Start from 4x4 (where encoder ends)
-        start_size = 4
-        
-        # Initial channel count (mirror encoder's final channels)
+        # Initial channel count (mirror encoder's final channels before last conv)
         start_channels = 16 * (2 ** (n_stages - 1))
         
-        # Lightweight FC: only project to channel dimension
-        self.fc = nn.Linear(embedding_dim, start_channels)
-        
-        # Expand 1x1 to 4x4
-        self.initial_conv = nn.Sequential(
-            nn.ConvTranspose2d(start_channels, start_channels,
-                             kernel_size=4, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(start_channels),
-            nn.ReLU(inplace=True)
-        )
+        # Project directly to 4x4 spatial size (mirror encoder's final conv in reverse)
+        # Encoder: [B, start_channels, 4, 4] → [B, output_dim, 1, 1]
+        # Decoder: [B, output_dim] → [B, start_channels, 4, 4]
+        self.fc = nn.Linear(embedding_dim, start_channels * 4 * 4)
+        self.start_channels = start_channels
         
         # Progressive upsampling (mirror encoder stages in reverse)
         layers = []
         in_channels = start_channels
         
+        # Perform n_stages upsampling operations
         for i in range(n_stages):
-            out_channels = in_channels // 2
+            # Last stage: force to 16 channels (mirror encoder's first conv output)
+            if i == n_stages - 1:
+                out_channels = 16
+            else:
+                out_channels = in_channels // 2
+            
             layers.extend([
                 nn.ConvTranspose2d(in_channels, out_channels,
                                  kernel_size=4, stride=2, padding=1, bias=False),
@@ -224,9 +222,9 @@ class SpatialCryoDecoder(nn.Module):
             ])
             in_channels = out_channels
         
-        # Final conv to get single channel
+        # Final conv to get single channel (mirror encoder's input)
         layers.append(
-            nn.Conv2d(in_channels, 1, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(16, 1, kernel_size=3, stride=1, padding=1)
         )
         
         self.decoder = nn.Sequential(*layers)
@@ -234,26 +232,23 @@ class SpatialCryoDecoder(nn.Module):
     def forward(self, z):
         """
         Args:
-            z: [B, embedding_dim]
+            z: [B, embedding_dim] - Encoder embeddings (LayerNorm'd)
+        
         Returns:
-            reconstruction: [B, 1, H, W]
+            reconstruction: [B, 1, H, W] - Reconstructed images (in normalized space)
         """
         B = z.shape[0]
         
-        # Project to channel dimension
+        # Project to [B, start_channels * 4 * 4]
         x = self.fc(z)
         
-        # Reshape to [B, start_channels, 1, 1]
-        x = x.view(B, -1, 1, 1)
-        
-        # Expand to 4x4
-        x = self.initial_conv(x)
+        # Reshape to [B, start_channels, 4, 4]
+        x = x.view(B, self.start_channels, 4, 4)
         
         # Upsample to full size
         x = self.decoder(x)
         
         return x
-
 
 # ============================================================================
 # MODEL WRAPPER

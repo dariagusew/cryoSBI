@@ -267,6 +267,7 @@ def cli_pinfer_populations():
     device = torch.device(args.device)
     models = torch.load(args.models_file).to(device)
     estimator = est_utils.load_estimator(args.train_config_file,
+                                        args.image_config_file,
                                         build_models.build_nle_flow_model,
                                         args.estimator_file,
                                         device=device,

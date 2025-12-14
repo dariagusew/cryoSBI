@@ -128,15 +128,15 @@ def compute_latent_repr(
 
 
 def load_estimator(
-    config_file_path: str, flow_model: torch.nn.Module, estimator_path: str, device: str = "cpu"
+    config_file_path: str, image_file_path: str, flow_model: torch.nn.Module, estimator_path: str, device: str = "cpu"
 ) -> torch.nn.Module:
     """
     Loads a trained estimator.
 
     Args:
         config_file_path (str): Path to the config file used to train the estimator.
+        image_file_path (str): Path to the image file used to train the estimator.
         flow_model (torch.nn.Module): Function to build NPE/NLE estimator with embedding net
-        from config_file
         estimator_path (str): Path to the estimator.
         device (str, optional): The device to use. Defaults to "cpu".
 
@@ -145,7 +145,8 @@ def load_estimator(
     """
 
     train_config = json.load(open(config_file_path))
-    estimator = flow_model(train_config, 128)
+    image_config = json.load(open(image_file_path))
+    estimator = flow_model(train_config, image_config["N_PIXELS"])
     #estimator = build_models.build_npe_flow_model(train_config)
     estimator.load_state_dict(
         torch.load(estimator_path, map_location=torch.device(device))

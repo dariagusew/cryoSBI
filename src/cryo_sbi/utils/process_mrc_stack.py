@@ -1,6 +1,7 @@
 # process_mrc_stack.py
 """
 Process MRC particle stacks: fix headers and downsample using GPU.
+Optimized for very large files (100+ GB).
 """
 
 import argparse
@@ -10,6 +11,86 @@ import mrcfile
 from pathlib import Path
 from tqdm import tqdm
 import sys
+import gc
+import psutil
+from contextlib import contextmanager
+from typing import Tuple, Optional, Dict, Union
+
+# ============================================================================
+# MEMORY MANAGEMENT
+# ============================================================================
+
+def get_available_memory():
+    """Get available system RAM and GPU memory in GB."""
+    ram_available = psutil.virtual_memory().available / (1024**3)
+    
+    gpu_available = 0
+    if torch.cuda.is_available():
+        gpu_available = (torch.cuda.get_device_properties(0).total_memory - 
+                        torch.cuda.memory_allocated(0)) / (1024**3)
+    
+    return ram_available, gpu_available
+
+
+def estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride=1):
+    """
+    Estimate memory requirements for processing.
+    
+    Returns:
+        dict with memory estimates in GB
+    """
+    n_particles = (nz + stride - 1) // stride
+    
+    # Input batch in RAM (worst case, float32)
+    input_batch_ram = batch_size * ny * nx * 4 / (1024**3)
+    
+    # GPU memory: input batch + output batch + overhead
+    input_batch_gpu = batch_size * ny * nx * 4 / (1024**3)
+    output_batch_gpu = batch_size * target_size * target_size * 4 / (1024**3)
+    gpu_overhead = 1.0  # GB for PyTorch overhead
+    total_gpu = input_batch_gpu + output_batch_gpu + gpu_overhead
+    
+    # Output array in RAM (full)
+    output_array_ram = n_particles * target_size * target_size * 4 / (1024**3)
+    
+    # Peak RAM: output array + one batch
+    peak_ram = output_array_ram + input_batch_ram + 2.0  # +2GB safety margin
+    
+    return {
+        'input_batch_ram': input_batch_ram,
+        'output_array_ram': output_array_ram,
+        'peak_ram': peak_ram,
+        'gpu_required': total_gpu,
+        'n_output_particles': n_particles
+    }
+
+
+def check_memory_feasibility(mem_est, device='cuda'):
+    """Check if we have enough memory to proceed."""
+    ram_avail, gpu_avail = get_available_memory()
+    
+    issues = []
+    warnings = []
+    
+    # Check RAM
+    if mem_est['peak_ram'] > ram_avail:
+        issues.append(f"Insufficient RAM: need {mem_est['peak_ram']:.1f} GB, "
+                     f"have {ram_avail:.1f} GB")
+    elif mem_est['peak_ram'] > ram_avail * 0.8:
+        warnings.append(f"RAM usage will be high: {mem_est['peak_ram']:.1f} GB / "
+                       f"{ram_avail:.1f} GB available")
+    
+    # Check GPU
+    if device == 'cuda':
+        if mem_est['gpu_required'] > gpu_avail:
+            issues.append(f"Insufficient GPU memory: need {mem_est['gpu_required']:.1f} GB, "
+                         f"have {gpu_avail:.1f} GB")
+        elif mem_est['gpu_required'] > gpu_avail * 0.8:
+            warnings.append(f"GPU usage will be high: {mem_est['gpu_required']:.1f} GB / "
+                           f"{gpu_avail:.1f} GB available")
+    
+    return issues, warnings
+
 
 # ============================================================================
 # MRC FILE HANDLING
@@ -32,13 +113,19 @@ def validate_mrc_data(data):
     if data.ndim not in [2, 3]:
         return False, f"Invalid dimensions: {data.ndim}D"
     try:
-        if np.all(data == 0):
+        # For memmap, only check first particle to avoid loading all
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
+            
+        if np.all(test_data == 0):
             return False, "All data is zero"
-        if np.any(np.isnan(data)):
+        if np.any(np.isnan(test_data)):
             return False, "Data contains NaN"
-        if np.any(np.isinf(data)):
+        if np.any(np.isinf(test_data)):
             return False, "Data contains inf"
-        if np.std(data) == 0:
+        if np.std(test_data) == 0:
             return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
@@ -72,54 +159,92 @@ def validate_mrc_dimensions(nx, ny, nz):
         return False, f"Non-positive: {nz}×{ny}×{nx}"
     if nx > 8192 or ny > 8192:
         return False, f"Too large: {ny}×{nx}"
-    if nz > 50000000:
+    if nz > 100000000:  # Increased limit for large stacks
         return False, f"Stack too large: {nz}"
     return True, "Valid"
 
 
-def open_mrc_robust(filepath, max_size_gb=None):
-    """Robustly open MRC file with fallback methods."""
+@contextmanager
+def open_mrc_memmap(filepath, max_size_gb=None):
+    """
+    Context manager for opening MRC as memmap (never loads into RAM).
+    
+    Yields:
+        numpy.memmap or None
+    """
     filepath = Path(filepath)
+    memmap_obj = None
     
-    if not filepath.exists():
-        return None, False, "File not found"
-    
-    file_size, file_size_gb = check_mrc_file_size(filepath)
-    if max_size_gb is not None and file_size_gb > max_size_gb:
-        return None, False, f"Too large: {file_size_gb:.2f} GB"
-    
-    # Method 1: Standard
     try:
-        with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-            if mrc.data is not None and mrc.data.size > 0:
-                is_valid, msg = validate_mrc_data(mrc.data)
-                if is_valid:
-                    data = np.array(mrc.data) if file_size_gb < 1.0 else mrc.data
-                    return data, True, "Standard"
-    except:
-        pass
-    
-    # Method 2: Force-read
-    try:
+        if not filepath.exists():
+            yield None, False, "File not found"
+            return
+        
+        file_size, file_size_gb = check_mrc_file_size(filepath)
+        if max_size_gb is not None and file_size_gb > max_size_gb:
+            yield None, False, f"Too large: {file_size_gb:.2f} GB"
+            return
+        
+        # Try standard mrcfile first (but don't load data)
+        try:
+            with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
+                nx, ny, nz = mrc.header.nx, mrc.header.ny, mrc.header.nz
+                dtype = mrc.data.dtype
+                
+                # Close the mrcfile and open as pure memmap
+                pass
+            
+            # Now open as memmap
+            memmap_obj = np.memmap(
+                filepath, 
+                dtype=dtype, 
+                mode='r', 
+                offset=1024, 
+                shape=(nz, ny, nx)
+            )
+            
+            is_valid, msg = validate_mrc_data(memmap_obj)
+            if is_valid:
+                yield memmap_obj, True, "Memmap"
+                return
+                
+        except Exception as e:
+            pass
+        
+        # Fallback: force-read header
         header_info = read_mrc_header_raw(filepath)
         if header_info is not None:
-            nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
+            nx = header_info['nx']
+            ny = header_info['ny']
+            nz = header_info['nz']
+            mode = header_info['mode']
+            
             is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
             if not is_valid:
-                return None, False, msg
+                yield None, False, msg
+                return
             
             dtype = get_dtype_from_mode(mode)
-            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
+            memmap_obj = np.memmap(
+                filepath, 
+                dtype=dtype, 
+                mode='r', 
+                offset=1024, 
+                shape=(nz, ny, nx)
+            )
             
-            is_valid, msg = validate_mrc_data(data[0])
+            is_valid, msg = validate_mrc_data(memmap_obj)
             if is_valid:
-                return data, True, f"Force-read memmap"
-    except Exception as e:
-        return None, False, f"Failed: {str(e)[:100]}"
-    
-    return None, False, "All methods failed"
-
-
+                yield memmap_obj, True, f"Force-read memmap"
+                return
+        
+        yield None, False, "All methods failed"
+        
+    finally:
+        # Cleanup
+        if memmap_obj is not None:
+            del memmap_obj
+        gc.collect()
 
 
 # ============================================================================
@@ -155,31 +280,28 @@ def downsample_gpu(images, target_size):
     return downsampled
 
 
-def normalize_batch_gpu(images, method='per_particle'):
+def normalize_batch_gpu(images, method='per_particle', global_stats=None):
     """
     Normalize batch of images on GPU.
     
     Args:
         images: torch.Tensor of shape (N, H, W)
-        method: 'per_particle' - Z-score normalization per particle (mean=0, std=1)
-                'global' - Normalize using global mean/std across all particles
-                'none' - No normalization
+        method: 'per_particle', 'global', or 'none'
+        global_stats: dict with 'mean' and 'std' for global normalization
     
     Returns:
         Normalized torch.Tensor
     """
     if method == 'per_particle':
-        # Z-score normalization: (x - mean) / std for each particle individually
-        # Each particle will have mean=0 and std=1
         mean = images.mean(dim=(1, 2), keepdim=True)
         std = images.std(dim=(1, 2), keepdim=True).clamp(min=1e-10)
         return (images - mean) / std
     
     elif method == 'global':
-        # Global Z-score: use mean/std computed across ALL particles
-        # All particles normalized by same values
-        mean = images.mean()
-        std = images.std().clamp(min=1e-10)
+        if global_stats is None:
+            raise ValueError("global_stats required for global normalization")
+        mean = global_stats['mean']
+        std = global_stats['std']
         return (images - mean) / std
     
     else:  # 'none'
@@ -187,40 +309,63 @@ def normalize_batch_gpu(images, method='per_particle'):
 
 
 # ============================================================================
-# MRC HEADER REPAIR
+# STATISTICS COMPUTATION
 # ============================================================================
 
-def fix_mrc_header_from_data(data, voxel_size=1.0):
+def compute_global_stats_chunked(data, chunk_size=1000, stride=1):
     """
-    Create correct MRC header parameters from data.
+    Compute global mean and std in chunks without loading all data.
+    Uses Welford's online algorithm for numerical stability.
     
     Args:
-        data: numpy array (nz, ny, nx)
-        voxel_size: float, pixel size in Angstroms
+        data: numpy memmap array (nz, ny, nx)
+        chunk_size: number of particles per chunk
+        stride: sample every Nth particle
     
     Returns:
-        dict with header parameters
+        dict with 'mean' and 'std'
     """
-    nz, ny, nx = data.shape
+    nz = data.shape[0]
+    particle_indices = np.arange(0, nz, stride)
+    n_particles = len(particle_indices)
     
-    header_params = {
-        'nx': nx,
-        'ny': ny,
-        'nz': nz,
-        'mx': nx,
-        'my': ny,
-        'mz': nz,
-        'cella': {
-            'x': nx * voxel_size,
-            'y': ny * voxel_size,
-            'z': nz * voxel_size
-        },
-        'mapc': 1,
-        'mapr': 2,
-        'maps': 3,
+    # Welford's algorithm for stable mean/variance computation
+    count = 0
+    mean = 0.0
+    M2 = 0.0  # Sum of squared differences from mean
+    
+    print(f"  Computing global statistics from {n_particles} particles...")
+    
+    with tqdm(total=n_particles, desc="  Stats", unit="particles") as pbar:
+        for i in range(0, n_particles, chunk_size):
+            end_idx = min(i + chunk_size, n_particles)
+            chunk_indices = particle_indices[i:end_idx]
+            
+            # Load chunk
+            chunk = data[chunk_indices].astype(np.float64)  # Use float64 for precision
+            
+            # Update statistics using Welford's algorithm
+            for particle in chunk:
+                for value in particle.flat:
+                    count += 1
+                    delta = value - mean
+                    mean += delta / count
+                    delta2 = value - mean
+                    M2 += delta * delta2
+            
+            pbar.update(end_idx - i)
+            
+            # Clean up chunk
+            del chunk
+    
+    variance = M2 / count if count > 1 else 0.0
+    std = np.sqrt(variance)
+    
+    return {
+        'mean': float(mean),
+        'std': float(std),
+        'count': count
     }
-    
-    return header_params
 
 
 # ============================================================================
@@ -236,10 +381,12 @@ def process_mrc_stack(
     voxel_size=None,
     device='cuda',
     max_size_gb=None,
-    stride=1
+    stride=1,
+    validate_only=False
 ):
     """
     Process MRC particle stack: fix header and downsample.
+    Optimized for very large files (100+ GB).
     
     Args:
         input_path: str or Path, input MRC file
@@ -250,6 +397,8 @@ def process_mrc_stack(
         voxel_size: float or None, pixel size in Angstroms
         device: str, 'cuda' or 'cpu'
         max_size_gb: float or None, max file size to process
+        stride: int, process every Nth particle
+        validate_only: bool, only validate file without processing
     """
     
     print(f"=" * 80)
@@ -267,110 +416,179 @@ def process_mrc_stack(
         print(f"✓ Using device: {device}")
         if device == 'cuda':
             print(f"  GPU: {torch.cuda.get_device_name(0)}")
-            print(f"  Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
+            print(f"  Total GPU memory: {gpu_mem:.1f} GB")
     
-    # Read input MRC with robust method
+    # Show system memory
+    ram_avail, gpu_avail = get_available_memory()
+    print(f"  Available RAM: {ram_avail:.1f} GB")
+    if device == 'cuda':
+        print(f"  Available GPU memory: {gpu_avail:.1f} GB")
+    
+    # Read input MRC with memmap
     print(f"\n📖 Reading input: {input_path.name}")
     file_size, file_size_gb = check_mrc_file_size(input_path)
     print(f"  File size: {file_size_gb:.2f} GB")
     
-    data, success, msg = open_mrc_robust(input_path, max_size_gb=max_size_gb)
+    if file_size_gb > 10:
+        print(f"  ⚠️  Large file detected - using memory-mapped I/O")
     
-    if not success:
-        print(f"❌ Failed to read MRC: {msg}")
-        return False
-    
-    print(f"✓ Loaded successfully: {msg}")
-    print(f"  Shape: {data.shape} (nz={data.shape[0]}, ny={data.shape[1]}, nx={data.shape[2]})")
-    print(f"  Dtype: {data.dtype}")
-    #print(f"  Range: [{data.min():.3f}, {data.max():.3f}]")
-    #print(f"  Mean: {data.mean():.3f}, Std: {data.std():.3f}")
-    
-    nz, ny, nx = data.shape
-
-    # Select particle indices based on stride
-    particle_indices = np.arange(0, nz, stride)
-    n_output_particles = len(particle_indices)
-
-    print(f"  Stride: {stride} (reading every {stride} particle(s))")
-    print(f"  Output particles: {n_output_particles} / {nz}")
-
-    # Determine voxel size
-    if voxel_size is None:
+    # Open MRC as memmap (never loads into RAM)
+    with open_mrc_memmap(input_path, max_size_gb=max_size_gb) as (data, success, msg):
+        if not success:
+            print(f"❌ Failed to read MRC: {msg}")
+            return False
+        
+        print(f"✓ Loaded successfully: {msg}")
+        print(f"  Shape: {data.shape} (nz={data.shape[0]}, ny={data.shape[1]}, nx={data.shape[2]})")
+        print(f"  Dtype: {data.dtype}")
+        
+        # Sample a few particles to show range
+        sample_indices = np.linspace(0, data.shape[0]-1, min(10, data.shape[0]), dtype=int)
+        sample_data = data[sample_indices]
+        print(f"  Sample range: [{sample_data.min():.3f}, {sample_data.max():.3f}]")
+        print(f"  Sample mean: {sample_data.mean():.3f}, std: {sample_data.std():.3f}")
+        del sample_data
+        
+        nz, ny, nx = data.shape
+        
+        # Validate only mode
+        if validate_only:
+            print(f"\n✅ VALIDATION COMPLETE - File is readable")
+            return True
+        
+        # Select particle indices based on stride
+        particle_indices = np.arange(0, nz, stride)
+        n_output_particles = len(particle_indices)
+        
+        print(f"\n⚙️  Processing configuration:")
+        print(f"  Stride: {stride} (reading every {stride} particle(s))")
+        print(f"  Output particles: {n_output_particles} / {nz}")
+        print(f"  Batch size: {batch_size}")
+        print(f"  Target size: {target_size}x{target_size}")
+        
+        # Estimate memory requirements
+        print(f"\n💾 Memory estimation:")
+        mem_est = estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride)
+        print(f"  Input batch RAM: {mem_est['input_batch_ram']:.2f} GB")
+        print(f"  Output array RAM: {mem_est['output_array_ram']:.2f} GB")
+        print(f"  Peak RAM needed: {mem_est['peak_ram']:.2f} GB")
+        if device == 'cuda':
+            print(f"  GPU memory needed: {mem_est['gpu_required']:.2f} GB")
+        
+        # Check memory feasibility
+        issues, warnings = check_memory_feasibility(mem_est, device)
+        
+        if issues:
+            print(f"\n❌ Memory issues detected:")
+            for issue in issues:
+                print(f"  • {issue}")
+            print(f"\nSuggestions:")
+            print(f"  • Reduce batch size (current: {batch_size})")
+            print(f"  • Increase stride (current: {stride})")
+            print(f"  • Use smaller target size (current: {target_size})")
+            return False
+        
+        if warnings:
+            print(f"\n⚠️  Warnings:")
+            for warning in warnings:
+                print(f"  • {warning}")
+            print(f"  Proceeding anyway...")
+        
+        # Determine voxel size
+        if voxel_size is None:
+            try:
+                with mrcfile.open(input_path, permissive=True, mode='r') as mrc:
+                    voxel_size = float(mrc.voxel_size.x)
+                    print(f"\n  Voxel size from header: {voxel_size:.3f} Å")
+            except:
+                voxel_size = 1.0
+                print(f"\n  ⚠️  Could not read voxel size, using default: {voxel_size:.3f} Å")
+        else:
+            print(f"\n  Using provided voxel size: {voxel_size:.3f} Å")
+        
+        # Calculate output voxel size
+        downsample_factor = max(ny, nx) / target_size
+        output_voxel_size = voxel_size * downsample_factor
+        print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
+        
+        # Compute global statistics if needed (in chunks, never loads all data)
+        global_stats = None
+        if normalize == 'global':
+            print(f"\n📊 Computing global statistics (this may take a while)...")
+            global_stats = compute_global_stats_chunked(data, chunk_size=1000, stride=stride)
+            print(f"  Global mean: {global_stats['mean']:.6f}")
+            print(f"  Global std: {global_stats['std']:.6f}")
+            print(f"  Total values: {global_stats['count']:,}")
+        
+        # Explain normalization
+        print(f"\n🔧 Normalization:")
+        if normalize == 'per_particle':
+            print(f"  Method: Per-particle Z-score (each particle: mean=0, std=1)")
+        elif normalize == 'global':
+            print(f"  Method: Global Z-score (all particles normalized by same mean/std)")
+        else:
+            print(f"  Method: None (original values preserved)")
+        
+        # Allocate output array
+        print(f"\n⚙️  Allocating output array ({mem_est['output_array_ram']:.2f} GB)...")
         try:
-            with mrcfile.open(input_path, permissive=True, mode='r') as mrc:
-                voxel_size = float(mrc.voxel_size.x)
-                print(f"  Voxel size from header: {voxel_size:.3f} Å")
-        except:
-            voxel_size = 1.0
-            print(f"  ⚠️  Could not read voxel size, using default: {voxel_size:.3f} Å")
-    else:
-        print(f"  Using provided voxel size: {voxel_size:.3f} Å")
+            processed_data = np.zeros((n_output_particles, target_size, target_size), dtype=np.float32)
+            print(f"✓ Allocation successful")
+        except MemoryError:
+            print(f"❌ Failed to allocate output array - insufficient RAM")
+            return False
+        
+        # Process in batches
+        print(f"\n🚀 Processing particles...")
+        n_batches = (n_output_particles + batch_size - 1) // batch_size
+        
+        try:
+            with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
+                for i in range(0, n_output_particles, batch_size):
+                    end_idx = min(i + batch_size, n_output_particles)
+                    
+                    # Get batch using stride indices (loads only this batch into RAM)
+                    batch_indices = particle_indices[i:end_idx]
+                    batch = data[batch_indices].astype(np.float32)  # Load batch
+                    
+                    # Convert to torch tensor and move to device
+                    batch_tensor = torch.from_numpy(batch).to(device)
+                    
+                    # Downsample
+                    batch_tensor = downsample_gpu(batch_tensor, target_size)
+                    
+                    # Normalize
+                    batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
+                                                      global_stats=global_stats)
+                    
+                    # Copy back to CPU and store
+                    processed_data[i:end_idx] = batch_tensor.cpu().numpy()
+                    
+                    # Clean up
+                    del batch, batch_tensor
+                    
+                    pbar.update(end_idx - i)
+                    
+                    # Clear GPU cache periodically
+                    if device == 'cuda' and (i // batch_size) % 10 == 0:
+                        torch.cuda.empty_cache()
+            
+            print(f"✓ Processing complete")
+            print(f"  Output shape: {processed_data.shape}")
+            print(f"  Output range: [{processed_data.min():.3f}, {processed_data.max():.3f}]")
+            print(f"  Output mean: {processed_data.mean():.6f}, std: {processed_data.std():.6f}")
+            
+        except KeyboardInterrupt:
+            print(f"\n\n⚠️  Processing interrupted by user")
+            return False
+        except Exception as e:
+            print(f"\n\n❌ Error during processing: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
     
-    # Calculate output voxel size
-    downsample_factor = max(ny, nx) / target_size
-    output_voxel_size = voxel_size * downsample_factor
-    print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
-    
-    # Prepare output array
-    print(f"\n⚙️  Processing {n_output_particles} particles (stride={stride})...")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Target size: {target_size}x{target_size}")
-
-    # Explain normalization
-    if normalize == 'per_particle':
-        print(f"  Normalization: Per-particle Z-score (each particle: mean=0, std=1)")
-    elif normalize == 'global':
-        print(f"  Normalization: Global Z-score (all particles normalized by same mean/std)")
-    else:
-        print(f"  Normalization: None (original values preserved)")
-   
-    processed_data = np.zeros((n_output_particles, target_size, target_size), dtype=np.float32)
-    
-    # For global normalization, we need to collect all data first or compute statistics
-    if normalize == 'global':
-        print("  Computing global statistics...")
-        global_mean = float(data.mean())
-        global_std = float(data.std())
-        print(f"    Global mean: {global_mean:.3f}, Global std: {global_std:.3f}")
-    
-    # Process in batches
-    n_batches = (n_output_particles + batch_size - 1) // batch_size
-  
-    with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
-        for i in range(0, n_output_particles, batch_size):
-            end_idx = min(i + batch_size, n_output_particles)
-            
-            # GET BATCH USING STRIDE INDICES
-            batch_indices = particle_indices[i:end_idx]
-            batch = data[batch_indices]
-
-            # Convert to torch tensor and move to GPU
-            batch_tensor = torch.from_numpy(batch.astype(np.float32)).to(device)
-            
-            # Downsample
-            batch_tensor = downsample_gpu(batch_tensor, target_size)
-            
-            # Normalize
-            if normalize == 'global':
-                # Use pre-computed global statistics
-                batch_tensor = (batch_tensor - global_mean) / max(global_std, 1e-10)
-            else:
-                batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize)
-            
-            # Copy back to CPU
-            processed_data[i:end_idx] = batch_tensor.cpu().numpy()
-            
-            pbar.update(end_idx - i)
-            
-            # Clear GPU cache periodically
-            if device == 'cuda':
-                torch.cuda.empty_cache()
-    
-    print(f"✓ Processing complete")
-    print(f"  Output shape: {processed_data.shape}")
-    print(f"  Output range: [{processed_data.min():.3f}, {processed_data.max():.3f}]")
-    print(f"  Output mean: {processed_data.mean():.3f}, Output std: {processed_data.std():.3f}")
+    # Data memmap is now closed and cleaned up (exited context manager)
     
     # Write output MRC with corrected header
     print(f"\n💾 Writing output: {output_path.name}")
@@ -391,6 +609,10 @@ def process_mrc_stack(
     except Exception as e:
         print(f"❌ Failed to write MRC: {str(e)}")
         return False
+    finally:
+        # Clean up processed data
+        del processed_data
+        gc.collect()
     
     # Verify output
     print(f"\n🔍 Verifying output...")
@@ -400,7 +622,7 @@ def process_mrc_stack(
             print(f"  Shape: {mrc.data.shape}")
             print(f"  Voxel size: {mrc.voxel_size.x:.3f} Å")
             print(f"  Data range: [{mrc.data.min():.3f}, {mrc.data.max():.3f}]")
-            print(f"  Data mean: {mrc.data.mean():.3f}, std: {mrc.data.std():.3f}")
+            print(f"  Data mean: {mrc.data.mean():.6f}, std: {mrc.data.std():.6f}")
     except Exception as e:
         print(f"⚠️  Warning: Could not verify output: {str(e)}")
     
@@ -417,7 +639,7 @@ def process_mrc_stack(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Process MRC particle stack: fix header and downsample',
+        description='Process MRC particle stack: fix header and downsample (optimized for large files)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Normalization options:
@@ -428,25 +650,42 @@ Normalization options:
   global:       All particles normalized by global statistics
                 Formula: (x - mean_all) / std_all
                 Use when: Want to preserve relative intensities between particles
+                Note: For large files, global stats are computed in chunks
                 
   none:         No normalization (original values)
                 Use when: Values are already normalized or you want raw data
 
+Memory optimization for large files (100+ GB):
+  • File is never fully loaded into RAM (uses memory-mapped I/O)
+  • Only processes batch_size particles at a time
+  • Use --stride to subsample particles and reduce output size
+  • Reduce --batch-size if running out of GPU memory
+  • Global normalization computes statistics in chunks
+
 Examples:
+  # Validate file without processing
+  python process_mrc_stack.py input.mrc output.mrc 128 --validate
+  
   # Basic usage with per-particle normalization
   python process_mrc_stack.py input.mrc output.mrc 128
+  
+  # Process every 2nd particle (reduces output by 50%)
+  python process_mrc_stack.py input.mrc output.mrc 128 --stride 2
+  
+  # Large file with reduced batch size
+  python process_mrc_stack.py huge_400gb.mrc output.mrc 128 --batch-size 16 --stride 2
   
   # No normalization (preserve original values)
   python process_mrc_stack.py input.mrc output.mrc 128 --normalize none
   
-  # Read every 2nd particle (stride=2)
-  python process_mrc_stack.py input.mrc output.mrc 128 --stride 2
-  
-  # With custom parameters
-  python process_mrc_stack.py input.mrc output.mrc 64 --batch-size 64 --voxel-size 1.5
+  # Global normalization (maintains relative intensities)
+  python process_mrc_stack.py input.mrc output.mrc 128 --normalize global
   
   # Use CPU instead of GPU
   python process_mrc_stack.py input.mrc output.mrc 128 --device cpu
+  
+  # Custom voxel size
+  python process_mrc_stack.py input.mrc output.mrc 64 --voxel-size 1.5
         """
     )
     
@@ -455,7 +694,7 @@ Examples:
     parser.add_argument('size', type=int, help='Output size (pixels)')
     
     parser.add_argument('--batch-size', type=int, default=32,
-                       help='Batch size for GPU processing (default: 32)')
+                       help='Batch size for GPU processing (default: 32, reduce if GPU OOM)')
     parser.add_argument('--normalize', type=str, default='per_particle',
                        choices=['per_particle', 'global', 'none'],
                        help='Normalization method (default: per_particle)')
@@ -468,6 +707,8 @@ Examples:
                        help='Device to use (default: cuda)')
     parser.add_argument('--max-size-gb', type=float, default=None,
                        help='Maximum file size to process in GB (default: no limit)')
+    parser.add_argument('--validate', action='store_true',
+                       help='Only validate input file without processing')
     
     args = parser.parse_args()
     
@@ -479,25 +720,47 @@ Examples:
     if args.size <= 0 or args.size > 2048:
         print(f"❌ Error: Invalid output size: {args.size} (must be 1-2048)")
         sys.exit(1)
-
+    
     if args.stride < 1:
         print(f"❌ Error: Invalid stride: {args.stride} (must be >= 1)")
         sys.exit(1)
     
-    # Process
-    success = process_mrc_stack(
-        input_path=args.input,
-        output_path=args.output,
-        target_size=args.size,
-        batch_size=args.batch_size,
-        normalize=args.normalize,
-        voxel_size=args.voxel_size,
-        device=args.device,
-        max_size_gb=args.max_size_gb,
-        stride=args.stride
-   )
+    if args.batch_size < 1:
+        print(f"❌ Error: Invalid batch size: {args.batch_size} (must be >= 1)")
+        sys.exit(1)
     
-    sys.exit(0 if success else 1)
+    # Check if output will overwrite existing file
+    if Path(args.output).exists() and not args.validate:
+        response = input(f"⚠️  Output file exists: {args.output}\n   Overwrite? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("❌ Aborted by user")
+            sys.exit(1)
+    
+    # Process
+    try:
+        success = process_mrc_stack(
+            input_path=args.input,
+            output_path=args.output,
+            target_size=args.size,
+            batch_size=args.batch_size,
+            normalize=args.normalize,
+            voxel_size=args.voxel_size,
+            device=args.device,
+            max_size_gb=args.max_size_gb,
+            stride=args.stride,
+            validate_only=args.validate
+        )
+        
+        sys.exit(0 if success else 1)
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n\n❌ Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

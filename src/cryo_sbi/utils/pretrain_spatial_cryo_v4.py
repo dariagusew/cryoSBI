@@ -49,7 +49,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-from itertools import islice
+from itertools import cycle
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 
@@ -510,11 +510,11 @@ def pretrain_spatial_cryo(
             num_workers=4
         )
         # create iterator
-        synthetic_iter = iter(synthetic_loader)
+        synthetic_iter = cycle(synthetic_loader)
  
     # Setup real data if needed
     real_loader = None
-    real_loader_iter = None
+    real_iter = None
     
     if training_mode in ['real', 'mixed']:
         print("\nLoading real images...")
@@ -525,7 +525,7 @@ def pretrain_spatial_cryo(
                 num_workers=4
             )
             # create iterator
-            real_loader_iter = iter(real_loader)
+            real_iter = cycle(real_loader)
         except Exception as e:
             print(f"❌ Error loading real images: {e}")
             return None, 0.0
@@ -614,14 +614,9 @@ def pretrain_spatial_cryo(
                 
                 # Get batch based on mode
                 if training_mode in ['synthetic', 'mixed']:
-                    try:
-                        parameters = next(synthetic_iter)
-                    except StopIteration:
-                        synthetic_iter = iter(synthetic_loader)
-                        parameters = next(synthetic_iter)
-                    
-                    (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
-                    
+                    # get parameters
+                    (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = next(synthetic_iter)
+                    # get synthetic images
                     syn_images = cryo_em_simulator(
                         models,
                         indices.to(device, non_blocking=True),
@@ -639,12 +634,9 @@ def pretrain_spatial_cryo(
                     )
                 
                 if training_mode in ['real', 'mixed']:
-                    try:
-                        real_images = next(real_loader_iter)
-                    except StopIteration:
-                        real_loader_iter = iter(real_loader)
-                        real_images = next(real_loader_iter)
-                    
+                    # get images
+                    real_images = next(real_iter)
+                    # and put them on device
                     real_images = real_images.to(device, non_blocking=True)
                 
                 # Combine based on mode
@@ -653,10 +645,14 @@ def pretrain_spatial_cryo(
                 elif training_mode == 'real':
                     images = real_images
                 else:  # mixed
-                    # Mix 50/50
+                   # Take half from each
                     half = len(syn_images) // 2
-                    images = torch.cat([syn_images[:half], real_images[:half]], dim=0)
-               
+                    combined = torch.cat([syn_images[:half], real_images[:half]], dim=0)
+
+                    # Shuffle to mix synthetic and real randomly
+                    perm = torch.randperm(len(combined), device=combined.device)
+                    images = combined[perm]
+
                 # Train on mini-batches
                 for batch_images in images.split(batch_size):
                     

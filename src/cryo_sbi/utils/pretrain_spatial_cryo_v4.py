@@ -682,16 +682,6 @@ def pretrain_spatial_cryo(
                     perm = torch.randperm(len(combined), device=combined.device)
                     images = combined[perm]
 
-
-                else:  # mixed
-                   # Take half from each
-                    half = len(syn_images) // 2
-                    combined = torch.cat([syn_images[:half], real_images[:half]], dim=0)
-
-                    # Shuffle to mix synthetic and real randomly
-                    perm = torch.randperm(len(combined), device=combined.device)
-                    images = combined[perm]
-
                 # Train on mini-batches
                 for batch_images in images.split(batch_size):
                     

@@ -735,5 +735,130 @@ class SpatialCryoFFTEncoder(nn.Module):
         
         return x
 
+@add_embedding("SPATIAL_CRYO_GAUSS_FFT_FILTER")
+class SpatialCryoGaussFFTEncoder(nn.Module):
+    """
+    Lightweight spatial encoder with a self-contained, learnable Gaussian FFT filter.
+    
+    This version encapsulates all filtering logic, removing the dependency on an
+    external filter class.
+    
+    Architecture:
+    - Internal Gaussian low-pass filter (sigma is learned during training)
+    - All-convolutional design (no heavy FC layers)
+    - Progressive downsampling: D → D/2 → ... → 4 → 1
+    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
+    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
+    - LayerNorm output for stable flow training
+    
+    Parameters:
+    - output_dimension (int): The dimension of the latent embedding.
+    - D (int): The side length of the input image (e.g., 128).
+    - initial_sigma (float): The starting value for the filter's sigma.
+    """
+    def __init__(self, output_dimension: int, D: int = 128, initial_sigma: float = 25.0):
+        super(SpatialCryoGaussFFTEncoder, self).__init__()
+        
+        self.D = D
+        self.output_dimension = output_dimension
+        
+        # 1. Create a learnable parameter for sigma.
+        # We learn log(sigma) to ensure sigma is always positive.
+        self.log_sigma = nn.Parameter(torch.tensor(math.log(initial_sigma)))
+        
+        # 2. Pre-calculate the grid of squared radii, which is constant.
+        # This grid is used to generate the Gaussian mask in the forward pass.
+        grid = torch.linspace(-0.5 * (D - 1), 0.5 * (D - 1), D)
+        r_2d = grid[None, :] ** 2 + grid[:, None] ** 2
+        
+        # 3. Register r_2d as a buffer. This makes it part of the model's state
+        # (e.g., moves to GPU with .to(device)) but not a learnable parameter.
+        self.register_buffer('_r_2d', r_2d)
+        
+        # Base channel dimension (CryoDRGN choice)
+        ndf = 16
+        
+        # Calculate downsampling stages: D → 4
+        n_stages = int(math.log2(D)) - 2
+        
+        if n_stages < 1:
+            raise ValueError(f"Image size D={D} too small. Minimum D=8.")
+        
+        layers = []
+        in_channels = 1
+        
+        # Progressive downsampling with exponential channel growth
+        for i in range(n_stages):
+            out_channels = ndf * (2 ** i)
+            layers.extend([
+                nn.Conv2d(in_channels, out_channels, 
+                         kernel_size=4, stride=2, padding=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
+            ])
+            in_channels = out_channels
+        
+        # Final convolutional layer: 4x4 → 1x1
+        layers.append(
+            nn.Conv2d(in_channels, output_dimension,
+                     kernel_size=4, stride=1, padding=0, bias=False)
+        )
+        
+        self.conv_encoder = nn.Sequential(*layers)
+        
+        # Output normalization for stable flow training
+        self.output_norm = nn.LayerNorm(output_dimension)
+
+    def _apply_fft_filter(self, image: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+        """
+        Internal method to apply the low-pass filter using the current sigma.
+        """
+        # Calculate the Gaussian mask dynamically using the current sigma
+        # Add a small epsilon for numerical stability if sigma is near zero
+        mask = torch.exp(-self._r_2d / (2 * sigma**2 + 1e-8))
+
+        # Apply FFT. Use dim=(-2, -1) for robustness with different input shapes.
+        fft_image = torch.fft.fft2(image, dim=(-2, -1))
+        fft_image = torch.fft.fftshift(fft_image, dim=(-2, -1))
+
+        # Reshape the mask to broadcast correctly with the image tensor
+        # (e.g., from [H, W] to [1, 1, H, W] for a [B, C, H, W] image)
+        broadcast_shape = [1] * (image.dim() - 2) + list(mask.shape)
+        fft_image = fft_image * mask.view(*broadcast_shape)
+
+        # Invert FFT
+        fft_image = torch.fft.ifftshift(fft_image, dim=(-2, -1))
+        reconstructed = torch.fft.ifft2(fft_image, dim=(-2, -1)).real
+        return reconstructed
+
+    def forward(self, x):
+        """
+        Args:
+            x: [B, D, D] or [B, 1, D, D] images
+        
+        Returns:
+            embeddings: [B, output_dimension]
+        """
+        # Get the positive sigma value from its learned logarithm
+        sigma = torch.exp(self.log_sigma)
+        
+        # Apply the internal FFT low-pass filter with the learned sigma
+        x = self._apply_fft_filter(x, sigma)
+        
+        # Ensure 4D input [B, 1, D, D] for the convolutional layers
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        
+        # Convolutional encoding
+        x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
+        
+        # Flatten to [B, output_dim]
+        x = x.view(x.size(0), -1)
+        
+        # Normalize for flow training
+        x = self.output_norm(x)
+        
+        return x
+
 if __name__ == "__main__":
     pass

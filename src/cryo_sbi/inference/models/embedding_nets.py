@@ -371,7 +371,7 @@ class ShuffleNet_Encoder(nn.Module):
 
 @add_embedding("RESNET18_FFT_FILTER")
 class ResNet18_FFT_Encoder(nn.Module):
-    def __init__(self, output_dimension: int):
+    def __init__(self, output_dimension: int, D: int = 128):
         super(ResNet18_FFT_Encoder, self).__init__()
         self.resnet = models.resnet18()
         self.resnet.conv1 = nn.Conv2d(
@@ -381,7 +381,7 @@ class ResNet18_FFT_Encoder(nn.Module):
             in_features=512, out_features=output_dimension, bias=True
         )
 
-        self._fft_filter = LowPassFilter(128, 25)
+        self._fft_filter = LowPassFilter(D, 25)
 
     def forward(self, x):
         # Low pass filter images

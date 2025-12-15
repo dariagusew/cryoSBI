@@ -480,7 +480,6 @@ def pretrain_spatial_cryo(
     if training_mode == 'mixed':
         if not 0.0 <= mix_ratio <= 1.0:
            raise ValueError(f"mix_ratio must be between 0.0 and 1.0, got {mix_ratio}")
-        print(f"  Mix ratio: {mix_ratio:.2f} (synthetic:{mix_ratio:.0%}, real:{(1-mix_ratio):.0%})")
     
     print("\n" + "="*70)
     print(f"PRETRAINING: {embedding_name}")
@@ -585,6 +584,8 @@ def pretrain_spatial_cryo(
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
     print(f"  Training mode: {training_mode}")
+    if training_mode == 'mixed':
+        print(f"  Mix ratio: {mix_ratio:.2f} (synthetic:{mix_ratio:.0%}, real:{1-mix_ratio:.0%})")
     print(f"  L2 regularization weight: {l2_weight}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")

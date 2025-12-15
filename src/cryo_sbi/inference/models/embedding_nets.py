@@ -165,7 +165,7 @@ class GNN(nn.Module):
 
 @add_embedding("RESNET18")
 class ResNet18_Encoder(nn.Module):
-    def __init__(self, output_dimension: int):
+    def __init__(self, output_dimension: int, D: int = 128):
         super(ResNet18_Encoder, self).__init__()
         self.resnet = models.resnet18()
         self.resnet.conv1 = nn.Conv2d(

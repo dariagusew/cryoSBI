@@ -441,6 +441,7 @@ def pretrain_spatial_cryo(
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
     l2_weight: float = 0.0,
+    mix_ratio: float = 0.5
 ):
     """
     Unsupervised pre-training with flexible data sources
@@ -461,6 +462,7 @@ def pretrain_spatial_cryo(
         check_frequency: How often to print detailed stats
         n_batches_per_epoch: Number of simulation batches per epoch
         l2_weight: Weight for L2 regularization on embeddings
+        mix_ratio: 0.0 = all real, 1.0 = all synthetic
     
     Returns:
         model: Trained model
@@ -473,6 +475,12 @@ def pretrain_spatial_cryo(
     
     if training_mode in ['real', 'mixed'] and real_images_path is None:
         raise ValueError(f"training_mode='{training_mode}' requires --real_images")
+
+    # Only relevant for mixed mode
+    if training_mode == 'mixed':
+        if not 0.0 <= mix_ratio <= 1.0:
+           raise ValueError(f"mix_ratio must be between 0.0 and 1.0, got {mix_ratio}")
+        print(f"  Mix ratio: {mix_ratio:.2f} (synthetic:{mix_ratio:.0%}, real:{(1-mix_ratio):.0%})")
     
     print("\n" + "="*70)
     print(f"PRETRAINING: {embedding_name}")
@@ -655,6 +663,25 @@ def pretrain_spatial_cryo(
                     images = syn_images
                 elif training_mode == 'real':
                     images = real_images
+                else:  # mixed mode
+                    # calculate number of images
+                    total_samples = min(len(syn_images), len(real_images))
+                    # Calculate samples based on mix_ratio
+                    # mix_ratio: 0.0 = all real, 1.0 = all synthetic, 0.5 = 50/50
+                    n_syn = int(total_samples * mix_ratio)
+                    n_real = total_samples - n_syn
+
+                    # Take samples
+                    combined = torch.cat([
+                        syn_images[:n_syn],
+                        real_images[:n_real]
+                    ], dim=0)
+
+                    # Shuffle to mix synthetic and real randomly
+                    perm = torch.randperm(len(combined), device=combined.device)
+                    images = combined[perm]
+
+
                 else:  # mixed
                    # Take half from each
                     half = len(syn_images) // 2
@@ -867,6 +894,8 @@ def main():
                        help='Embedding dimension (default: 256)')
     parser.add_argument('--l2_weight', type=float, default=0.0,
                        help='L2 regularization weight on embeddings (default: 0.0)')
+    parser.add_argument('--mix_ratio', type=float, default=0.5,
+                       help='Mixing ratio for mixed mode: 0.0=all real, 1.0=all synthetic (default: 0.5)')
     
     # Output arguments
     parser.add_argument('--output', type=str, default='pretrained_spatial_cryo.pt',
@@ -931,6 +960,7 @@ def main():
         n_batches_per_epoch=args.batches_per_epoch,
         check_frequency=args.check_frequency,
         l2_weight=args.l2_weight,
+        mix_ratio=args.mix_ratio
     )
     
     if model is None:

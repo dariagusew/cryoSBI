@@ -131,7 +131,7 @@ def create_weighted_ensemble(models, w, precision=0.01, max_models=1000, verbose
     
     return models_ensemble, w_actual, total_models
 
-def generate_population_weights(n_states=20, population_steps=11):
+def generate_population_weights(n_states, population_steps):
     """
     Generate population weights for mixtures of state 0 and each other state.
     Returns:
@@ -153,7 +153,15 @@ def generate_population_weights(n_states=20, population_steps=11):
             pop_fractions.append(f)
             state_pairs.append((0, i))
 
-    return np.array(weights_list), np.array(pop_fractions), state_pairs
+    weights = np.array(weights_list)
+    pop_fractions = np.array(pop_fractions)
+    state_pairs = np.array(state_pairs)
+
+    weights, idx = np.unique(weights, axis=0, return_index=True)
+    pop_fractions = pop_fractions[idx]
+    state_pairs = state_pairs[idx]
+
+    return weights, pop_fractions, state_pairs
 
 def evaluate_likelihood_pairwise(
     estimator: torch.nn.Module,
@@ -179,10 +187,10 @@ def evaluate_likelihood_pairwise(
     # Total number of pairs
     total_pairs = N_images * N_models
     
-    log_probs = torch.zeros(N_images, N_models, device=device)
+    log_probs = torch.zeros(N_images, N_models, device='cpu')
     
     with torch.no_grad():
-        print(f"Evaluating {total_pairs:,} pairs...")
+        print(f"Evaluating {total_pairs:,} pairs in batches of {batch_size_pairs}...")
         
         # Process all pairs in large batches
         for pair_start in tqdm(range(0, total_pairs, batch_size_pairs), desc="Pairs"):
@@ -190,16 +198,19 @@ def evaluate_likelihood_pairwise(
             batch_size = pair_end - pair_start
             
             # Compute which (image, model) each pair corresponds to
-            pair_indices = torch.arange(pair_start, pair_end, device=device)
+            pair_indices = torch.arange(pair_start, pair_end)
             img_idx = pair_indices // N_models  # [batch_size]
             mod_idx = pair_indices % N_models   # [batch_size]
             
             # Gather the corresponding images and model indices
-            batch_images = images[img_idx.cpu()]  # [batch_size, H, W]
-            batch_indices = model_indices[mod_idx].unsqueeze(-1)  # [batch_size, 1]
+            #batch_images = images[img_idx].to(device) # [batch_size, H, W]
+            batch_images =  images[img_idx.cpu()]
+            batch_indices = model_indices[mod_idx].unsqueeze(-1) # [batch_size, 1]
             
             # Single forward pass!
             log_p = estimator(batch_images.to(device), batch_indices)  # [batch_size]
+            del batch_images  # free GPU memory
+            torch.cuda.empty_cache()
             
             # Place results in the correct positions
             log_probs.view(-1)[pair_start:pair_end] = log_p
@@ -457,13 +468,12 @@ def rmse(x_opt, w_actual):
 
 
 class PopulationOptimizer:
-    def __init__(self, models, estimator, device, population_steps=11, num_sim=100000):
+    def __init__(self, models, estimator, device, population_steps, num_sim):
         """
-        estimator: trained Cryo-EM estimator
         models: PyTorch tensor of models (n_models, 3, n_atoms)
-        simulator: CryoEmSimulator instance
+        estimator: trained Cryo-EM estimator
         device: torch device
-        population_steps: how many fractions between 0-1 for state 0
+        population_steps: how many fractions
         num_sim: number of images to simulate for each population
         """
         self.estimator = estimator
@@ -481,6 +491,8 @@ class PopulationOptimizer:
         
         # Storage
         self.rmse_values = []
+        self.actual_weights = []
+        self.opt_weights = []
         self.pop_fraction_record = []
 
     def rmse(self, x_opt, w_actual):
@@ -515,7 +527,7 @@ class PopulationOptimizer:
             
             # 2. Simulate images
             simulator = CryoEmSimulator(sim_config, device=self.device)
-            images, parameters = simulator.simulate(
+            images, _ = simulator.simulate(
                 num_sim=num_sim, 
                 return_parameters=True,
                 batch_size=batch_size
@@ -526,7 +538,7 @@ class PopulationOptimizer:
                 self.estimator,
                 images,
                 self.models,
-                batch_size_pairs=20000,
+                batch_size_pairs=512,
                 device=self.device
             ).T  # transpose to [n_models x n_images]
             
@@ -538,13 +550,17 @@ class PopulationOptimizer:
             rmse_val = self.rmse(w_opt, w)
             
             # 6. Store results
-            self.rmse_values.append(rmse_val)
-            self.pop_fraction_record.append(w[0])  # fraction of closed state
+            self.rmse_values.append(rmse_val) # rmse value
+            self.actual_weights.append(w)  # actual weights
+            self.opt_weights.append(w_opt)  # optimized weights
+            self.pop_fraction_record.append(w[0])
 
         # Convert to NumPy arrays 
         self.rmse_values = np.array(self.rmse_values)
+        self.actual_weights = np.array(self.actual_weights)
+        self.opt_weights = np.array(self.opt_weights)
         self.pop_fraction_record = np.array(self.pop_fraction_record)
-        return self.rmse_values, self.pop_fraction_record
+        return self.rmse_values, self.actual_weights, self.opt_weights, self.pop_fraction_record
 
 
 def run_inference_real_data(args):

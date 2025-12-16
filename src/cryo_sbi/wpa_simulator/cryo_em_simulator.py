@@ -10,7 +10,6 @@ from cryo_sbi.wpa_simulator.normalization import gaussian_normalize_image
 from cryo_sbi.inference.priors import get_image_priors
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
 
-
 def cryo_em_simulator(
     models,
     index,
@@ -61,6 +60,42 @@ def cryo_em_simulator(
     image = gaussian_normalize_image(image)
     return image
 
+
+def cryo_em_simulator_clean(
+    models,
+    index,
+    quaternion,
+    sigma,
+    shift,
+    num_pixels,
+    pixel_size
+):
+    """
+    Simulates a batch of clean cryo-electron microscopy (cryo-EM) images of a set of given coars-grained models.
+
+    Args:
+        models (torch.Tensor): A tensor of coars grained models (num_models, 3, num_beads).
+        index (torch.Tensor): A tensor of indices to select the models to simulate.
+        quaternion (torch.Tensor): A tensor of quaternions to rotate the models.
+        sigma (torch.Tensor): The standard deviation of the Gaussian kernel used to project the density.
+        shift (torch.Tensor): A tensor of shifts to apply to the models.
+        num_pixels (torch.Tensor): The number of pixels in the simulated image.
+        pixel_size (torch.Tensor): The size of each pixel in the simulated image.
+
+    Returns:
+        torch.Tensor: A tensor of the simulated cryo-EM image.
+    """
+    models_selected = models[index.round().long().flatten()]
+    image = project_density(
+        models_selected,
+        quaternion,
+        sigma,
+        shift,
+        num_pixels,
+        pixel_size,
+    )
+    image = gaussian_normalize_image(image)
+    return image
 
 class CryoEmSimulator:
     def __init__(self, config_fname: str, device: str = "cpu"):

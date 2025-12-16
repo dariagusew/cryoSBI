@@ -342,8 +342,8 @@ def cl_pretrain_image_embed():
         l2_weight=args.l2_weight,
         mix_ratio=args.mix_ratio
     )
-    
-    print(f"\n✅ Pre-training complete!")
+        
+    print(f"\n✅ Unsupervised pre-training complete!")
     print(f"   Architecture: {args.embedding}")
     print(f"   Training mode: {args.training_mode}")
     print(f"   Final loss: {final_loss:.6f}")
@@ -368,14 +368,17 @@ def cli_pinfer_populations():
 
     parser.add_argument("--estimator_file", type=str, required=True,
                         help="Estimator file name inside training directory.")
+    parser.add_argument("--population_steps", type=int, default=11,
+                        help="Number of population fractions between states (default 11)")
 
     # ---- Optional arguments ----
     parser.add_argument("--device", type=str, default="cuda",
                         help="Compute device: cuda or cpu")
+    
+    parser.add_argument("--states", type=int,default=1, help="Total number of states")
 
-    parser.add_argument("--population_steps", type=int, default=11,
-                        help="Number of population fractions between states (default 11)")
-
+    parser.add_argument("--fractions", type=float,nargs="+",default=[0.0, 0.25, 0.5, 0.75, 1.0], help="Number of population fractions between states")
+    
     parser.add_argument("--num_sim", type=int, default=100000,
                         help="Number of images to simulate (default 100000)")
 
@@ -385,6 +388,8 @@ def cli_pinfer_populations():
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress messages")
 
     parser.add_argument("--batch_size",type=int, default=10000, help="Batching for simulatin cryo images")
+
+
 
     args = parser.parse_args()
 
@@ -407,7 +412,7 @@ def cli_pinfer_populations():
         num_sim=args.num_sim
     )
 
-    rmse_vals, pop_fracs = optimizer.run_for_all_populations(
+    rmse_vals, actual_weights, opt_weights, pop_fracs = optimizer.run_for_all_populations(
         sim_config=args.image_config_file,
         batch_size=args.batch_size,
         verbose=args.verbose
@@ -417,10 +422,13 @@ def cli_pinfer_populations():
     # Save results
     # -----------------------------------------------------
     np.save(f"{args.output_prefix}_rmse.npy", rmse_vals)
+    np.save(f"{args.output_prefix}_a_w.npy", actual_weights)
+    np.save(f"{args.output_prefix}_opt_w.npy", opt_weights)
     np.save(f"{args.output_prefix}_pop.npy", pop_fracs)
 
     print("\n=== Optimization Complete ===")
     print(f"Saved RMSE values {args.output_prefix}_rmse.npy")
+    print(f"Saved optimized weights {args.output_prefix}_opt_w.npy")
     print(f"Saved population fractions {args.output_prefix}_pop.npy")
 
 

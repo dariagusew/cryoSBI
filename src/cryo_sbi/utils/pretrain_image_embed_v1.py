@@ -315,7 +315,7 @@ class ImageEmbedPretrainModel(nn.Module):
         print(f"  Encoder: {embedding_name} (D={image_size})")
 
         # Create decoder based on embedding_name
-        if embedding_name in ['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER']: 
+        if embedding_name in ['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER']:
            self.decoder = SpatialCryoDecoder(embedding_dim, image_size)
            print(f"  Decoder: SpatialCryoDecoder")
         else:
@@ -916,7 +916,7 @@ def main():
     
     # Embedding architecture
     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO_FFT_FILTER',
-                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
                        help='Embedding architecture')
     
     # Training arguments

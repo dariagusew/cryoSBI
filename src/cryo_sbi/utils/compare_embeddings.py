@@ -114,7 +114,7 @@ def generate_synthetic_images(image_config, models, n_images, device):
             (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
             
             # Simulate batch
-            images = cryo_em_simulator(
+            images, _ = cryo_em_simulator(
                 models,
                 indices.to(device),
                 quaternions.to(device),

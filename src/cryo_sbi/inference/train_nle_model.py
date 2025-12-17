@@ -254,7 +254,7 @@ def nle_train_no_saving(
                     amp,
                     snr,
                 ) = parameters
-                images = cryo_em_simulator(
+                images, _ = cryo_em_simulator(
                     models,
                     indices.to(device, non_blocking=True),
                     quaternions.to(device, non_blocking=True),

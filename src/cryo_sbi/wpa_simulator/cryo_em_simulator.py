@@ -26,10 +26,10 @@ def cryo_em_simulator(
     cs
 ):
     """
-    Simulates a batch of cryo-electron microscopy (cryo-EM) images of a set of given coars-grained models.
+    Simulates a batch of cryo-electron microscopy (cryo-EM) images of a set of given coarse-grained models.
 
     Args:
-        models (torch.Tensor): A tensor of coars grained models (num_models, 3, num_beads).
+        models (torch.Tensor): A tensor of coarse grained models (num_models, 3, num_beads).
         index (torch.Tensor): A tensor of indices to select the models to simulate.
         quaternion (torch.Tensor): A tensor of quaternions to rotate the models.
         sigma (torch.Tensor): The standard deviation of the Gaussian kernel used to project the density.
@@ -44,7 +44,8 @@ def cryo_em_simulator(
         cs (float): Spherical aberration in mm
 
     Returns:
-        torch.Tensor: A tensor of the simulated cryo-EM image.
+        torch.Tensor: A tensor of the simulated (noisy) cryo-EM image.
+        torch.Tensor: A tensor of the simulated (clean) cryo-EM image.
     """
     models_selected = models[index.round().long().flatten()]
     image = project_density(
@@ -55,47 +56,17 @@ def cryo_em_simulator(
         num_pixels,
         pixel_size,
     )
+    # detach and clone the clean image
+    image_clean = image.detach().clone()
+    # add CTF
     image = apply_ctf(image, defocus, b_factor, amp, pixel_size, voltage, cs)
+    # add noise
     image = add_noise(image, snr)
+    # normalize noisy and clean images
     image = gaussian_normalize_image(image)
-    return image
+    image_clean = gaussian_normalize_image(image_clean)
+    return image, image_clean
 
-
-def cryo_em_simulator_clean(
-    models,
-    index,
-    quaternion,
-    sigma,
-    shift,
-    num_pixels,
-    pixel_size
-):
-    """
-    Simulates a batch of clean cryo-electron microscopy (cryo-EM) images of a set of given coars-grained models.
-
-    Args:
-        models (torch.Tensor): A tensor of coars grained models (num_models, 3, num_beads).
-        index (torch.Tensor): A tensor of indices to select the models to simulate.
-        quaternion (torch.Tensor): A tensor of quaternions to rotate the models.
-        sigma (torch.Tensor): The standard deviation of the Gaussian kernel used to project the density.
-        shift (torch.Tensor): A tensor of shifts to apply to the models.
-        num_pixels (torch.Tensor): The number of pixels in the simulated image.
-        pixel_size (torch.Tensor): The size of each pixel in the simulated image.
-
-    Returns:
-        torch.Tensor: A tensor of the simulated cryo-EM image.
-    """
-    models_selected = models[index.round().long().flatten()]
-    image = project_density(
-        models_selected,
-        quaternion,
-        sigma,
-        shift,
-        num_pixels,
-        pixel_size,
-    )
-    image = gaussian_normalize_image(image)
-    return image
 
 class CryoEmSimulator:
     def __init__(self, config_fname: str, device: str = "cpu"):
@@ -205,7 +176,7 @@ class CryoEmSimulator:
         for i in range(0, num_sim, batch_size):
             batch_indices = indices[i : i + batch_size]
             batch_parameters = [param[i : i + batch_size] for param in parameters[1:]]
-            batch_images = cryo_em_simulator(
+            batch_images, _ = cryo_em_simulator(
                 self._models,
                 batch_indices,
                 *batch_parameters,

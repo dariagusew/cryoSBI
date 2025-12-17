@@ -677,7 +677,7 @@ def pretrain_image_embed(
                     (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
 
                     # get synthetic images
-                    syn_images = cryo_em_simulator(
+                    syn_images, _ = cryo_em_simulator(
                         models,
                         indices.to(device, non_blocking=True),
                         quaternions.to(device, non_blocking=True),

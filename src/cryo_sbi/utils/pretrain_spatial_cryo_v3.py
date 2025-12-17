@@ -330,7 +330,7 @@ def pretrain_spatial_cryo(
                 (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
                 
                 # Simulate images (inherently noisy from SNR)
-                images = cryo_em_simulator(
+                images, _ = cryo_em_simulator(
                     models,
                     indices.to(device, non_blocking=True),
                     quaternions.to(device, non_blocking=True),

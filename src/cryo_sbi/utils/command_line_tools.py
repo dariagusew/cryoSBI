@@ -64,41 +64,28 @@ def cl_models_to_tensor_topology():
         help="Output file path for the tensor (must be .pt file)."
     )
     cl_parser.add_argument(
-        "--selection",
-        action="store",
-        type=str,
-        required=False,
-        default="all",
-        help="Selection of atoms to include in models."
-    )
-    cl_parser.add_argument(
         "--topo_type",
         action="store",
         type=str,
-        required=False,
+        required=True,
         default=None,
         choices=['atomistic', 'calvados'],
-        help="Topology type: 'atomistic' or 'calvados'. Optional."
+        help="Topology type: 'atomistic' or 'calvados'."
     )
     cl_parser.add_argument(
         "--output_topology",
         action="store",
         type=str,
         required=False,
-        default=None,
-        help="Output topology file path. Required if --topo_type is specified."
+        default="topology.pt",
+        help="Output topology file path (Optional, default topology.pt."
     )
     
     args = cl_parser.parse_args()
     
-    # Validation: if topo_type is specified, output_topology must be provided
-    if args.topo_type is not None and args.output_topology is None:
-        cl_parser.error("--output_topology is required when --topo_type is specified.")
-    
     # Call the main function
     models_to_tensor_topology(
         pdb_files=args.pdb_files,
-        at_selection=args.selection,
         output_models=args.output_models,
         topo_type=args.topo_type,
         output_topology=args.output_topology

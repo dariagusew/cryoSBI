@@ -245,10 +245,9 @@ def get_calvados_topology(resnames):
 
 def models_to_tensor_topology(
         pdb_files,
-        at_selection,
         output_models,
-        topo_type=None,
-        output_topology=None
+        topo_type,
+        output_topology
     ):
     """
     Converts different model files in pdb format to a torch tensor and create topology.
@@ -256,12 +255,10 @@ def models_to_tensor_topology(
     ----------
     pdb_files : list
         A list of PDB files to convert to a torch tensor.
-    at_selection : str
-        Selection of atoms to include in models.
     output_models : str
-        The path to the output file for the tensor. Must be a .pt file.
+        The path to the output file for the models. Must be a .pt file.
     topo_type : str
-        The type of topology (optional, 'atomistic' or 'Calvados').
+        The type of topology ('atomistic' or 'calvados').
     output_topology : str
         The path to the output topology file. Must be a .pt file.
     Returns
@@ -278,6 +275,11 @@ def models_to_tensor_topology(
         # Create MDAnalysis Universe object from PDB file
         u = mda.Universe(pdb)
         # Atoms selections
+        if(topo_type=="atomistic"):
+          at_selection="name CA C1'"
+        else:
+          at_selection="all"
+        # Select
         atoms = u.select_atoms(at_selection)
         # Extract atom positions as numpy array with shape [natoms, 3]
         pos = atoms.positions
@@ -324,13 +326,11 @@ def models_to_tensor_topology(
     print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
 
     # Prepare topology
-    if(topo_type!=None):
-       if(topo_type.lower()=="atomistic"):
-          topo = get_atomistic_topology(ref_resnames)
-          
-       elif(topo_type.lower()=="calvados"):
-          topo = get_calvados_topology(ref_resnames)
+    if(topo_type=="atomistic"):
+       topo = get_atomistic_topology(ref_resnames)
+       
+    elif(topo_type=="calvados"):
+       topo = get_calvados_topology(ref_resnames)
 
-    if(topo_type!=None):
-       torch.save(topo, output_topology)
-       print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 
+    torch.save(topo, output_topology)
+    print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 

@@ -3,6 +3,7 @@ from modulefinder import Module
 import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
+from cryo_sbi.utils.generate_models import models_to_tensor_topology
 from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
@@ -10,6 +11,7 @@ import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 from pathlib import Path
 import mrcfile
+
 
 def cl_models_to_tensor():
     cl_parser = argparse.ArgumentParser(
@@ -36,6 +38,63 @@ def cl_models_to_tensor():
         n_pdbs=args.n_pdbs,
         top_file=args.top_file
     )
+
+
+def cl_models_to_tensor_topology():
+    """
+    Command line interface for converting PDB models to tensor with topology.
+    """
+    cl_parser = argparse.ArgumentParser(
+        description="Convert multiple PDB models to tensor and create topology",
+        epilog=""
+    )
+    cl_parser.add_argument(
+        "--pdb_files", 
+        action="store", 
+        type=str, 
+        nargs='+',
+        required=True,
+        help="List of PDB files to convert."
+    )
+    cl_parser.add_argument(
+        "--output_models", 
+        action="store", 
+        type=str, 
+        required=True,
+        help="Output file path for the tensor (must be .pt file)."
+    )
+    cl_parser.add_argument(
+        "--topo_type",
+        action="store",
+        type=str,
+        required=False,
+        default=None,
+        choices=['atomistic', 'calvados'],
+        help="Topology type: 'atomistic' or 'calvados'. Optional."
+    )
+    cl_parser.add_argument(
+        "--output_topology",
+        action="store",
+        type=str,
+        required=False,
+        default=None,
+        help="Output topology file path. Required if --topo_type is specified."
+    )
+    
+    args = cl_parser.parse_args()
+    
+    # Validation: if topo_type is specified, output_topology must be provided
+    if args.topo_type is not None and args.output_topology is None:
+        cl_parser.error("--output_topology is required when --topo_type is specified.")
+    
+    # Call the main function
+    models_to_tensor_topology(
+        pdb_files=args.pdb_files,
+        output_models=args.output_models,
+        topo_type=args.topo_type,
+        output_topology=args.output_topology
+    )
+
 
 def cl_process_mrc_stack():
     parser = argparse.ArgumentParser(

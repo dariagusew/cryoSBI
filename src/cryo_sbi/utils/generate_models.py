@@ -164,5 +164,162 @@ def models_to_tensor(
         assert n_pdbs is not None, "Please provide the number of pdb files."
         assert top_file is None, "The topology file is not needed for pdb files."
         pdb_parser(model_files, n_pdbs, output_file)
-        
 
+
+def get_atomistic_topology(resnames):
+    """
+    Extract scattering factors (A and B values) for given residues.
+    
+    Parameters
+    ----------
+    resnames : list
+        List of residue names (3-letter codes for amino acids, 1-2 letter codes for nucleic acids).
+    
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape [2, n_residues] containing A and B scattering factors.
+    """
+    # Scattering factors: A and B values
+    # Protein: centered in CA, RNA/DNA: centered in C1'
+    scattering = {
+        # Amino acids
+        'ALA': (11.7241, 27.9), 'ARG': (25.8910, 62.8), 'ASN': (18.4298, 42.6), 'ASP': (18.2001, 42.1),
+        'CYS': (16.8838, 38.9), 'GLN': (20.9390, 49.2), 'GLU': (20.7093, 48.7), 'GLY': (9.2149, 26.2),
+        'HIS': (23.6779, 55.8), 'ILE': (19.2517, 42.9), 'LEU': (19.2517, 44.8), 'LYS': (21.4648, 50.3),
+        'MET': (21.9022, 51.4), 'PHE': (26.7793, 63.5), 'PRO': (16.7425, 36.9), 'SER': (13.7075, 32.0),
+        'THR': (16.2167, 36.6), 'TRP': (34.0108, 83.5), 'TYR': (28.7627, 69.0), 'VAL': (16.7425, 37.6),
+        # RNA
+        'A': (53.5441, 97.9), 'C': (48.5921, 87.5), 'G': (55.5275, 101.3), 'U': (48.3624, 87.2),
+        # DNA
+        'DA': (51.5607, 98.3), 'DC': (46.6087, 88.7), 'DG': (53.5441, 102.8), 'DT': (48.8882, 92.7)
+    }
+    
+    # Extract A and B values for each residue using list comprehension
+    try:
+        A_list = [scattering[r][0] for r in resnames]
+        B_list = [scattering[r][1] for r in resnames]
+    except KeyError as e:
+        raise ValueError(f"Unknown residue name: {e}. Please check your topology.")
+    
+    # Create tensor with shape [2, n_residues]
+    topo = torch.tensor([A_list, B_list], dtype=torch.float32)
+    
+    return topo
+
+def get_calvados_topology(resnames):
+    """
+    Extract CALVADOS scattering factors (A and B values) for given residues.
+    
+    Parameters
+    ----------
+    resnames : list
+        List of residue names (3-letter codes for amino acids).
+    
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape [2, n_residues] containing A and B scattering factors
+        for CALVADOS coarse-grained model.
+    """
+    # CALVADOS scattering factors: A and B values (centered in CA)
+    scattering = {
+        'ALA': (11.7241, 27.3), 'ARG': (25.8910, 73.2), 'ASN': (18.4298, 41.6), 'ASP': (18.2001, 41.2),
+        'CYS': (16.8838, 38.3), 'GLN': (20.9390, 52.5), 'GLU': (20.7093, 52.2), 'GLY': (9.2149, 23.6),
+        'HIS': (23.6779, 52.9), 'ILE': (19.2517, 41.5), 'LEU': (19.2517, 45.0), 'LYS': (21.4648, 57.1),
+        'MET': (21.9022, 54.2), 'PHE': (26.7793, 58.4), 'PRO': (16.7425, 34.3), 'SER': (13.7075, 31.3),
+        'THR': (16.2167, 35.0), 'TRP': (34.0108, 67.6), 'TYR': (28.7627, 61.0), 'VAL': (16.7425, 36.3)
+    }
+    
+    # Extract A and B values for each residue using list comprehension
+    try:
+        A_list = [scattering[r][0] for r in resnames]
+        B_list = [scattering[r][1] for r in resnames]
+    except KeyError as e:
+        raise ValueError(f"Unknown residue name: {e}. CALVADOS only supports standard amino acids.")
+    
+    # Create tensor with shape [2, n_residues]
+    topo = torch.tensor([A_list, B_list], dtype=torch.float32)
+    
+    return topo
+
+def models_to_tensor_topology(
+        pdb_files,
+        output_models,
+        topo_type=None,
+        output_topology=None
+    ):
+    """
+    Converts different model files in pdb format to a torch tensor and create topology.
+    Parameters
+    ----------
+    pdb_files : list
+        A list of PDB files to convert to a torch tensor.
+    output_models : str
+        The path to the output file for the tensor. Must be a .pt file.
+    topo_type : str
+        The type of topology (optional, 'atomistic' or 'Calvados').
+    output_topology : str
+        The path to the output topology file. Must be a .pt file.
+    Returns
+    -------
+    None
+    """
+    
+    # Initialize lists to store positions and residues from all models
+    pos_list = []
+    res_list = []
+    
+    # Loop through all PDB files to extract atomic information
+    for pdb in pdb_files:
+        # Create MDAnalysis Universe object from PDB file
+        u = mda.Universe(pdb)
+        # Extract atom positions as numpy array with shape [natoms, 3]
+        pos = u.atoms.positions
+        # Transpose and append positions to the list
+        pos_list.append(pos.T)
+        # Extract residue information (names, indices, etc.)
+        res = u.atoms.residues
+        # Append residues to the list
+        res_list.append(res)
+
+    # Validate that all models have the same number of atoms
+    n_atoms = len(pos_list[0])
+    for i, pos in enumerate(pos_list):
+        if len(pos) != n_atoms:
+            raise ValueError(
+                f"Model {i} has {len(pos)} atoms, but model 0 has {n_atoms} atoms. "
+                "All models must have the same number of atoms."
+            )
+
+    # Validate that all models have the same residue composition
+    ref_resnames = [res.resname for res in res_list[0]]
+    ref_resids = [res.resid for res in res_list[0]]
+    
+    for i, res in enumerate(res_list[1:], start=1):
+        current_resnames = [r.resname for r in res]
+        current_resids = [r.resid for r in res]
+        
+        if current_resnames != ref_resnames or current_resids != ref_resids:
+            raise ValueError(
+                f"Model {i} has different residues than model 0. "
+                "All models must have the same residue composition."
+            )
+
+    # Convert list of numpy arrays to torch tensor [n_models, 3, n_atoms]
+    model = torch.tensor(np.array(pos_list), dtype=torch.float32)
+
+    # Save the tensor to the specified output file
+    torch.save(model, output_models)
+    print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
+
+    # Prepare topology
+    if(topo_type.lower()=="atomistic"):
+       topo = get_atomistic_topology(ref_resnames)
+       
+    elif(topo_type.lower()="calvados"):
+       topo = get_calvados_topology(ref_resnames)
+
+    if(topo_type not None and output_topology not None):
+       torch.save(topo, output_topology)
+       print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 

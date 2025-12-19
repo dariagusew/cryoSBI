@@ -3,12 +3,12 @@ from modulefinder import Module
 import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
-rom cryo_sbi.utils.process_mrc_stack import process_mrc_stack
+from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
 import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
-
+from pathlib import Path
 
 def cl_models_to_tensor():
     cl_parser = argparse.ArgumentParser(

@@ -9,6 +9,7 @@ from cryo_sbi.utils.infer_populations import PopulationOptimizer
 import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 from pathlib import Path
+import mrcfile
 
 def cl_models_to_tensor():
     cl_parser = argparse.ArgumentParser(
@@ -117,6 +118,14 @@ def cl_process_mrc_stack():
         sys.exit(1)
 
 def cl_pretrain_image_embed():
+    try:
+        import mrcfile
+        MRCFILE_AVAILABLE = True
+    except ImportError:
+        MRCFILE_AVAILABLE = False
+        print("Warning: mrcfile not installed. Real image loading disabled.")
+        print("Install with: pip install mrcfile")
+
     parser = argparse.ArgumentParser(
         description='Pre-training for image encoder'
     )

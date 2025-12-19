@@ -51,7 +51,9 @@ import numpy as np
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-
+from cryo_sbi.inference.priors import get_image_priors, PriorLoader
+from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
+from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator
 try:
     import mrcfile
     MRCFILE_AVAILABLE = True
@@ -60,9 +62,6 @@ except ImportError:
     print("Warning: mrcfile not installed. Real image loading disabled.")
     print("Install with: pip install mrcfile")
 
-from cryo_sbi.inference.priors import get_image_priors, PriorLoader
-from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
-from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator
 
 # ============================================================================
 # MRC FILE HANDLING

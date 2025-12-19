@@ -2,7 +2,7 @@ from typing import Union
 import MDAnalysis as mda
 from MDAnalysis.analysis import align
 import torch
-
+import numpy as np
 
 def pdb_parser_(fname: str, atom_selection: str = "name CA") -> torch.tensor:
     """
@@ -245,6 +245,7 @@ def get_calvados_topology(resnames):
 
 def models_to_tensor_topology(
         pdb_files,
+        at_selection,
         output_models,
         topo_type=None,
         output_topology=None
@@ -255,6 +256,8 @@ def models_to_tensor_topology(
     ----------
     pdb_files : list
         A list of PDB files to convert to a torch tensor.
+    at_selection : str
+        Selection of atoms to include in models.
     output_models : str
         The path to the output file for the tensor. Must be a .pt file.
     topo_type : str
@@ -274,12 +277,14 @@ def models_to_tensor_topology(
     for pdb in pdb_files:
         # Create MDAnalysis Universe object from PDB file
         u = mda.Universe(pdb)
+        # Atoms selections
+        atoms = u.select_atoms(at_selection)
         # Extract atom positions as numpy array with shape [natoms, 3]
-        pos = u.atoms.positions
+        pos = atoms.positions
         # Transpose and append positions to the list
         pos_list.append(pos.T)
         # Extract residue information (names, indices, etc.)
-        res = u.atoms.residues
+        res = atoms.residues
         # Append residues to the list
         res_list.append(res)
 
@@ -319,12 +324,13 @@ def models_to_tensor_topology(
     print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
 
     # Prepare topology
-    if(topo_type.lower()=="atomistic"):
-       topo = get_atomistic_topology(ref_resnames)
-       
-    elif(topo_type.lower()="calvados"):
-       topo = get_calvados_topology(ref_resnames)
+    if(topo_type!=None):
+       if(topo_type.lower()=="atomistic"):
+          topo = get_atomistic_topology(ref_resnames)
+          
+       elif(topo_type.lower()=="calvados"):
+          topo = get_calvados_topology(ref_resnames)
 
-    if(topo_type not None and output_topology not None):
+    if(topo_type!=None):
        torch.save(topo, output_topology)
        print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 

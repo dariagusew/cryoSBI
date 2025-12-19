@@ -64,6 +64,14 @@ def cl_models_to_tensor_topology():
         help="Output file path for the tensor (must be .pt file)."
     )
     cl_parser.add_argument(
+        "--selection",
+        action="store",
+        type=str,
+        required=False,
+        default="all",
+        help="Selection of atoms to include in models."
+    )
+    cl_parser.add_argument(
         "--topo_type",
         action="store",
         type=str,
@@ -90,6 +98,7 @@ def cl_models_to_tensor_topology():
     # Call the main function
     models_to_tensor_topology(
         pdb_files=args.pdb_files,
+        at_selection=args.selection,
         output_models=args.output_models,
         topo_type=args.topo_type,
         output_topology=args.output_topology

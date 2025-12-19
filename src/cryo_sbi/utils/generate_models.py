@@ -309,6 +309,11 @@ def models_to_tensor_topology(
     # Convert list of numpy arrays to torch tensor [n_models, 3, n_atoms]
     model = torch.tensor(np.array(pos_list), dtype=torch.float32)
 
+    # Center models by subtracting the geometric center of each model
+    # Calculate center: mean along atoms dimension (dim=2), keep dims for broadcasting
+    center = model.mean(dim=2, keepdim=True)  # Shape: [n_models, 3, 1]
+    model = model - center  # Broadcast subtraction across all atoms
+
     # Save the tensor to the specified output file
     torch.save(model, output_models)
     print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")

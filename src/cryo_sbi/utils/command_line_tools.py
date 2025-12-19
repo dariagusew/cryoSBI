@@ -3,6 +3,7 @@ from modulefinder import Module
 import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
+rom cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
 import cryo_sbi.utils.estimator_utils as est_utils
@@ -34,6 +35,86 @@ def cl_models_to_tensor():
         n_pdbs=args.n_pdbs,
         top_file=args.top_file
     )
+
+def cl_process_mrc_stack():
+    parser = argparse.ArgumentParser(
+        description='Process MRC particle stack: fix header and downsample (optimized for large files)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=""
+    )
+    
+    parser.add_argument('input', type=str, help='Input MRC file')
+    parser.add_argument('output', type=str, help='Output MRC file')
+    parser.add_argument('size', type=int, help='Output size (pixels)')
+    
+    parser.add_argument('--batch-size', type=int, default=32,
+                       help='Batch size for GPU processing (default: 32, reduce if GPU OOM)')
+    parser.add_argument('--normalize', type=str, default='per_particle',
+                       choices=['per_particle', 'global', 'none'],
+                       help='Normalization method (default: per_particle)')
+    parser.add_argument('--voxel-size', type=float, default=None,
+                       help='Pixel size in Angstroms (default: read from header)')
+    parser.add_argument('--stride', type=int, default=1,
+                       help='Read every Nth particle (default: 1, read all)')
+    parser.add_argument('--device', type=str, default='cuda',
+                       choices=['cuda', 'cpu'],
+                       help='Device to use (default: cuda)')
+    parser.add_argument('--max-size-gb', type=float, default=None,
+                       help='Maximum file size to process in GB (default: no limit)')
+    parser.add_argument('--validate', action='store_true',
+                       help='Only validate input file without processing')
+    
+    args = parser.parse_args()
+    
+    # Validate inputs
+    if not Path(args.input).exists():
+        print(f"❌ Error: Input file not found: {args.input}")
+        sys.exit(1)
+    
+    if args.size <= 0 or args.size > 2048:
+        print(f"❌ Error: Invalid output size: {args.size} (must be 1-2048)")
+        sys.exit(1)
+    
+    if args.stride < 1:
+        print(f"❌ Error: Invalid stride: {args.stride} (must be >= 1)")
+        sys.exit(1)
+    
+    if args.batch_size < 1:
+        print(f"❌ Error: Invalid batch size: {args.batch_size} (must be >= 1)")
+        sys.exit(1)
+    
+    # Check if output will overwrite existing file
+    if Path(args.output).exists() and not args.validate:
+        response = input(f"⚠️  Output file exists: {args.output}\n   Overwrite? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("❌ Aborted by user")
+            sys.exit(1)
+    
+    # Process
+    try:
+        success = process_mrc_stack(
+            input_path=args.input,
+            output_path=args.output,
+            target_size=args.size,
+            batch_size=args.batch_size,
+            normalize=args.normalize,
+            voxel_size=args.voxel_size,
+            device=args.device,
+            max_size_gb=args.max_size_gb,
+            stride=args.stride,
+            validate_only=args.validate
+        )
+        
+        sys.exit(0 if success else 1)
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted by user")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n\n❌ Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 def cl_pretrain_image_embed():
     parser = argparse.ArgumentParser(

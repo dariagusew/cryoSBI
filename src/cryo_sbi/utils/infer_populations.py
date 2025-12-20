@@ -3,7 +3,8 @@ import numpy as np
 from tqdm.auto import tqdm
 from cryo_sbi import CryoEmSimulator
 import cryo_sbi.utils.estimator_utils as est_utils
-
+from cryo_sbi.inference.models import build_models
+import mrcfile
 
 def center_models(models):
     """
@@ -387,3 +388,76 @@ class PopulationOptimizer:
         self.rmse_values = np.array(self.rmse_values)
         self.pop_fraction_record = np.array(self.pop_fraction_record)
         return self.rmse_values, self.pop_fraction_record
+
+
+def run_inference_real_data(args):
+    """
+    Executes the core inference workflow using the provided arguments.
+
+    Args:
+        args: An argparse.Namespace object containing the script parameters.
+    """
+    # 1. Setup Device
+    if not torch.cuda.is_available() and "cuda" in args.device:
+        logging.warning(f"CUDA not available. Switching device from '{args.device}' to 'cpu'.")
+        args.device = "cpu"
+    device = torch.device(args.device)
+    print(f"Using device: {device}")
+
+    # 2. Load Pre-trained SBI Estimator
+    print(f"Loading SBI estimator from {args.estimator_file}")
+    estimator = est_utils.load_estimator(
+        args.train_config_file,
+        args.image_config_file,
+        build_models.build_nle_flow_model,
+        args.estimator_file,
+        device=device
+    )
+    estimator.eval()
+
+    # 3. Load 3D Models
+    print(f"Loading 3D models from {args.models_file}")
+    models = torch.load(args.models_file).to(device)
+    print(f"Loaded {models.shape[0]} models of size {models.shape[1:]}")
+
+    # 4. Load Experimental 2D Images
+    print(f"Reading experimental images from {args.image_stack}")
+    with mrcfile.open(args.image_stack, mode='r') as mrc:
+        images = mrc.data
+    
+    print(f"Image stack shape: {images.shape}")
+    print(f"Number of particles: {images.shape[0]}")
+    print(f"Particle size: {images.shape[1]} x {images.shape[2]}")
+ 
+    # Convert to torch tensor, kept on CPU to be batched to GPU later
+    images = torch.from_numpy(images).cpu()
+
+    # 5. Evaluate Likelihood Matrix
+    print("Evaluating pairwise likelihood matrix...")
+    log_probs_matrix = evaluate_likelihood_pairwise(
+        estimator,
+        images,
+        models,
+        batch_size_pairs=args.batch_size,
+        device=device
+    )
+    # Transpose to shape [N_models, N_images] for the optimizer
+    log_probs_matrix = log_probs_matrix.T
+    print(f"Likelihood matrix evaluation complete. Shape: {log_probs_matrix.shape}")
+
+    # 6. Optimize Weights
+    print("Initializing weight optimizer...")
+    opt = WeightOptimizer(log_probs_matrix, device=device)
+    
+    print("Optimizing weights to maximize the posterior...")
+    w_opt, _ = opt.optimize()
+    
+    # 7. Save and Report Results
+    print("Optimization complete.")
+    np.set_printoptions(precision=4, suppress=True)
+    print(f"Optimal weights:\n{w_opt}")
+    
+    print(f"Saving optimal weights to {args.output_file}")
+    torch.save(w_opt, args.output_file)
+    
+    print("Script finished successfully.")

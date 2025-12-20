@@ -93,23 +93,23 @@ def cl_nle_train_no_saving():
         "--n_workers", action="store", type=int, required=False, default=1
     )
     cl_parser.add_argument(
-        "--train_device", action="store", type=str, required=False, default="cpu"
+        "--train_device", action="store", type=str, required=False, default="cuda"
     )
     cl_parser.add_argument(
-        "--saving_freq", action="store", type=int, required=False, default=20
+        "--saving_freq", action="store", type=int, required=False, default=100
     )
     cl_parser.add_argument(
         "--simulation_batch_size",
         action="store",
         type=int,
         required=False,
-        default=1024,
+        default=2048,
     )
     cl_parser.add_argument(
         "--pretrained_embedding_path",
         action="store",
         type=str,
-        required=False,
+        required=True,
         default=None,
     )
     
@@ -118,7 +118,7 @@ def cl_nle_train_no_saving():
         action="store",
         type=bool,
         required=False,
-        default=False,
+        default=True,
     )
 
     cl_parser.add_argument(

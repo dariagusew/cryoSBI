@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
 from cryo_sbi.utils.generate_models import models_to_tensor_topology
+from cryo_sbi.utils.estimate_param_simulation import estimate_param_simulation_RELION 
 from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
@@ -171,6 +172,51 @@ def cl_process_mrc_stack():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+def cl_estimate_param_simulation():
+    parser = argparse.ArgumentParser(
+        description='Extraction of simulation parameters from cryo-EM data',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=""
+    )
+    
+    parser.add_argument('star_file', type=str,
+                        help='Input STAR file')
+
+    parser.add_argument('--star_format', type=str, required=True,
+                        choices=['RELION'], 
+                        help='Input STAR file from RELION')
+    
+    args = parser.parse_args()
+    
+    # Header
+    print("\n" + "╔" + "="*58 + "╗")
+    print("║" + " "*58 + "║")
+    print("║" + "  CRYO-EM SIMULATION PARAMETER EXTRACTION".center(58) + "║")
+    print("║" + "  FROM STAR FILES".center(58) + "║")
+    print("║" + " "*58 + "║")
+    print("╚" + "="*58 + "╝")
+    
+    print(f"\n📁 Input: {args.star_file}")
+    print(f"\n📁 ISTAR format: {args.star_format}")
+    
+    # Check file exists
+    if not Path(args.star_file).exists():
+        print(f"\n❌ Error: File not found: {args.star_file}")
+        return 1
+    
+    # Call appropriate function
+    if(args.star_format=="RELION"):
+       estimate_param_simulation_RELION(args.star_file)
+ 
+    # Success message
+    print("\n" + "╔" + "="*58 + "╗")
+    print("║" + " "*58 + "║")
+    print("║" + "✓ EXTRACTION COMPLETE!".center(58) + "║")
+    print("║" + " "*58 + "║")
+    print("╚" + "="*58 + "╝")
+    print()
+    
 
 def cl_pretrain_image_embed():
     try:

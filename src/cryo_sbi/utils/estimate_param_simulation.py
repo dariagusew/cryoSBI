@@ -16,6 +16,10 @@ import json
 from typing import Optional, Tuple, Dict
 import warnings
 import sys
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy.stats import truncnorm
+from scipy.optimize import minimize
 
 # Suppress warnings
 warnings.filterwarnings('ignore', category=FutureWarning, message='.*delim_whitespace.*')
@@ -557,15 +561,33 @@ def extract_pixel_and_image_info(star_file):
 # DEFOCUS EXTRACTION
 # ============================================================================
 
-def extract_defocus_statistics(star_file):
-    """Extract defocus statistics from STAR file."""
+def extract_defocus_statistics(star_file: str, output_plot_path: Optional[str] = None):
+    """
+    Extracts defocus statistics, fits a truncated Gaussian, and plots the distribution.
+
+    Args:
+    - star_file (str): Path to the input STAR file.
+    - output_plot_path (Optional[str]): If provided, saves a plot of the defocus
+      distribution to this path (e.g., "defocus_distribution.png").
+
+    Returns:
+    - dict: A dictionary containing defocus statistics and fitted parameters.
+    """
     print("\n" + "="*60)
-    print("EXTRACTING DEFOCUS PARAMETERS")
+    print("EXTRACTING AND ANALYZING DEFOCUS PARAMETERS")
     print("="*60)
     
-    data = starfile.read(star_file)
-    particles = data['particles'] if 'particles' in data else data
-    
+    try:
+        data = starfile.read(star_file)
+        particles = data['particles'] if 'particles' in data else data
+    except Exception as e:
+        print(f"❌ Error reading STAR file: {e}")
+        return {}
+
+    if not all(k in particles.columns for k in ['rlnDefocusU', 'rlnDefocusV']):
+        print("❌ 'rlnDefocusU' or 'rlnDefocusV' columns not found.")
+        return {}
+
     defocus_u = particles['rlnDefocusU'].values / 10000  # Å → µm
     defocus_v = particles['rlnDefocusV'].values / 10000
     defocus_avg = (defocus_u + defocus_v) / 2
@@ -580,15 +602,97 @@ def extract_defocus_statistics(star_file):
         'p75': float(np.percentile(defocus_avg, 75)),
     }
     
-    print(f"\n✓ Defocus Statistics (µm):")
+    print(f"\n✓ Basic Defocus Statistics (µm):")
     print(f"  Range:  {stats['min']:.2f} - {stats['max']:.2f} µm")
     print(f"  Mean:   {stats['mean']:.2f} µm")
     print(f"  Median: {stats['median']:.2f} µm")
+    print(f"  StdDev: {stats['std']:.2f} µm")
     
+    # --- NEW: Truncated Gaussian Fitting ---
+    print("\n" + "-"*60)
+    print("FITTING TRUNCATED GAUSSIAN DISTRIBUTION")
+    print("-"*60)
+    
+    # Define bounds for the fit
+    lower_bound, upper_bound = stats['min'], stats['max']
+
+    # The negative log-likelihood function to minimize
+    def neg_log_likelihood(params, data):
+        loc, scale = params
+        if scale <= 0: # Scale must be positive
+            return np.inf
+        # Calculate a and b parameters for truncnorm in standard units
+        a = (lower_bound - loc) / scale
+        b = (upper_bound - loc) / scale
+        # Calculate log-likelihood and return its negative
+        log_likelihood = np.sum(truncnorm.logpdf(data, a=a, b=b, loc=loc, scale=scale))
+        return -log_likelihood
+
+    # Initial guess and optimization
+    if stats['std'] > 0:
+        initial_guess = [stats['mean'], stats['std']]
+        result = minimize(
+            neg_log_likelihood,
+            initial_guess,
+            args=(defocus_avg,),
+            method='Nelder-Mead'
+        )
+        if result.success:
+            fit_loc, fit_scale = result.x
+            stats['fit_loc'] = float(fit_loc)
+            stats['fit_scale'] = float(fit_scale)
+            print("✓ Fit successful.")
+            print(f"  Fitted Location (µ): {fit_loc:.2f}")
+            print(f"  Fitted Scale (σ):    {fit_scale:.2f}")
+        else:
+            print("❌ Fitting failed. Using sample mean/std as fallback.")
+            stats['fit_loc'] = stats['mean']
+            stats['fit_scale'] = stats['std']
+    else:
+        print("⚠️ Data has zero variance. Skipping fit.")
+        stats['fit_loc'] = stats['mean']
+        stats['fit_scale'] = 0.0
+
+    # --- NEW: Plotting ---
+    if output_plot_path:
+        print("\n" + "-"*60)
+        print(f"GENERATING PLOT: {output_plot_path}")
+        print("-"*60)
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        # Plot histogram and KDE
+        sns.histplot(defocus_avg, bins='auto', stat='density', kde=True, ax=ax,
+                     label='Data (Histogram + KDE)', color='skyblue', alpha=0.7)
+
+        # Plot the fitted Truncated Gaussian PDF
+        x_fit = np.linspace(lower_bound, upper_bound, 400)
+        fit_loc, fit_scale = stats['fit_loc'], stats['fit_scale']
+        a_fit = (lower_bound - fit_loc) / fit_scale
+        b_fit = (upper_bound - fit_loc) / fit_scale
+        y_fit = truncnorm.pdf(x_fit, a=a_fit, b=b_fit, loc=fit_loc, scale=fit_scale)
+        ax.plot(x_fit, y_fit, 'r-', lw=2.5, label=f'Truncated Gaussian Fit\n(loc={fit_loc:.2f}, scale={fit_scale:.2f})')
+
+        ax.set_title('Defocus Distribution Analysis', fontsize=16)
+        ax.set_xlabel('Average Defocus (µm)', fontsize=12)
+        ax.set_ylabel('Density', fontsize=12)
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        
+        try:
+            plt.savefig(output_plot_path, dpi=150, bbox_inches='tight')
+            print(f"✓ Plot successfully saved to {output_plot_path}")
+        except Exception as e:
+            print(f"❌ Failed to save plot: {e}")
+        plt.close(fig)
+
     recommended_min = max(0.5, stats['p25'] - 0.5)
     recommended_max = min(5.0, stats['p75'] + 0.5)
     
-    print(f"✓ Recommended: [{recommended_min:.2f}, {recommended_max:.2f}] µm")
+    print("\n" + "-"*60)
+    print("RECOMMENDATIONS")
+    print("-"*60)
+    print(f"✓ Recommended defocus range for simulation: [{recommended_min:.2f}, {recommended_max:.2f}] µm")
     
     stats['recommended_min'] = recommended_min
     stats['recommended_max'] = recommended_max
@@ -702,7 +806,7 @@ def estimate_param_simulation_RELION(star_file):
     print("\n" + "█"*60)
     print("  STEP 3/4: EXTRACTING DEFOCUS")
     print("█"*60)
-    defocus_stats = extract_defocus_statistics(star_file)
+    defocus_stats = extract_defocus_statistics(star_file, "defocus_distribution.png")
     
     print("\n" + "█"*60)
     print("  STEP 4/4: EXTRACTING AMPLITUDE CONTRAST")

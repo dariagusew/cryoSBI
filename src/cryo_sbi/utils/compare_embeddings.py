@@ -36,15 +36,6 @@ from sklearn.model_selection import cross_val_score
 from sklearn.neighbors import NearestNeighbors
 from scipy.stats import gaussian_kde, spearmanr
 import mrcfile
-
-# Optional: UMAP for better visualization
-try:
-    import umap
-    HAS_UMAP = True
-except ImportError:
-    HAS_UMAP = False
-    print("⚠️  UMAP not available. Install with: pip install umap-learn")
-
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator
@@ -449,63 +440,6 @@ def compute_separation_metrics(synthetic_emb, real_emb):
 
 
 # ============================================================================
-# LEGACY METRICS (for comparison)
-# ============================================================================
-
-def compute_legacy_statistics(synthetic_emb, real_emb):
-    """OLD distance-based metrics (less reliable for detecting separation)"""
-    print("\n" + "="*70)
-    print("LEGACY DISTANCE METRICS")
-    print("(Note: These can be misleading for separated distributions)")
-    print("="*70)
-    
-    stats = {}
-    
-    # Basic statistics
-    print(f"\nBasic statistics:")
-    print(f"  Synthetic - Mean: {synthetic_emb.mean():.4f}, Std: {synthetic_emb.std():.4f}")
-    print(f"  Real      - Mean: {real_emb.mean():.4f}, Std: {real_emb.std():.4f}")
-    
-    # Distance statistics
-    print(f"\nPairwise distance statistics:")
-    
-    # Within-group distances (sample for speed)
-    n_samples = min(1000, len(synthetic_emb), len(real_emb))
-    
-    syn_sample = synthetic_emb[:n_samples]
-    syn_dists = torch.cdist(syn_sample, syn_sample)
-    syn_dists = syn_dists[torch.triu(torch.ones_like(syn_dists), diagonal=1) == 1]
-    stats['synthetic_dist_mean'] = syn_dists.mean().item()
-    stats['synthetic_dist_std'] = syn_dists.std().item()
-    
-    real_sample = real_emb[:n_samples]
-    real_dists = torch.cdist(real_sample, real_sample)
-    real_dists = real_dists[torch.triu(torch.ones_like(real_dists), diagonal=1) == 1]
-    stats['real_dist_mean'] = real_dists.mean().item()
-    stats['real_dist_std'] = real_dists.std().item()
-    
-    print(f"  Within synthetic: {stats['synthetic_dist_mean']:.4f} ± {stats['synthetic_dist_std']:.4f}")
-    print(f"  Within real:      {stats['real_dist_mean']:.4f} ± {stats['real_dist_std']:.4f}")
-    
-    # Cross-group distances
-    cross_dists = torch.cdist(syn_sample, real_sample)
-    stats['cross_dist_mean'] = cross_dists.mean().item()
-    stats['cross_dist_std'] = cross_dists.std().item()
-    
-    print(f"  Synthetic-Real:   {stats['cross_dist_mean']:.4f} ± {stats['cross_dist_std']:.4f}")
-    
-    # OLD overlap ratio (can be misleading!)
-    within_mean = np.mean([stats['synthetic_dist_mean'], stats['real_dist_mean']])
-    overlap_ratio = stats['cross_dist_mean'] / within_mean
-    stats['legacy_overlap_ratio'] = overlap_ratio
-    
-    print(f"\n⚠️  Legacy overlap ratio: {overlap_ratio:.4f}")
-    print(f"    (This metric can miss spatial separation!)")
-    
-    return stats
-
-
-# ============================================================================
 # ENHANCED VISUALIZATIONS
 # ============================================================================
 
@@ -545,9 +479,9 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
                alpha=0.3, s=1, label='Real', c='red')
     
     # Centroids
-    centroid_syn = X_syn_pca.mean(axis=0)
-    centroid_real = X_real_pca.mean(axis=0)
-    
+    centroid_syn  = np.median(X_syn_pca, axis=0)
+    centroid_real = np.median(X_real_pca, axis=0)
+ 
     ax.scatter(*centroid_syn, s=300, c='blue', marker='X', 
                edgecolors='black', linewidths=2, label='Syn Centroid', zorder=5)
     ax.scatter(*centroid_real, s=300, c='red', marker='X', 
@@ -575,7 +509,7 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
     ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
     ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
     ax.set_title('PCA: Centroid Separation')
-    ax.legend(markerscale=3)
+    ax.legend(markerscale=0.1)
     ax.grid(True, alpha=0.3)
     
     # Panel 2: Density visualization
@@ -639,115 +573,11 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
     print(f"  ✅ Saved: pca_enhanced.png")
     print(f"     Separation: {normalized_sep:.2f}σ")
 
+   
     # ============================================================
-    # 2. t-SNE with overlap quantification
+    # 2. Distance distributions
     # ============================================================
-    print("\n2. t-SNE visualization...")
-    
-    # Use subset for speed
-    n_samples_per_group = min(5000, len(X_syn), len(X_real))
-    
-    syn_idx = np.random.choice(len(X_syn), n_samples_per_group, replace=False)
-    real_idx = np.random.choice(len(X_real), n_samples_per_group, replace=False)
-    
-    X_subset = np.vstack([X_syn[syn_idx], X_real[real_idx]])
-    labels_subset = np.array(['Synthetic']*n_samples_per_group + 
-                             ['Real']*n_samples_per_group)
-    
-    tsne = TSNE(n_components=2, perplexity=30, random_state=42)
-    X_tsne = tsne.fit_transform(X_subset)
-    
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    
-    # Panel 1: Standard visualization
-    ax = axes[0]
-    mask_syn = labels_subset == 'Synthetic'
-    ax.scatter(X_tsne[mask_syn, 0], X_tsne[mask_syn, 1],
-               alpha=0.3, s=1, label='Synthetic', c='blue')
-    ax.scatter(X_tsne[~mask_syn, 0], X_tsne[~mask_syn, 1],
-               alpha=0.3, s=1, label='Real', c='red')
-    
-    ax.set_xlabel('t-SNE 1')
-    ax.set_ylabel('t-SNE 2')
-    ax.set_title('t-SNE Projection')
-    ax.legend(markerscale=3)
-    ax.grid(True, alpha=0.3)
-    
-    # Panel 2: With convex hulls
-    ax = axes[1]
-    ax.scatter(X_tsne[mask_syn, 0], X_tsne[mask_syn, 1],
-               alpha=0.3, s=1, label='Synthetic', c='blue')
-    ax.scatter(X_tsne[~mask_syn, 0], X_tsne[~mask_syn, 1],
-               alpha=0.3, s=1, label='Real', c='red')
-    
-    # Draw convex hulls
-    try:
-        from scipy.spatial import ConvexHull
-        
-        syn_tsne = X_tsne[mask_syn]
-        real_tsne = X_tsne[~mask_syn]
-        
-        # Subsample for convex hull
-        if len(syn_tsne) > 1000:
-            hull_idx = np.random.choice(len(syn_tsne), 1000, replace=False)
-            hull_syn = ConvexHull(syn_tsne[hull_idx])
-            for simplex in hull_syn.simplices:
-                ax.plot(syn_tsne[hull_idx][simplex, 0], 
-                       syn_tsne[hull_idx][simplex, 1], 'b-', alpha=0.3)
-        
-        if len(real_tsne) > 1000:
-            hull_idx = np.random.choice(len(real_tsne), 1000, replace=False)
-            hull_real = ConvexHull(real_tsne[hull_idx])
-            for simplex in hull_real.simplices:
-                ax.plot(real_tsne[hull_idx][simplex, 0], 
-                       real_tsne[hull_idx][simplex, 1], 'r-', alpha=0.3)
-    except Exception as e:
-        print(f"  ⚠️  Convex hull failed: {e}")
-    
-    ax.set_xlabel('t-SNE 1')
-    ax.set_ylabel('t-SNE 2')
-    ax.set_title('t-SNE with Convex Hulls')
-    ax.legend(markerscale=3)
-    ax.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'tsne_projection.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"  ✅ Saved: tsne_projection.png")
-    
-    # ============================================================
-    # 3. UMAP (if available)
-    # ============================================================
-    if HAS_UMAP:
-        print("\n3. UMAP visualization...")
-        
-        reducer = umap.UMAP(n_components=2, random_state=42, n_neighbors=15)
-        X_umap = reducer.fit_transform(X_subset)
-        
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-        
-        ax.scatter(X_umap[mask_syn, 0], X_umap[mask_syn, 1],
-                   alpha=0.3, s=1, label='Synthetic', c='blue')
-        ax.scatter(X_umap[~mask_syn, 0], X_umap[~mask_syn, 1],
-                   alpha=0.3, s=1, label='Real', c='red')
-        
-        ax.set_xlabel('UMAP 1')
-        ax.set_ylabel('UMAP 2')
-        ax.set_title('UMAP Projection')
-        ax.legend(markerscale=3)
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, 'umap_projection.png'), dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"  ✅ Saved: umap_projection.png")
-    
-    # ============================================================
-    # 4. Distance distributions
-    # ============================================================
-    print("\n4. Distance distribution comparison...")
+    print("\n2. Distance distribution comparison...")
     
     # Sample for speed
     n_dist_samples = min(2000, len(synthetic_emb), len(real_emb))
@@ -802,9 +632,9 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
     print(f"  ✅ Saved: distance_distributions.png")
     
     # ============================================================
-    # 5. Per-dimension statistics
+    # 3. Per-dimension statistics
     # ============================================================
-    print("\n5. Per-dimension comparison...")
+    print("\n3. Per-dimension comparison...")
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -862,9 +692,9 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
     print(f"  ✅ Saved: dimension_statistics.png")
     
     # ============================================================
-    # 6. PCA scree plot
+    # 4. PCA scree plot
     # ============================================================
-    print("\n6. PCA variance analysis...")
+    print("\n4. PCA variance analysis...")
     
     pca_full = PCA(n_components=min(50, X_combined.shape[1]))
     pca_full.fit(X_combined)
@@ -903,7 +733,7 @@ def create_enhanced_visualizations(synthetic_emb, real_emb, output_dir):
 
 def visualize_sample_images(synthetic_imgs, real_imgs, output_dir, n_samples=10):
     """Show sample images from each group"""
-    print("\n7. Sample images...")
+    print("\nSample images...")
     
     fig, axes = plt.subplots(2, n_samples, figsize=(20, 4))
     
@@ -931,7 +761,7 @@ def visualize_sample_images(synthetic_imgs, real_imgs, output_dir, n_samples=10)
 # REPORTING
 # ============================================================================
 
-def generate_report(separation_metrics, viz_metrics, legacy_stats, output_dir):
+def generate_report(separation_metrics, viz_metrics, output_dir):
     """Generate a comprehensive markdown report"""
     
     report = f"""# Cryo-EM Embedding Comparison Report
@@ -1024,19 +854,6 @@ Interpretation:
 
 ---
 
-## Legacy Distance Metrics
-*(Note: These can be misleading for spatially separated distributions)*
-
-- Within Synthetic: {legacy_stats['synthetic_dist_mean']:.4f} ± {legacy_stats['synthetic_dist_std']:.4f}
-- Within Real: {legacy_stats['real_dist_mean']:.4f} ± {legacy_stats['real_dist_std']:.4f}
-- Cross (Syn-Real): {legacy_stats['cross_dist_mean']:.4f} ± {legacy_stats['cross_dist_std']:.4f}
-- Legacy Overlap Ratio: {legacy_stats['legacy_overlap_ratio']:.4f}
-
-⚠️  **Warning:** The legacy overlap ratio can show "good overlap" even when distributions 
-are spatially separated! Use the classifier accuracy and PCA separation metrics instead.
-
----
-
 ## Recommendations
 
 """
@@ -1082,19 +899,6 @@ Recommended actions:
 See the following files in the output directory:
 - `pca_enhanced.png` - PCA projection with separation metrics
 - `tsne_projection.png` - t-SNE visualization
-"""
-    
-    if HAS_UMAP:
-        report += "- `umap_projection.png` - UMAP visualization\n"
-    
-    report += """- `distance_distributions.png` - Pairwise distance distributions
-- `dimension_statistics.png` - Per-dimension statistical comparison
-- `pca_scree.png` - Variance explained by principal components
-- `sample_images.png` - Side-by-side image comparison
-
----
-
-*Report generated by compare_embeddings.py (Fixed Version)*
 """
     
     # Save report
@@ -1172,9 +976,8 @@ Examples:
     os.makedirs(args.output_dir, exist_ok=True)
     
     print("\n" + "="*70)
-    print("EMBEDDING COMPARISON: SYNTHETIC vs REAL (FIXED VERSION)")
+    print("EMBEDDING COMPARISON: SYNTHETIC vs REAL")
     print("="*70)
-    print("\n🔧 This version uses metrics that correctly detect spatial separation!")
     
     # Load image config
     print(f"\nLoading configuration from: {args.image_config}")
@@ -1253,9 +1056,6 @@ Examples:
     # 2. Enhanced visualizations
     viz_metrics = create_enhanced_visualizations(synthetic_emb, real_emb, args.output_dir)
     
-    # 3. Legacy metrics (for comparison only)
-    legacy_stats = compute_legacy_statistics(synthetic_emb, real_emb)
-    
     # ============================================================
     # SAVE RESULTS
     # ============================================================
@@ -1269,14 +1069,13 @@ Examples:
         'real_embeddings': real_emb,
         'separation_metrics': separation_metrics,
         'viz_metrics': viz_metrics,
-        'legacy_stats': legacy_stats,
         'config': vars(args)
     }, os.path.join(args.output_dir, 'embeddings.pt'))
     
     print(f"\n  ✅ Saved embeddings and metrics: embeddings.pt")
     
     # Generate comprehensive report
-    report = generate_report(separation_metrics, viz_metrics, legacy_stats, args.output_dir)
+    report = generate_report(separation_metrics, viz_metrics, args.output_dir)
     
     # ============================================================
     # FINAL SUMMARY
@@ -1326,11 +1125,7 @@ Examples:
     print("\n📁 Output files:")
     print(f"   {args.output_dir}/")
     print(f"   ├── REPORT.md                    ← Read this first!")
-    print(f"   ├── embeddings.pt                ← Saved embeddings & metrics")
     print(f"   ├── pca_enhanced.png             ← PCA with separation")
-    print(f"   ├── tsne_projection.png          ← t-SNE visualization")
-    if HAS_UMAP:
-        print(f"   ├── umap_projection.png          ← UMAP visualization")
     print(f"   ├── distance_distributions.png   ← Distance histograms")
     print(f"   ├── dimension_statistics.png     ← Per-dimension analysis")
     print(f"   ├── pca_scree.png                ← Variance explained")

@@ -5,6 +5,8 @@ from cryo_sbi import CryoEmSimulator
 import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 import mrcfile
+from typing import Optional, Tuple, List
+
 
 def center_models(models):
     """
@@ -196,9 +198,11 @@ class WeightOptimizer:
     """
     Numerically stable optimizer for:
     L = -sum_i log(sum_j w_j * p_ij) + theta * sum_j w_j * log(w_j / w_j^0)
+    
+    This version uses the Adam optimizer, suitable for mini-batching on large datasets.
     """
     
-    def __init__(self, log_p, w0=None, theta=0.0, device='cpu'):
+    def __init__(self, log_p: np.ndarray, w0: Optional[np.ndarray] = None, theta: float = 0.0, device: str = 'cpu'):
         """
         Args:
             log_p: tensor of shape (n_j, n_i) containing log(p_ij)
@@ -219,7 +223,7 @@ class WeightOptimizer:
         
         self.theta = torch.tensor(theta, dtype=torch.float64, device=device)
 
-    def compute_loss(self, w):
+    def compute_loss(self, w: torch.Tensor) -> torch.Tensor:
         """
         Compute loss given weights w (must be normalized, sum to 1, non-negative)
         Loss is normalized: average log-likelihood per sample and average KL per weight
@@ -240,10 +244,9 @@ class WeightOptimizer:
         
         return term1 + term2
         
-    
-    def optimize(self, lr=0.1, max_iter=10000, tol=1e-9, verbose=False):
+    def optimize(self, lr: float = 0.1, max_iter: int = 10000, tol: float = 1e-9, verbose: bool = False) -> Tuple[np.ndarray, List[float]]:
         """
-        Optimize weights using PyTorch Adam optimizers
+        Optimize weights using PyTorch Adam optimizer.
         
         Args:
             lr: learning rate
@@ -252,20 +255,16 @@ class WeightOptimizer:
             verbose: print progress
         """
         # Use unconstrained parameterization: w = softmax(z)
-        # Initialize with random normalized weights
         z_init = torch.randn(self.n_j, dtype=torch.float64, device=self.device)
         z = z_init.clone().detach().requires_grad_(True)
         
-        # initialize Adam optimizer
         optimizer = torch.optim.Adam([z], lr=lr)
             
         losses = []
         for iteration in range(max_iter):
              optimizer.zero_grad()
                 
-             # Convert unconstrained z to normalized weights
              w = torch.softmax(z, dim=0)
-                
              loss = self.compute_loss(w)
              loss.backward()
              optimizer.step()
@@ -273,20 +272,84 @@ class WeightOptimizer:
              losses.append(loss.item())
                 
              if verbose and iteration % 100 == 0:
-                  print(f"Iter {iteration}: Loss = {loss.item():.6f}")
+                  print(f"Iter {iteration}: Loss = {loss.item():.8f}")
                 
-             # Check convergence
              if iteration > 10 and abs(losses[-1] - losses[-2]) < tol:
                  if verbose:
                      print(f"Converged at iteration {iteration}")
                  break
                     
-        # Final weights
         with torch.no_grad():
             w_opt = torch.softmax(z, dim=0)
         
         return w_opt.cpu().numpy(), losses
+
+
+class WeightOptimizerLBFGS(WeightOptimizer):
+    """
+    Numerically stable optimizer for the same objective function, but using the L-BFGS optimizer.
+
+    L-BFGS is a quasi-Newton method that often converges in far fewer iterations
+    for smooth, convex-like problems. However, it requires computing the gradient
+    on the **full dataset** at each step and is NOT suitable for mini-batching.
+    It should only be used if the entire `log_p` matrix can be processed in memory.
+    """
     
+    def optimize(self, max_iter: int = 100, tol: float = 1e-9, verbose: bool = False, history_size: int = 100) -> Tuple[np.ndarray, List[float]]:
+        """
+        Optimize weights using PyTorch L-BFGS optimizer.
+        
+        Args:
+            max_iter: maximum number of optimization steps (L-BFGS updates).
+            tol: convergence tolerance on the loss function value.
+            verbose: print progress.
+            history_size: the number of past gradients L-BFGS uses to approximate the Hessian matrix.
+        """
+        # Use unconstrained parameterization: w = softmax(z)
+        z_init = torch.randn(self.n_j, dtype=torch.float64, device=self.device)
+        z = z_init.clone().detach().requires_grad_(True)
+        
+        # L-BFGS does not use a learning rate. It uses a line search.
+        optimizer = torch.optim.LBFGS(
+            [z], 
+            history_size=history_size, 
+            max_iter=20, # Max iterations for the line search within one step
+            line_search_fn="strong_wolfe"
+        )
+            
+        losses = []
+        for iteration in range(max_iter):
+             
+             # The L-BFGS optimizer requires a "closure" function that
+             # re-evaluates the model and returns the loss.
+             def closure():
+                 optimizer.zero_grad()
+                 w = torch.softmax(z, dim=0)
+                 loss = self.compute_loss(w) # Note: computes loss on the FULL dataset
+                 loss.backward()
+                 return loss
+
+             # optimizer.step performs the update.
+             # It calls the closure multiple times to compute the loss and gradient.
+             loss = optimizer.step(closure)
+                
+             losses.append(loss.item())
+                
+             if verbose:
+                  print(f"Iter {iteration}: Loss = {loss.item():.8f}")
+                
+             # Check for convergence
+             if iteration > 0 and abs(losses[-1] - losses[-2]) < tol:
+                 if verbose:
+                     print(f"Converged at iteration {iteration}")
+                 break
+                    
+        with torch.no_grad():
+            w_opt = torch.softmax(z, dim=0)
+        
+        return w_opt.cpu().numpy(), losses
+
+
 def rmse(x_opt, w_actual):
     # Convert to numpy if needed
     if torch.is_tensor(x_opt):
@@ -445,19 +508,35 @@ def run_inference_real_data(args):
     log_probs_matrix = log_probs_matrix.T
     print(f"Likelihood matrix evaluation complete. Shape: {log_probs_matrix.shape}")
 
-    # 6. Optimize Weights
+    # 6. Optimize Weights (use two different optimizers)
     print("Initializing weight optimizer...")
-    opt = WeightOptimizer(log_probs_matrix, device=device)
-    
+
+    adam_optimizer  = WeightOptimizer(log_probs_matrix, device=device)
+    lbfgs_optimizer = WeightOptimizerLBFGS(log_probs_matrix, device=device)
+
     print("Optimizing weights to maximize the posterior...")
-    w_opt, _ = opt.optimize()
+
+    print("Optimizing with Adam")
+    w_adam, losses_adam = adam_optimizer.optimize(lr=0.1, max_iter=1000, tol=1e-10, verbose=True)
+    print(f"Adam converged in {len(losses_adam)} iterations.\n")
+    np.set_printoptions(precision=4, suppress=True)
+    print(f"\nFinal Adam Weights: {w_adam}")
+    print(f"\nFinal Adam Loss:  {losses_adam[-1]:.8f}")
+
+    print("\nOptimizing with L-BFGS")
+    w_lbfgs, losses_lbfgs = lbfgs_optimizer.optimize(max_iter=1000, tol=1e-10, verbose=True)
+    print(f"L-BFGS converged in {len(losses_lbfgs)} iterations\n")
+    print(f"\nFinal L-BFGS Weights: {w_lbfgs}")
+    print(f"Final L-BFGS Loss: {losses_lbfgs[-1]:.8f}")
     
     # 7. Save and Report Results
-    print("Optimization complete.")
-    np.set_printoptions(precision=4, suppress=True)
+    if(losses_adam[-1]<losses_lbfgs[-1]):
+       w_opt = w_adam
+    else:
+       w_opt = w_lbfgs
+
+    print("\nOptimization complete.")
     print(f"Optimal weights:\n{w_opt}")
     
     print(f"Saving optimal weights to {args.output_file}")
     torch.save(w_opt, args.output_file)
-    
-    print("Script finished successfully.")

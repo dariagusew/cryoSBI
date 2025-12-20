@@ -70,8 +70,8 @@ def cl_models_to_tensor_topology():
         type=str,
         required=True,
         default=None,
-        choices=['atomistic', 'calvados'],
-        help="Topology type: 'atomistic' or 'calvados'."
+        choices=['allatom', 'oneatom', 'calvados'],
+        help="Topology type: 'allatom', 'oneatom', or 'calvados'."
     )
     cl_parser.add_argument(
         "--output_topology",

@@ -167,7 +167,58 @@ def models_to_tensor(
         pdb_parser(model_files, n_pdbs, output_file)
 
 
-def get_atomistic_topology(resnames):
+def get_allatom_topology(atypes):
+    """
+    Extract scattering factors (A and B values) for given atoms.
+    
+    Parameters
+    ----------
+    atypes : list
+        List of atom types.
+    
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape [2, n_atoms] containing A and B scattering factors.
+    """
+    # Scattering factors: 1-Gaussian approximation in reciprocal space
+    # 
+    # Reciprocal space form: f(s) = A * exp(-B*s²)
+    #   A: scattering amplitude (electrons)
+    #   B: decay parameter (Ų, controls atomic size)
+    #
+    scattering = {
+        # Atoms (single Gaussian: A, B)
+        'C': (2.361558, 9.617784),     'O': (1.892568, 5.745714),     'N': (2.097861, 7.249698),
+        'S': (4.837811, 9.925579),     'P': (5.099359, 11.913530)
+    }
+    # Transform scattering factors from reciprocal space to real space via Fourier transform
+    # 
+    # 3D real space Gaussian: f(r) = A * (π/B)^1.5 * exp(-π²*r²/B)
+    #
+    # For efficient 2D projection rendering, we use separable form: f(x,y) = f(x) * f(y)
+    # where f(x) = A1 * exp(B1 * x²) and f(y) = A1 * exp(B1 * y²)
+    #
+    # Pre-computed auxiliary parameters:
+    #   A1 = √(A*π/B)  - amplitude prefactor for 1D projections
+    #   B1 = -π²/B     - exponent coefficient (negative for decay)
+    #
+    # Normalization: ∫∫ f(x)*f(y) dx dy = A (preserves scattering amplitude)
+    #
+    try:
+        A1 = [math.sqrt(scattering[at][0] * math.pi / scattering[at][1]) for at in atypes]
+        B1 = [-math.pi**2 / scattering[at][1] for at in atypes] 
+    except KeyError as e:
+        raise ValueError(f"Unknown atom type: {e}. Please check your topology.")
+
+    # Store as tensor with shape [2, n_atoms] for efficient GPU computation
+    # topo[0, :] = A1 coefficients, topo[1, :] = B1 coefficients
+    topo = torch.tensor([A1, B1], dtype=torch.float32)
+
+    return topo
+
+
+def get_oneatom_topology(resnames):
     """
     Extract scattering factors (A and B values) for given residues.
     
@@ -183,11 +234,7 @@ def get_atomistic_topology(resnames):
     """
     # Atomic positions: Protein centered on CA, RNA/DNA centered on C1'
     # Scattering factors: 1-Gaussian approximation in reciprocal space
-    # 
-    # Reciprocal space form: f(s) = A * exp(-B*s²)
-    #   A: scattering amplitude (electrons)
-    #   B: decay parameter (Ų, controls atomic size)
-    #
+    # see comments above 
     scattering = {
         # Amino acids
         'ALA': (11.7241, 27.9), 'ARG': (25.8910, 62.8), 'ASN': (18.4298, 42.6), 'ASP': (18.2001, 42.1),
@@ -201,18 +248,7 @@ def get_atomistic_topology(resnames):
         'DA': (51.5607, 98.3), 'DC': (46.6087, 88.7), 'DG': (53.5441, 102.8), 'DT': (48.8882, 92.7)
     }
     # Transform scattering factors from reciprocal space to real space via Fourier transform
-    # 
-    # 3D real space Gaussian: f(r) = A * (π/B)^1.5 * exp(-π²*r²/B)
-    #
-    # For efficient 2D projection rendering, we use separable form: f(x,y) = f(x) * f(y)
-    # where f(x) = A1 * exp(B1 * x²) and f(y) = A1 * exp(B1 * y²)
-    #
-    # Pre-computed auxiliary parameters:
-    #   A1 = √(A*π/B)  - amplitude prefactor for 1D projections
-    #   B1 = -π²/B     - exponent coefficient (negative for decay)
-    #
-    # Normalization: ∫∫ f(x)*f(y) dx dy = A (preserves scattering amplitude)
-    #
+    # see comments above 
     try:
         A1 = [math.sqrt(scattering[res][0] * math.pi / scattering[res][1]) for res in resnames]
         B1 = [-math.pi**2 / scattering[res][1] for res in resnames]
@@ -281,7 +317,7 @@ def models_to_tensor_topology(
     output_models : str
         The path to the output file for the models. Must be a .pt file.
     topo_type : str
-        The type of topology ('atomistic' or 'calvados').
+        The type of topology ('allatom', 'oneatom', or 'calvados').
     output_topology : str
         The path to the output topology file. Must be a .pt file.
     Returns
@@ -289,29 +325,33 @@ def models_to_tensor_topology(
     None
     """
     
-    # Initialize lists to store positions and residues from all models
+    # Initialize lists to store positions and atoms from all models
     pos_list = []
-    res_list = []
+    at_list = []
     
     # Loop through all PDB files to extract atomic information
     for pdb in pdb_files:
         # Create MDAnalysis Universe object from PDB file
         u = mda.Universe(pdb)
-        # Atoms selections
-        if(topo_type=="atomistic"):
+
+        # Atoms selection
+        if(topo_type=="allatom"):
+          at_selection="not type H"
+
+        elif(topo_type=="oneatom"):
           at_selection="name CA C1'"
-        else:
+
+        elif(topo_type=="calvados"): 
           at_selection="all"
+
         # Select
         atoms = u.select_atoms(at_selection)
         # Extract atom positions as numpy array with shape [natoms, 3]
         pos = atoms.positions
         # Transpose and append positions to the list
         pos_list.append(pos.T)
-        # Extract residue information (names, indices, etc.)
-        res = atoms.residues
-        # Append residues to the list
-        res_list.append(res)
+        # Append atoms to the list
+        at_list.append(atoms)
 
     # Validate that all models have the same number of atoms
     n_atoms = len(pos_list[0])
@@ -320,20 +360,6 @@ def models_to_tensor_topology(
             raise ValueError(
                 f"Model {i} has {len(pos)} atoms, but model 0 has {n_atoms} atoms. "
                 "All models must have the same number of atoms."
-            )
-
-    # Validate that all models have the same residue composition
-    ref_resnames = [res.resname for res in res_list[0]]
-    ref_resids = [res.resid for res in res_list[0]]
-    
-    for i, res in enumerate(res_list[1:], start=1):
-        current_resnames = [r.resname for r in res]
-        current_resids = [r.resid for r in res]
-        
-        if current_resnames != ref_resnames or current_resids != ref_resids:
-            raise ValueError(
-                f"Model {i} has different residues than model 0. "
-                "All models must have the same residue composition."
             )
 
     # Convert list of numpy arrays to torch tensor [n_models, 3, n_atoms]
@@ -349,11 +375,23 @@ def models_to_tensor_topology(
     print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
 
     # Prepare topology
-    if(topo_type=="atomistic"):
-       topo = get_atomistic_topology(ref_resnames)
+    if(topo_type=="allatom"):
+       # list of atom types
+       atypes = [at.type for at in at_list[0]]
+       # get topo
+       topo = get_allatom_topology(atypes)
+ 
+    elif(topo_type=="oneatom"):
+       # list of residue names
+       resnames = [at.residue.resname for at in at_list[0]] 
+       # get topo
+       topo = get_oneatom_topology(resnames)
        
     elif(topo_type=="calvados"):
-       topo = get_calvados_topology(ref_resnames)
+       # list of residue names
+       resnames = [at.residue.resname for at in at_list[0]]
+       # get topo
+       topo = get_calvados_topology(resnames)
 
     # Save the tensor to the specified output file
     torch.save(topo, output_topology)

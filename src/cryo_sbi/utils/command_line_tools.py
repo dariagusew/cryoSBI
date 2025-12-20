@@ -256,12 +256,12 @@ def cl_pretrain_image_embed():
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100,
                        help='Number of training epochs (default: 100)')
-    parser.add_argument('--batch_size', type=int, default=512,
-                       help='Training batch size (default: 512)')
+    parser.add_argument('--batch_size', type=int, default=256,
+                       help='Training batch size (default: 256)')
     parser.add_argument('--lr', type=float, default=2e-4,
                        help='Learning rate (default: 0.0002)')
-    parser.add_argument('--embedding_dim', type=int, default=256,
-                       help='Embedding dimension (default: 256)')
+    parser.add_argument('--embedding_dim', type=int, default=16,
+                       help='Embedding dimension (default: 16)')
     parser.add_argument('--l2_weight', type=float, default=0.0,
                        help='L2 regularization weight on embeddings (default: 0.0)')
     parser.add_argument('--mix_ratio', type=float, default=0.5,

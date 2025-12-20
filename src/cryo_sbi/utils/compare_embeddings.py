@@ -105,25 +105,49 @@ def generate_synthetic_images(image_config, models, n_images, device):
     pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
     voltage = image_config.get("VOLTAGE", 300.0)
     cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
-    
+
+    # sigma stuff 
+    natoms = models.shape[2]
+
+    if "TOPOLOGY" in image_config:
+        # Load TOPOLOGY from file path
+        topology_path = image_config["TOPOLOGY"]
+        sigma = torch.load(topology_path, map_location=device)
+
+    elif "SIGMA" in image_config:
+        sigma_value = image_config["SIGMA"]
+
+        # Extract scalar value (or first element if list)
+        if isinstance(sigma_value, (list, tuple)):
+            sigma_val = torch.as_tensor(sigma_value[0], device=device)
+        else:
+            sigma_val = torch.as_tensor(sigma_value, device=device)
+       
+        # Create sigma tensor [2, natoms] on device
+        sigma = torch.zeros(2, natoms, device=device)
+        sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
+        sigma[1, :] = -0.5 / (sigma_val ** 2)
+    else:
+        raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+
     all_images = []
     all_params = []
     
     with torch.no_grad():
         for parameters in tqdm(prior_loader, desc="Simulating"):
-            (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
+            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
             
             # Simulate batch
             images, _ = cryo_em_simulator(
                 models,
                 indices.to(device),
                 quaternions.to(device),
-                res.to(device),
                 shift.to(device),
                 defocus.to(device),
                 b_factor.to(device),
                 amp.to(device),
                 snr.to(device),
+                sigma.to(device),
                 num_pixels,
                 pixel_size,
                 voltage,

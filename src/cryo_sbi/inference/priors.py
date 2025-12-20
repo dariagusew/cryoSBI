@@ -185,7 +185,6 @@ class ImagePrior:
         self,
         index_prior,
         quaternion_prior,
-        sigma_prior,
         shift_prior,
         defocus_prior,
         b_factor_prior,
@@ -196,7 +195,6 @@ class ImagePrior:
         self.priors = [
             index_prior,
             quaternion_prior,
-            sigma_prior,
             shift_prior,
             defocus_prior,
             b_factor_prior,
@@ -238,18 +236,6 @@ def get_image_priors(
     Returns:
         ImagePrior: Combined prior object
     """
-    # Sigma prior
-    if isinstance(image_config["SIGMA"], list) and len(image_config["SIGMA"]) == 2:
-        lower = torch.tensor(
-            [[image_config["SIGMA"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["SIGMA"][1]]], dtype=torch.float32, device=device
-        )
-        if lower > upper:
-            raise ValueError(f"SIGMA lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-        sigma_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
-
     # Shift prior
     shift_prior = zuko.distributions.BoxUniform(
         lower=torch.tensor(
@@ -343,7 +329,6 @@ def get_image_priors(
     return ImagePrior(
         index_prior,
         quaternion_prior,
-        sigma_prior,
         shift_prior,
         defocus_prior,
         b_factor_prior,

@@ -158,6 +158,30 @@ def nle_train_no_saving(
         image_prior, batch_size=simulation_batch_size, num_workers=n_workers
     )
 
+    # sigma stuff 
+    natoms = models.shape[2]
+
+    if "TOPOLOGY" in image_config:
+        # Load TOPOLOGY from file path
+        topology_path = image_config["TOPOLOGY"]
+        sigma = torch.load(topology_path, map_location=device)
+
+    elif "SIGMA" in image_config:
+        sigma_value = image_config["SIGMA"]
+       
+        # Extract scalar value (or first element if list)
+        if isinstance(sigma_value, (list, tuple)):
+            sigma_val = torch.as_tensor(sigma_value[0], device=device)
+        else:
+            sigma_val = torch.as_tensor(sigma_value, device=device)
+
+        # Create sigma tensor [2, natoms] on device
+        sigma = torch.zeros(2, natoms, device=device)
+        sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
+        sigma[1, :] = -0.5 / (sigma_val ** 2)
+    else:
+        raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+
     num_pixels = torch.tensor(
         image_config["N_PIXELS"], dtype=torch.float32, device=device
     )
@@ -247,7 +271,6 @@ def nle_train_no_saving(
                 (
                     indices,
                     quaternions,
-                    res,
                     shift,
                     defocus,
                     b_factor,
@@ -258,12 +281,12 @@ def nle_train_no_saving(
                     models,
                     indices.to(device, non_blocking=True),
                     quaternions.to(device, non_blocking=True),
-                    res.to(device, non_blocking=True),
                     shift.to(device, non_blocking=True),
                     defocus.to(device, non_blocking=True),
                     b_factor.to(device, non_blocking=True),
                     amp.to(device, non_blocking=True),
                     snr.to(device, non_blocking=True),
+                    sigma.to(device, non_blocking=True),
                     num_pixels,
                     pixel_size,
                     voltage,

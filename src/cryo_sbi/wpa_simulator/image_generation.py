@@ -59,7 +59,7 @@ def project_density(
     Args:
         coords (torch.Tensor): Coordinates of shape (num_batch, 3, num_atoms)
         quats (torch.Tensor): Quaternions of shape (num_batch, 4) defining rotations
-        sigma (torch.Tensor): Standard deviation of Gaussian (can be scalar or per-batch)
+        sigma (torch.Tensor): Parameters of Gaussian kernel
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
         num_pixels (torch.Tensor): Number of pixels along one image dimension
         pixel_size (torch.Tensor): Pixel size in Angstrom
@@ -69,9 +69,6 @@ def project_density(
     """
     num_batch, _, num_atoms = coords.shape
     
-    # Precompute normalization factor
-    norm = 1.0 / (2 * torch.pi * sigma**2 * num_atoms)
-
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
    
@@ -89,23 +86,18 @@ def project_density(
     
     # Apply shift to x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
-    
-    # Precompute -0.5 / sigma^2 for Gaussian
-    gauss_coeff = -0.5 / (sigma ** 2)
-    
+
     # Compute Gaussian in x direction
     # Shape: (num_batch, num_pixels, num_atoms)
     dx = grid.unsqueeze(0).unsqueeze(-1) - coords_rot[:, 0, :].unsqueeze(1)
-    gauss_x = torch.exp(gauss_coeff.view(-1, 1, 1) * dx ** 2)
-    
+    gauss_x = sigma[0, :].view(1, 1, -1) * torch.exp(sigma[1, :].view(1, 1, -1) * dx ** 2)
+   
     # Compute Gaussian in y direction
     # Shape: (num_batch, num_atoms, num_pixels)
     dy = grid.unsqueeze(0).unsqueeze(0) - coords_rot[:, 1, :].unsqueeze(-1)
-    gauss_y = torch.exp(gauss_coeff.view(-1, 1, 1) * dy ** 2)
-    
+    gauss_y = sigma[0, :].view(1, -1, 1) * torch.exp(sigma[1, :].view(1, -1, 1) * dy ** 2)
+   
     # Matrix multiplication to get 2D projection
-    # (num_batch, num_pixels, num_atoms) @ (num_batch, num_atoms, num_pixels)
-    # -> (num_batch, num_pixels, num_pixels)
-    image = torch.bmm(gauss_x, gauss_y) * norm.view(-1, 1, 1)
-    
+    image = torch.bmm(gauss_x, gauss_y)
+
     return image

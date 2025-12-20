@@ -3,6 +3,7 @@ import MDAnalysis as mda
 from MDAnalysis.analysis import align
 import torch
 import numpy as np
+import math
 
 def pdb_parser_(fname: str, atom_selection: str = "name CA") -> torch.tensor:
     """
@@ -180,8 +181,13 @@ def get_atomistic_topology(resnames):
     torch.Tensor
         Tensor of shape [2, n_residues] containing A and B scattering factors.
     """
-    # Scattering factors: A and B values
-    # Protein: centered in CA, RNA/DNA: centered in C1'
+    # Atomic positions: Protein centered on CA, RNA/DNA centered on C1'
+    # Scattering factors: 1-Gaussian approximation in reciprocal space
+    # 
+    # Reciprocal space form: f(s) = A * exp(-B*s²)
+    #   A: scattering amplitude (electrons)
+    #   B: decay parameter (Ų, controls atomic size)
+    #
     scattering = {
         # Amino acids
         'ALA': (11.7241, 27.9), 'ARG': (25.8910, 62.8), 'ASN': (18.4298, 42.6), 'ASP': (18.2001, 42.1),
@@ -194,18 +200,31 @@ def get_atomistic_topology(resnames):
         # DNA
         'DA': (51.5607, 98.3), 'DC': (46.6087, 88.7), 'DG': (53.5441, 102.8), 'DT': (48.8882, 92.7)
     }
-    
-    # Extract A and B values for each residue using list comprehension
+    # Transform scattering factors from reciprocal space to real space via Fourier transform
+    # 
+    # 3D real space Gaussian: f(r) = A * (π/B)^1.5 * exp(-π²*r²/B)
+    #
+    # For efficient 2D projection rendering, we use separable form: f(x,y) = f(x) * f(y)
+    # where f(x) = A1 * exp(B1 * x²) and f(y) = A1 * exp(B1 * y²)
+    #
+    # Pre-computed auxiliary parameters:
+    #   A1 = √(A*π/B)  - amplitude prefactor for 1D projections
+    #   B1 = -π²/B     - exponent coefficient (negative for decay)
+    #
+    # Normalization: ∫∫ f(x)*f(y) dx dy = A (preserves scattering amplitude)
+    #
     try:
-        A_list = [scattering[r][0] for r in resnames]
-        B_list = [scattering[r][1] for r in resnames]
+        A1 = [math.sqrt(scattering[res][0] * math.pi / scattering[res][1]) for res in resnames]
+        B1 = [-math.pi**2 / scattering[res][1] for res in resnames]
     except KeyError as e:
         raise ValueError(f"Unknown residue name: {e}. Please check your topology.")
-    
-    # Create tensor with shape [2, n_residues]
-    topo = torch.tensor([A_list, B_list], dtype=torch.float32)
-    
+
+    # Store as tensor with shape [2, n_residues] for efficient GPU computation
+    # topo[0, :] = A1 coefficients, topo[1, :] = B1 coefficients
+    topo = torch.tensor([A1, B1], dtype=torch.float32)
+
     return topo
+
 
 def get_calvados_topology(resnames):
     """
@@ -222,7 +241,9 @@ def get_calvados_topology(resnames):
         Tensor of shape [2, n_residues] containing A and B scattering factors
         for CALVADOS coarse-grained model.
     """
-    # CALVADOS scattering factors: A and B values (centered in CA)
+    # CALVADOS3 bead positions: centered on residue COM
+    # Scattering factors: 1-Gaussian approximation in reciprocal space
+    # see comments above 
     scattering = {
         'ALA': (11.7241, 27.3), 'ARG': (25.8910, 73.2), 'ASN': (18.4298, 41.6), 'ASP': (18.2001, 41.2),
         'CYS': (16.8838, 38.3), 'GLN': (20.9390, 52.5), 'GLU': (20.7093, 52.2), 'GLY': (9.2149, 23.6),
@@ -230,18 +251,20 @@ def get_calvados_topology(resnames):
         'MET': (21.9022, 54.2), 'PHE': (26.7793, 58.4), 'PRO': (16.7425, 34.3), 'SER': (13.7075, 31.3),
         'THR': (16.2167, 35.0), 'TRP': (34.0108, 67.6), 'TYR': (28.7627, 61.0), 'VAL': (16.7425, 36.3)
     }
-    
-    # Extract A and B values for each residue using list comprehension
+    # Transform scattering factors from reciprocal space to real space via Fourier transform
+    # see comments above 
     try:
-        A_list = [scattering[r][0] for r in resnames]
-        B_list = [scattering[r][1] for r in resnames]
+        A1 = [math.sqrt(scattering[res][0] * math.pi / scattering[res][1]) for res in resnames]
+        B1 = [-math.pi**2 / scattering[res][1] for res in resnames]
     except KeyError as e:
-        raise ValueError(f"Unknown residue name: {e}. CALVADOS only supports standard amino acids.")
-    
-    # Create tensor with shape [2, n_residues]
-    topo = torch.tensor([A_list, B_list], dtype=torch.float32)
-    
+        raise ValueError(f"Unknown residue name: {e}. Please check your topology.")
+
+    # Store as tensor with shape [2, n_residues] for efficient GPU computation
+    # topo[0, :] = A1 coefficients, topo[1, :] = B1 coefficients
+    topo = torch.tensor([A1, B1], dtype=torch.float32)
+
     return topo
+
 
 def models_to_tensor_topology(
         pdb_files,
@@ -332,5 +355,6 @@ def models_to_tensor_topology(
     elif(topo_type=="calvados"):
        topo = get_calvados_topology(ref_resnames)
 
+    # Save the tensor to the specified output file
     torch.save(topo, output_topology)
     print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 

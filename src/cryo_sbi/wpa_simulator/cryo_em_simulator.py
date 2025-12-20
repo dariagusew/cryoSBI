@@ -14,12 +14,12 @@ def cryo_em_simulator(
     models,
     index,
     quaternion,
-    sigma,
     shift,
     defocus,
     b_factor,
     amp,
     snr,
+    sigma,
     num_pixels,
     pixel_size,
     voltage,
@@ -32,12 +32,12 @@ def cryo_em_simulator(
         models (torch.Tensor): A tensor of coarse grained models (num_models, 3, num_beads).
         index (torch.Tensor): A tensor of indices to select the models to simulate.
         quaternion (torch.Tensor): A tensor of quaternions to rotate the models.
-        sigma (torch.Tensor): The standard deviation of the Gaussian kernel used to project the density.
         shift (torch.Tensor): A tensor of shifts to apply to the models.
         defocus (torch.Tensor): The defocus value of the contrast transfer function (CTF).
         b_factor (torch.Tensor): The B-factor of the CTF.
         amp (torch.Tensor): The amplitude contrast of the CTF.
         snr (torch.Tensor): The signal-to-noise ratio of the simulated image.
+        sigma (torch.Tensor): Parameters of Gaussian kernel used to project the density.
         num_pixels (torch.Tensor): The number of pixels in the simulated image.
         pixel_size (torch.Tensor): The size of each pixel in the simulated image.
         voltage (float): Electron voltage in kV
@@ -82,7 +82,31 @@ class CryoEmSimulator:
         )
         self._voltage = self._config.get("VOLTAGE", 300.0)
         self._cs = self._config.get("SPHERICAL_ABERRATION", 0.0)
+        # sigma stuff 
+        natoms = self._models.shape[2]
+    
+        if "TOPOLOGY" in self._config: 
+            # Load TOPOLOGY from file path
+            topology_path = self._config["TOPOLOGY"]
+            self._sigma = torch.load(topology_path, map_location=device)
+    
+        elif "SIGMA" in self._config: 
+            sigma_value = self._config["SIGMA"]
 
+            # Extract scalar value (or first element if list)
+            if isinstance(sigma_value, (list, tuple)):
+                sigma_val = torch.as_tensor(sigma_value[0], device=device)
+            else:
+                sigma_val = torch.as_tensor(sigma_value, device=device)
+           
+            # Create sigma tensor [2, natoms] on device
+            self._sigma = torch.zeros(2, natoms, device=device)
+            self._sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
+            self._sigma[1, :] = -0.5 / (sigma_val ** 2)
+        else:
+            raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+
+ 
     def _load_params(self, config_fname: str) -> None:
         """
         Loads the parameters from the config file into a dictionary.
@@ -180,6 +204,7 @@ class CryoEmSimulator:
                 self._models,
                 batch_indices,
                 *batch_parameters,
+                self._sigma,
                 self._num_pixels,
                 self._pixel_size,
                 self._voltage,

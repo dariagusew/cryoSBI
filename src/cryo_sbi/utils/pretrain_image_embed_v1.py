@@ -14,9 +14,9 @@ Usage (train on synthetic):
         --image_config config.json \
         --training_mode synthetic \
         --embedding SPATIAL_CRYO_FFT_FILTER \
-        --embedding_dim 256 \
+        --embedding_dim 16 \
         --epochs 100 \
-        --batch_size 512
+        --batch_size 256
 
 Usage (fine-tune on real):
     python pretrain_image_embed.py \
@@ -25,10 +25,10 @@ Usage (fine-tune on real):
         --real_images real_data.mrc \
         --resume_from pretrained_image_embed_full_model.pt \
         --embedding SPATIAL_CRYO_FFT_FILTER \
-        --embedding_dim 256 \
+        --embedding_dim 16 \
         --epochs 20 \
-        --batch_size 512 \
-        --lr 1e-4
+        --batch_size 256 \
+        --lr 2e-4
 
 Usage (train on mixed):
     python pretrain_image_embed.py \
@@ -36,9 +36,9 @@ Usage (train on mixed):
         --training_mode mixed \
         --real_images real_data.mrc \
         --embedding SPATIAL_CRYO_FFT_FILTER \
-        --embedding_dim 256 \
+        --embedding_dim 16 \
         --epochs 100 \
-        --batch_size 512
+        --batch_size 256
 """
 
 import argparse
@@ -476,9 +476,9 @@ def pretrain_image_embed(
     resume_from: str = None,
     embedding_name: str = 'SPATIAL_CRYO_FFT_FILTER',
     device: str = 'cuda',
-    embedding_dim: int = 256,
+    embedding_dim: int = 16,
     epochs: int = 100,
-    batch_size: int = 512,
+    batch_size: int = 256,
     lr: float = 2e-4,
     simulation_batch_size: int = 1024,
     save_path: str = 'pretrained_image_embed.pt',
@@ -623,7 +623,33 @@ def pretrain_image_embed(
         pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
         voltage = image_config.get("VOLTAGE", 300.0)
         cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
-    
+
+        # sigma param
+        fixed_sigma = True 
+        natoms = models.shape[2]
+       
+        if "TOPOLOGY" in image_config:
+            fixed_sigma = False
+            # Load TOPOLOGY from file path
+            topology_path = image_config["TOPOLOGY"]
+            sigma = torch.load(topology_path, map_location=device)
+       
+        elif "SIGMA" in image_config:
+            sigma_value = image_config["SIGMA"]
+           
+            # Extract scalar value (or first element if list)
+            if isinstance(sigma_value, (list, tuple)):
+                sigma_val = torch.as_tensor(sigma_value[0], device=device)
+            else:
+                sigma_val = torch.as_tensor(sigma_value, device=device) 
+           
+            # Create sigma tensor [2, natoms] on device
+            sigma = torch.zeros(2, natoms, device=device)
+            sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2) 
+            sigma[1, :] = -0.5 / (sigma_val ** 2)
+        else:
+            raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
@@ -638,6 +664,10 @@ def pretrain_image_embed(
         print(f"  Simulation batch size: {simulation_batch_size}")
         print(f"  Batches per epoch: {n_batches_per_epoch}")
         print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
+        if fixed_sigma:
+           print(f"  Gaussian sigmas: fixed")
+        else:
+           print(f"  Gaussian sigmas: from scattering factors in {topology_path}")
     print("="*70)
     
     # Training history
@@ -673,19 +703,19 @@ def pretrain_image_embed(
                         synthetic_iter = iter(synthetic_loader)
                         parameters = next(synthetic_iter)
 
-                    (indices, quaternions, res, shift, defocus, b_factor, amp, snr) = parameters
+                    (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
 
                     # get synthetic images
                     syn_images, _ = cryo_em_simulator(
                         models,
                         indices.to(device, non_blocking=True),
                         quaternions.to(device, non_blocking=True),
-                        res.to(device, non_blocking=True),
                         shift.to(device, non_blocking=True),
                         defocus.to(device, non_blocking=True),
                         b_factor.to(device, non_blocking=True),
                         amp.to(device, non_blocking=True),
                         snr.to(device, non_blocking=True),
+                        sigma.to(device, non_blocking=True),
                         num_pixels,
                         pixel_size,
                         voltage,

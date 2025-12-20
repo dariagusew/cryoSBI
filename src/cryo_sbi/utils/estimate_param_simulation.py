@@ -736,6 +736,14 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
         "AMP": amp
     }
     
+    ## NEW ##
+    # Add defocus fit parameters if they exist
+    if 'fit_loc' in defocus_stats:
+        config['DEFOCUS_FIT_LOC'] = defocus_stats['fit_loc']
+        config['DEFOCUS_FIT_SCALE'] = defocus_stats['fit_scale']
+        config['DEFOCUS_FIT_MIN'] = defocus_stats['min']
+        config['DEFOCUS_FIT_MAX'] = defocus_stats['max']
+    
     # Add CTF parameters
     if ctf_params:
         config['VOLTAGE'] = ctf_params['voltage']
@@ -764,8 +772,15 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
     print("\n📝 FINAL CONFIGURATION SUMMARY:")
     print("-"*60)
     print("  SIMULATION PARAMETERS:")
-    print(f"    Defocus:        [{config['DEFOCUS'][0]:.2f}, {config['DEFOCUS'][1]:.2f}] µm")
+    print(f"    Defocus Range:  [{config['DEFOCUS'][0]:.2f}, {config['DEFOCUS'][1]:.2f}] µm (Recommended)")
     print(f"    Amplitude (A):  {config['AMP']:.3f}")
+    
+    ## NEW ##
+    # Print the fit information if it was added to the config
+    if 'DEFOCUS_FIT_LOC' in config:
+        print(f"    Defocus Fit:    loc={config['DEFOCUS_FIT_LOC']:.2f}, scale={config['DEFOCUS_FIT_SCALE']:.2f} µm (Truncated Gaussian)")
+        print(f"    Fit Data Range: [{config['DEFOCUS_FIT_MIN']:.2f}, {config['DEFOCUS_FIT_MAX']:.2f}] µm (Min/Max)")
+
     print("-"*60)
     print("  CTF PARAMETERS:")
     if 'VOLTAGE' in config:
@@ -773,8 +788,8 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
     if 'CS' in config:
         print(f"    Cs:             {config['CS']:.2f} mm")
     if 'BFACTOR_MEAN' in config:
-        print(f"    B-factor:       {config['BFACTOR_MEAN']:.1f} Ų (mean)")
-        print(f"                    [{config['BFACTOR_RANGE'][0]:.1f}, {config['BFACTOR_RANGE'][1]:.1f}] Ų (range)")
+        print(f"    B-factor:       {config['BFACTOR_MEAN']:.1f} Å² (mean)")
+        print(f"                    [{config['BFACTOR_RANGE'][0]:.1f}, {config['BFACTOR_RANGE'][1]:.1f}] Å² (range)")
     if 'SCALEFACTOR_MEAN' in config:
         print(f"    Scale factor:   {config['SCALEFACTOR_MEAN']:.3f} (mean)")
     print("-"*60)

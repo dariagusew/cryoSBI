@@ -273,7 +273,7 @@ def get_image_priors(
         upper = torch.tensor(
             [[image_config["B_FACTOR"][1]]], dtype=torch.float32, device=device
         )
-        if lower <= 0.0:
+        if lower < 0.0:
             raise ValueError("B_FACTOR lower bound must be positive")
         if lower > upper:
             raise ValueError(f"B_FACTOR lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")

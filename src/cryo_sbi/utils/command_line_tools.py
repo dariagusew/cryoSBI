@@ -9,6 +9,7 @@ from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
 from cryo_sbi.utils.infer_populations import run_inference_real_data
+from cryo_sbi.utils.infer_populations import run_inference_real_data_bayes
 import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 from pathlib import Path
@@ -453,3 +454,42 @@ def cl_run_inference_real_data():
 
     # run inference
     run_inference_real_data(args)
+
+def cl_run_inference_real_data_bayes():
+    """
+    Use a trained model to run inference on real data 
+    """
+    parser = argparse.ArgumentParser(description="Run inference to find model weights.")
+    
+    # --- Input Files ---
+    parser.add_argument("--image-stack", type=str, required=True,
+                        help="Path to the experimental particle stack (.mrcs file).")
+
+    parser.add_argument("--models_file", type=str, required=True,
+                        help="Path to tensor file containing models (PyTorch .pt)")
+
+    parser.add_argument("--estimator_file", type=str, required=True,
+                        help="Path to the saved estimator model weights (.pt file).")
+
+    parser.add_argument("--train_config_file", type=str, required=True,
+                        help="Path to the training parameters JSON file.")
+
+    parser.add_argument("--image_config_file", type=str, required=True,
+                        help="Path to the simulation parameters JSON file.")
+
+    # --- Output File ---
+    parser.add_argument("--output-file", type=str, required=True,
+                        help="Path to save the resulting optimal weights tensor (.pt file).")
+
+    # --- Performance and Hardware ---
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device to run the computation on (e.g., 'cuda:0' or 'cpu').")
+
+    parser.add_argument("--batch-size", type=int, default=10000,
+                        help="Batch size for pairwise likelihood evaluation. Adjust based on GPU memory.")
+                        
+    # parse arguments and run inference
+    args = parser.parse_args() 
+
+    # run inference
+    run_inference_real_data_bayes(args)

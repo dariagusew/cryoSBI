@@ -6,7 +6,16 @@ import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 import mrcfile
 from typing import Optional, Tuple, List
-
+import jax
+import jax.numpy as jnp
+from jax.nn import softmax
+import numpyro
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
+"""
+install this with:
+conda install conda-forge::numpyro
+"""
 
 def center_models(models):
     """
@@ -193,6 +202,88 @@ def evaluate_likelihood_pairwise(
             log_probs.view(-1)[pair_start:pair_end] = log_p
     
     return log_probs
+
+def sample_posterior_weights(
+    log_probs_matrix: torch.Tensor,
+    num_samples: int = 2000,
+    num_warmup: int = 1000,
+    num_chains: int = 2,
+    device: str = "cpu"
+) -> np.ndarray:
+    """
+    Samples the posterior distribution of weights w using NUTS (HMC).
+
+    Args:
+        log_probs_matrix: Tensor of shape [N_models, N_images]
+        num_samples: Number of samples to draw from the posterior.
+        num_warmup: Number of "burn-in" steps for the sampler to adapt.
+        num_chains: Number of parallel chains to run.
+        device: 'cpu' or 'cuda'.
+
+    Returns:
+        w_samples: An array of posterior samples for the weights,
+                   shape [num_chains * num_samples, N_models].
+    """
+    # 1. Set NumPyro to use the correct platform (CPU or GPU)
+    numpyro.set_platform("cuda" if "cuda" in device else "cpu")
+    
+    # 2. Convert the log-likelihood matrix to a JAX array
+    # This is the only data that needs to be passed to the model
+    log_p_jax = jnp.array(log_probs_matrix.cpu().numpy(), dtype=jnp.float32)
+    n_models, n_images = log_p_jax.shape
+
+    # 3. Define the probabilistic model in NumPyro
+    def model(log_p_matrix):
+        # Unconstrained parameters for the weights
+        # We place a standard Normal prior on z. This induces a logistic-normal
+        # prior on the weights w, which is a reasonable default.
+        z = numpyro.sample('z', dist.Normal(0., 1.).expand([n_models]))
+        
+        # Transform to the simplex to get weights
+        w = softmax(z)
+        
+        # For inspecting the weights during sampling
+        numpyro.deterministic('w', w)
+
+        # Log-likelihood calculation (the numerically stable way)
+        # log L = sum_i log(sum_j w_j * p_ij)
+        #       = sum_i logsumexp_j (log(w_j) + log(p_ij))
+        log_w = jnp.log(w + 1e-15)
+        log_terms = log_w[:, None] + log_p_matrix  # shape [n_models, n_images]
+        
+        log_likelihood_per_image = jax.scipy.special.logsumexp(log_terms, axis=0)
+        
+        total_log_likelihood = jnp.sum(log_likelihood_per_image)
+        
+        # The numpyro.factor statement adds a potential term to the
+        # overall log probability of the model. This is how we provide our
+        # custom log-likelihood.
+        numpyro.factor("log_likelihood", total_log_likelihood)
+
+    # 4. Run the NUTS sampler
+    print("Initializing NUTS sampler...")
+    rng_key = jax.random.PRNGKey(0)
+    kernel = NUTS(model)
+    mcmc = MCMC(
+        kernel,
+        num_warmup=num_warmup,
+        num_samples=num_samples,
+        num_chains=num_chains,
+        progress_bar=True,
+    )
+    
+    print(f"Running MCMC with {num_chains} chain(s)...")
+    mcmc.run(rng_key, log_p_matrix=log_p_jax)
+    
+    print("\nMCMC summary:")
+    mcmc.print_summary()
+    
+    # 5. Extract the samples for the weights 'w'
+    posterior_samples = mcmc.get_samples()
+    w_samples = posterior_samples['w']
+    
+    return w_samples
+
 
 class WeightOptimizer:
     """
@@ -540,3 +631,90 @@ def run_inference_real_data(args):
     
     print(f"Saving optimal weights to {args.output_file}")
     torch.save(w_opt, args.output_file)
+
+
+def run_inference_real_data_bayes(args):
+    """
+    Executes the core inference workflow using the provided arguments.
+    This version is modified to use MCMC sampling instead of optimization.
+    """
+    # 1. Setup Device
+    if not torch.cuda.is_available() and "cuda" in args.device:
+        print(f"CUDA not available. Switching device from '{args.device}' to 'cpu'.")
+        args.device = "cpu"
+    device = torch.device(args.device)
+    print(f"Using device: {device}")
+
+    # 2. Load Pre-trained SBI Estimator
+    print(f"Loading SBI estimator from {args.estimator_file}")
+    estimator = est_utils.load_estimator(
+        args.train_config_file,
+        args.image_config_file,
+        build_models.build_nle_flow_model,
+        args.estimator_file,
+        device=device
+    )
+    estimator.eval()
+
+    # 3. Load 3D Models
+    print(f"Loading 3D models from {args.models_file}")
+    models = torch.load(args.models_file).to(device)
+    print(f"Loaded {models.shape[0]} models of size {models.shape[1:]}")
+
+    # 4. Load Experimental 2D Images
+    print(f"Reading experimental images from {args.image_stack}")
+    with mrcfile.open(args.image_stack, mode='r') as mrc:
+        images = mrc.data
+
+    print(f"Image stack shape: {images.shape}")
+    print(f"Number of particles: {images.shape[0]}")
+    print(f"Particle size: {images.shape[1]} x {images.shape[2]}")
+
+    # Convert to torch tensor, kept on CPU to be batched to GPU later
+    images = torch.from_numpy(images).cpu()
+
+    # 5. Evaluate Likelihood Matrix
+    print("Evaluating pairwise likelihood matrix...")
+    log_probs_matrix = evaluate_likelihood_pairwise(
+        estimator,
+        images,
+        models,
+        batch_size_pairs=args.batch_size,
+        device=device
+    )
+    # Transpose to shape [N_models, N_images] for the optimizer
+    log_probs_matrix = log_probs_matrix.T
+    print(f"Likelihood matrix evaluation complete. Shape: {log_probs_matrix.shape}")
+
+    # 6. Sample from the posterior using MCMC
+    print("\nStarting Bayesian inference via MCMC sampling...")
+    w_samples = sample_posterior_weights(
+        log_probs_matrix,
+        num_samples=2000,
+        num_warmup=1000,
+        num_chains=2,
+        device=args.device
+    )
+    # w_samples will have shape [4000, N_models]
+
+    # 7. Analyze, Save, and Report Results
+    print("\nInference complete. Analyzing posterior samples...")
+    
+    # Calculate posterior mean as a point estimate
+    w_mean = np.mean(w_samples, axis=0)
+    
+    # Calculate 95% highest posterior density interval (credible interval)
+    w_lower = np.percentile(w_samples, 2.5, axis=0)
+    w_upper = np.percentile(w_samples, 97.5, axis=0)
+    
+    np.set_printoptions(precision=4, suppress=True)
+    print("\n--- Posterior Summary ---")
+    print(f"{'Model':<8} {'Mean Weight':<15} {'95% Credible Interval':<25}")
+    print("-" * 50)
+    for i in range(models.shape[0]):
+        print(f"{i:<8} {w_mean[i]:<15.4f} [{w_lower[i]:.4f}, {w_upper[i]:.4f}]")
+    print("-" * 50)
+
+    print(f"Saving posterior mean weights as a torch tensor to {args.output_file}")
+    w_mean_tensor = torch.from_numpy(w_mean).float()
+    torch.save(w_mean_tensor, args.output_file)

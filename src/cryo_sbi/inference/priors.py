@@ -264,7 +264,8 @@ def get_image_priors(
         if lower > upper:
             raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
         # check prior type
-        if isinstance(image_config["DEFOCUS_GAUSS"], list) and len(image_config["DEFOCUS_GAUSS"]) == 2:
+        defocus_gauss = image_config.get("DEFOCUS_GAUSS", False)
+        if isinstance(defocus_gauss, list) and len(defocus_gauss) == 2: 
            # Truncated Gaussian 
            loc = image_config["DEFOCUS_GAUSS"][0] 
            scale = image_config["DEFOCUS_GAUSS"][1]

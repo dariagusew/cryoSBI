@@ -277,7 +277,11 @@ def get_image_priors(
             raise ValueError("B_FACTOR lower bound must be positive")
         if lower > upper:
             raise ValueError(f"B_FACTOR lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-        b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # check if you want Jeffreys prior, otherwise back to old uniform
+        if image_config.get("USE_JEFFREYS_BFACT", False):
+           b_factor_prior = zuko.distributions.TransformedUniform(LogTransform(), lower, upper)
+        else:
+           b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
     # SNR prior
     if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:

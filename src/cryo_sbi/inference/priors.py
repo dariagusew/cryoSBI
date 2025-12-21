@@ -263,7 +263,14 @@ def get_image_priors(
             raise ValueError("DEFOCUS lower bound must be positive")
         if lower > upper:
             raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-        defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # check prior type
+        if isinstance(image_config["DEFOCUS_GAUSS"], list) and len(image_config["DEFOCUS_GAUSS"]) == 2:
+           # Truncated Gaussian 
+           loc = image_config["DEFOCUS_GAUSS"][0] 
+           scale = image_config["DEFOCUS_GAUSS"][1]
+           defocus_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
+        else:
+           defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
     # B-factor prior
     if isinstance(image_config["B_FACTOR"], list) and len(image_config["B_FACTOR"]) == 2:

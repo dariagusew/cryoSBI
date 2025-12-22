@@ -72,8 +72,8 @@ def cl_models_to_tensor_topology():
         type=str,
         required=True,
         default=None,
-        choices=['allatom', 'oneatom', 'calvados'],
-        help="Topology type: 'allatom', 'oneatom', or 'calvados'."
+        choices=['allatom', 'oneatom', 'calvados3', 'martini3'],
+        help="Topology type: 'allatom', 'oneatom', 'calvados3', 'martini3'"
     )
     cl_parser.add_argument(
         "--output_topology",

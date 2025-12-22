@@ -301,6 +301,89 @@ def get_calvados_topology(resnames):
 
     return topo
 
+def get_martini_topology(resnames, beadnames):
+    """
+    Extract Martini3 scattering factors (A and B values) for given residue-bead pairs.
+    
+    Parameters
+    ----------
+    resnames : list
+        List of residue names (e.g., ['ALA', 'ALA', 'CYS', ...]).
+    beadnames : list
+        List of bead names corresponding to each residue (e.g., ['BB', 'SC1', 'BB', ...]).
+    
+    Returns
+    -------
+    torch.Tensor
+        Tensor of shape [2, n_beads] containing A and B scattering factors
+        for the Martini 3 coarse-grained model.
+    """
+    # Scattering factors for Martini 3 beads from Table S1 of:
+    # Hoff SE, Thomasen FE, Lindorff-Larsen K, Bonomi M
+    # PLoS Comput Biol 20(7): e1012180 (2024). https://doi.org/10.1371/journal.pcbi.1012180
+ 
+    # Keys are formatted as 'RESNAME_BEADNAME'.
+    #
+    # Reciprocal space form: f(s) = A * exp(-B*s²)
+    scattering = {
+        # Alanine (ALA)
+        'ALA_BB': (9.00, 22.00), 'ALA_SC1': (0.50, 0.50),
+        # Cysteine (CYS)
+        'CYS_BB': (9.50, 23.00), 'CYS_SC1': (5.50, 8.50),
+        # Aspartic Acid (ASP)
+        'ASP_BB': (9.50, 23.00), 'ASP_SC1': (8.50, 17.00),
+        # Glutamic Acid (GLU)
+        'GLU_BB': (9.00, 22.00), 'GLU_SC1': (11.50, 24.00),
+        # Phenylalanine (PHE)
+        'PHE_BB': (9.50, 23.00), 'PHE_SC1': (7.00, 17.50), 'PHE_SC2': (4.50, 11.00), 'PHE_SC3': (4.50, 11.00),
+        # Glycine (GLY)
+        'GLY_BB': (9.50, 23.00),
+        # Histidine (HIS)
+        'HIS_BB': (9.50, 23.00), 'HIS_SC1': (4.50, 11.50), 'HIS_SC2': (4.00, 9.00), 'HIS_SC3': (4.00, 8.50),
+        # Isoleucine (ILE)
+        'ILE_BB': (9.50, 23.00), 'ILE_SC1': (10.00, 25.50),
+        # Lysine (LYS)
+        'LYS_BB': (9.00, 22.00), 'LYS_SC1': (7.00, 18.00), 'LYS_SC2': (4.50, 11.00),
+        # Leucine (LEU)
+        'LEU_BB': (9.00, 22.00), 'LEU_SC1': (9.50, 21.50),
+        # Methionine (MET)
+        'MET_BB': (9.00, 22.00), 'MET_SC1': (11.50, 22.50),
+        # Asparagine (ASN)
+        'ASN_BB': (9.00, 22.00), 'ASN_SC1': (9.00, 18.50),
+        # Proline (PRO)
+        'PRO_BB': (9.50, 23.50), 'PRO_SC1': (7.00, 17.50),
+        # Glutamine (GLN)
+        'GLN_BB': (9.00, 22.00), 'GLN_SC1': (11.50, 24.50),
+        # Arginine (ARG)
+        'ARG_BB': (9.50, 23.00), 'ARG_SC1': (7.00, 18.00), 'ARG_SC2': (9.00, 18.00),
+        # Serine (SER)
+        'SER_BB': (9.50, 23.00), 'SER_SC1': (4.00, 9.00),
+        # Threonine (THR)
+        'THR_BB': (9.50, 23.00), 'THR_SC1': (7.00, 17.00),
+        # Valine (VAL)
+        'VAL_BB': (9.50, 23.00), 'VAL_SC1': (7.00, 18.00),
+        # Tryptophan (TRP)
+        'TRP_BB': (9.50, 23.00), 'TRP_SC1': (4.50, 11.50), 'TRP_SC2': (4.00, 9.00), 'TRP_SC3': (4.50, 11.00), 'TRP_SC4': (4.50, 11.00), 'TRP_SC5': (4.00, 9.50),
+        # Tyrosine (TYR)
+        'TYR_BB': (9.50, 23.00), 'TYR_SC1': (4.50, 12.00), 'TYR_SC2': (4.50, 11.00), 'TYR_SC3': (4.50, 11.00), 'TYR_SC4': (4.00, 8.50)
+    }
+    # Transform scattering factors from reciprocal space to real space via Fourier transform 
+    # see comments above 
+    # Combine residue and bead names to create the lookup keys
+    lookup_keys = [f"{res}_{bead}" for res, bead in zip(resnames, beadnames)]
+    try:
+        A1 = [math.sqrt(scattering[key][0] * math.pi / scattering[key][1]) for key in lookup_keys]
+        B1 = [-math.pi**2 / scattering[key][1] for key in lookup_keys]
+    except KeyError as e:
+        raise ValueError(f"Unknown Martini residue-bead combination: {e}. "
+                         "Please check that your PDB file and topology are consistent with the Martini 3 protein model.")
+
+    # Store as tensor with shape [2, n_beads] for efficient GPU computation
+    # topo[0, :] = A1 coefficients, topo[1, :] = B1 coefficients
+    topo = torch.tensor([A1, B1], dtype=torch.float32)
+
+    return topo
+
 
 def models_to_tensor_topology(
         pdb_files,
@@ -317,7 +400,7 @@ def models_to_tensor_topology(
     output_models : str
         The path to the output file for the models. Must be a .pt file.
     topo_type : str
-        The type of topology ('allatom', 'oneatom', or 'calvados').
+        The type of topology ('allatom', 'oneatom', 'calvados3', 'martini3').
     output_topology : str
         The path to the output topology file. Must be a .pt file.
     Returns
@@ -334,14 +417,15 @@ def models_to_tensor_topology(
         # Create MDAnalysis Universe object from PDB file
         u = mda.Universe(pdb)
 
-        # Atoms selection
+        # Atoms selection - to be sure there are only
+        # the supported atoms/beads with scattering factors
         if(topo_type=="allatom"):
           at_selection="not type H"
 
         elif(topo_type=="oneatom"):
           at_selection="name CA C1'"
 
-        elif(topo_type=="calvados"): 
+        elif(topo_type=="calvados3" or topo_type=="martini3"): 
           at_selection="all"
 
         # Select
@@ -387,11 +471,18 @@ def models_to_tensor_topology(
        # get topo
        topo = get_oneatom_topology(resnames)
        
-    elif(topo_type=="calvados"):
+    elif(topo_type=="calvados3"):
        # list of residue names
        resnames = [at.residue.resname for at in at_list[0]]
        # get topo
        topo = get_calvados_topology(resnames)
+
+    elif(topo_type=="martini3"):
+       # lists of residue and bead names
+       resnames = [at.residue.resname for at in at_list[0]]
+       beadnames = [at.name for at in at_list[0]]
+       # get topo
+       topo = get_martini_topology(resnames, beadnames)
 
     # Save the tensor to the specified output file
     torch.save(topo, output_topology)

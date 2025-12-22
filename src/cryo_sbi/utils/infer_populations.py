@@ -6,16 +6,19 @@ import cryo_sbi.utils.estimator_utils as est_utils
 from cryo_sbi.inference.models import build_models
 import mrcfile
 from typing import Optional, Tuple, List
-import jax
-import jax.numpy as jnp
-from jax.nn import softmax
-import numpyro
-import numpyro.distributions as dist
-from numpyro.infer import MCMC, NUTS
-"""
-install this with:
-conda install conda-forge::numpyro
-"""
+try:
+    import jax
+    import jax.numpy as jnp
+    from jax.nn import softmax
+    import numpyro
+    import numpyro.distributions as dist
+    from numpyro.infer import MCMC, NUTS
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    print("Warning: jax/numpyro not installed. Bayesian inference populations disabled.")
+    print("Install with: conda install conda-forge::numpyro")
+
 
 def center_models(models):
     """
@@ -225,7 +228,7 @@ def sample_posterior_weights(
                    shape [num_chains * num_samples, N_models].
     """
     # 1. Set NumPyro to use the correct platform (CPU or GPU)
-    numpyro.set_platform("cuda" if "cuda" in device else "cpu")
+    numpyro.set_platform(device)
     
     # 2. Convert the log-likelihood matrix to a JAX array
     # This is the only data that needs to be passed to the model
@@ -553,7 +556,7 @@ def run_inference_real_data(args):
     """
     # 1. Setup Device
     if not torch.cuda.is_available() and "cuda" in args.device:
-        logging.warning(f"CUDA not available. Switching device from '{args.device}' to 'cpu'.")
+        print(f"CUDA not available. Switching device from '{args.device}' to 'cpu'.")
         args.device = "cpu"
     device = torch.device(args.device)
     print(f"Using device: {device}")
@@ -638,6 +641,9 @@ def run_inference_real_data_bayes(args):
     Executes the core inference workflow using the provided arguments.
     This version is modified to use MCMC sampling instead of optimization.
     """
+    if not JAX_AVAILABLE:
+       raise ImportError("Jax/Numpyro not installed. Install with: conda install conda-forge::numpyro")
+
     # 1. Setup Device
     if not torch.cuda.is_available() and "cuda" in args.device:
         print(f"CUDA not available. Switching device from '{args.device}' to 'cpu'.")
@@ -692,8 +698,7 @@ def run_inference_real_data_bayes(args):
         log_probs_matrix,
         num_samples=2000,
         num_warmup=1000,
-        num_chains=2,
-        device=args.device
+        num_chains=2
     )
     # w_samples will have shape [4000, N_models]
 

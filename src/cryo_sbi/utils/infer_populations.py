@@ -721,5 +721,5 @@ def run_inference_real_data_bayes(args):
     print("-" * 50)
 
     print(f"Saving posterior mean weights as a torch tensor to {args.output_file}")
-    w_mean_tensor = torch.from_numpy(w_mean).float()
+    w_mean_tensor = torch.from_numpy(np.array(w_mean)).float()
     torch.save(w_mean_tensor, args.output_file)

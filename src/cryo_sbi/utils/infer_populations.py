@@ -198,8 +198,15 @@ def evaluate_likelihood_pairwise(
             batch_images = images[img_idx.cpu()]  # [batch_size, H, W]
             batch_indices = model_indices[mod_idx].unsqueeze(-1)  # [batch_size, 1]
             
+            # Move batch images to device and normalize them
+            batch_images.to(device)
+            # And normalize them - just in case
+            mean = torch.mean(batch_images, dim=(1, 2), keepdim=True)
+            std = torch.std(batch_images, dim=(1, 2), keepdim=True)
+            batch_images = (batch_images - mean) / std
+
             # Single forward pass!
-            log_p = estimator(batch_images.to(device), batch_indices)  # [batch_size]
+            log_p = estimator(batch_images, batch_indices)  # [batch_size]
             
             # Place results in the correct positions
             log_probs.view(-1)[pair_start:pair_end] = log_p

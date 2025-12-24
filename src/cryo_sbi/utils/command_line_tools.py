@@ -5,7 +5,7 @@ import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
 from cryo_sbi.utils.generate_models import models_to_tensor_topology
-from cryo_sbi.utils.estimate_param_simulation import estimate_param_simulation_RELION 
+from cryo_sbi.utils.estimate_param_simulation_from_star import estimate_param_simulation_RELION 
 from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
@@ -176,7 +176,7 @@ def cl_process_mrc_stack():
         traceback.print_exc()
         sys.exit(1)
 
-def cl_estimate_param_simulation():
+def cl_estimate_param_simulation_from_star():
     parser = argparse.ArgumentParser(
         description='Extraction of simulation parameters from cryo-EM data',
         formatter_class=argparse.RawDescriptionHelpFormatter,

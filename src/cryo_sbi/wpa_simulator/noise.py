@@ -2,7 +2,7 @@ import torch
 from typing import Optional
 
 
-def circular_mask(n_pixels: int, radius: int, device: str = "cpu") -> torch.Tensor:
+def circular_mask(n_pixels: int, radius: float, device: str = "cpu") -> torch.Tensor:
     """
     Creates a circular mask of radius centered in the image.
     
@@ -26,7 +26,7 @@ def circular_mask(n_pixels: int, radius: int, device: str = "cpu") -> torch.Tens
 def add_noise(
     image: torch.Tensor, 
     snr: torch.Tensor,
-    mask_radius: Optional[int] = None,
+    mask_radius: Optional[float] = None,
     seed: Optional[int] = None
 ) -> torch.Tensor:
     """
@@ -54,7 +54,7 @@ def add_noise(
     
     # Create mask for signal region
     if mask_radius is None:
-        mask_radius = n_pixels // 2
+        mask_radius = 0.5 * n_pixels
     mask = circular_mask(n_pixels, mask_radius, device=device)
     
     # Calculate signal standard deviation within mask

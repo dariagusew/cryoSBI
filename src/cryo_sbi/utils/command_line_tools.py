@@ -1,5 +1,6 @@
 import argparse
 from modulefinder import Module
+import sys
 import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor

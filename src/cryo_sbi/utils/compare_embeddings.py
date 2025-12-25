@@ -38,7 +38,7 @@ from scipy.stats import gaussian_kde, spearmanr
 import mrcfile
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
-from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator
+from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
 
 
 # ============================================================================
@@ -88,38 +88,10 @@ def generate_synthetic_images(image_config, models, n_images, device):
     """Generate synthetic images using the simulator"""
     print(f"\nGenerating {n_images} synthetic images...")
     
-    # Setup
+    # Setup priors and simulation parameters
     image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
     prior_loader = PriorLoader(image_prior, batch_size=min(1024, n_images), num_workers=4)
-    
-    num_pixels = torch.tensor(image_config["N_PIXELS"], dtype=torch.float32, device=device)
-    pixel_size = torch.tensor(image_config["PIXEL_SIZE"], dtype=torch.float32, device=device)
-    voltage = image_config.get("VOLTAGE", 300.0)
-    cs = image_config.get("SPHERICAL_ABERRATION", 0.0)
-
-    # sigma stuff 
-    natoms = models.shape[2]
-
-    if "TOPOLOGY" in image_config:
-        # Load TOPOLOGY from file path
-        topology_path = image_config["TOPOLOGY"]
-        sigma = torch.load(topology_path, map_location=device)
-
-    elif "SIGMA" in image_config:
-        sigma_value = image_config["SIGMA"]
-
-        # Extract scalar value (or first element if list)
-        if isinstance(sigma_value, (list, tuple)):
-            sigma_val = torch.as_tensor(sigma_value[0], device=device)
-        else:
-            sigma_val = torch.as_tensor(sigma_value, device=device)
-       
-        # Create sigma tensor [2, natoms] on device
-        sigma = torch.zeros(2, natoms, device=device)
-        sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
-        sigma[1, :] = -0.5 / (sigma_val ** 2)
-    else:
-        raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+    simulation_param = create_simulation_param(image_config, models, device=device)
 
     all_images = []
     all_params = []
@@ -138,11 +110,7 @@ def generate_synthetic_images(image_config, models, n_images, device):
                 b_factor.to(device),
                 amp.to(device),
                 snr.to(device),
-                sigma.to(device),
-                num_pixels,
-                pixel_size,
-                voltage,
-                cs
+                simulation_param 
             )
             
             all_images.append(images.cpu())

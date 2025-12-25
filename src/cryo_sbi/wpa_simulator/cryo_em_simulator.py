@@ -5,10 +5,72 @@ import torch
 
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.image_generation import project_density
-from cryo_sbi.wpa_simulator.noise import add_noise
+from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
 from cryo_sbi.wpa_simulator.normalization import gaussian_normalize_image
 from cryo_sbi.inference.priors import get_image_priors
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
+
+
+# initialize all tensors/parameters for image simulation
+def create_simulation_param(image_config: dict, models: torch.Tensor, device: str = "cuda"):
+    # initialize dictionary
+    simulation_param = {}
+    
+    # number of models
+    natoms = models.shape[2]
+ 
+    # sigma param
+    if "TOPOLOGY" in image_config:
+        # Load TOPOLOGY from file path
+        topology_path = image_config["TOPOLOGY"]
+        simulation_param["sigma"] = torch.load(topology_path, map_location=device)
+
+    elif "SIGMA" in image_config:
+        sigma_value = image_config["SIGMA"]
+       
+        # Extract scalar value (or first element if list)
+        if isinstance(sigma_value, (list, tuple)):
+            sigma_val = torch.as_tensor(sigma_value[0], device=device)
+        else:
+            sigma_val = torch.as_tensor(sigma_value, device=device)
+
+        # Create sigma tensor [2, natoms] on device
+        simulation_param["sigma"] = torch.zeros(2, natoms, device=device)
+        simulation_param["sigma"][0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
+        simulation_param["sigma"][1, :] = -0.5 / (sigma_val ** 2)
+    else:
+        raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+
+    simulation_param["num_pixels"] = torch.tensor(
+        image_config["N_PIXELS"], dtype=torch.float32, device=device
+    )
+    simulation_param["pixel_size"] = torch.tensor(
+        image_config["PIXEL_SIZE"], dtype=torch.float32, device=device
+    )
+    # other microscope parameters (for CTF and noise)
+    simulation_param["voltage"] = image_config.get("VOLTAGE", 300.0)
+    simulation_param["cs"] = image_config.get("SPHERICAL_ABERRATION", 0.0)
+
+    # noise model
+    simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
+
+    # Log configuration
+    print("\nImage simulation parameters:")
+    print(f"  Number of atoms: {natoms:,}")
+    print(f"  Image size: {image_config['N_PIXELS']}×{image_config['N_PIXELS']} pixels")
+    print(f"  Pixel size: {image_config["PIXEL_SIZE"]:.3f} Å")
+    print(f"  Voltage: {simulation_param['voltage']:.1f} kV")
+    print(f"  Spherical aberration: {simulation_param['cs']:.2f} mm")
+    if "TOPOLOGY" in image_config:
+        print(f"  Sigma: variable (from topology)")
+        print(f"  Topology file: {topology_path}")
+    else:
+        print(f"  Sigma: fixed ({sigma_val:.3f} Å)")
+    print(f"  Noise model: {simulation_param['noise']}")
+    print("="*70)
+    
+    return simulation_param
+
 
 def cryo_em_simulator(
     models,
@@ -19,11 +81,7 @@ def cryo_em_simulator(
     b_factor,
     amp,
     snr,
-    sigma,
-    num_pixels,
-    pixel_size,
-    voltage,
-    cs
+    simulation_param
 ):
     """
     Simulates a batch of cryo-electron microscopy (cryo-EM) images of a set of given coarse-grained models.
@@ -37,32 +95,35 @@ def cryo_em_simulator(
         b_factor (torch.Tensor): The B-factor of the CTF.
         amp (torch.Tensor): The amplitude contrast of the CTF.
         snr (torch.Tensor): The signal-to-noise ratio of the simulated image.
-        sigma (torch.Tensor): Parameters of Gaussian kernel used to project the density.
-        num_pixels (torch.Tensor): The number of pixels in the simulated image.
-        pixel_size (torch.Tensor): The size of each pixel in the simulated image.
-        voltage (float): Electron voltage in kV
-        cs (float): Spherical aberration in mm
+        simulation_param  (dict): Dictionary of simulation parameters.
 
     Returns:
         torch.Tensor: A tensor of the simulated (noisy) cryo-EM image.
         torch.Tensor: A tensor of the simulated (clean) cryo-EM image.
     """
     models_selected = models[index.round().long().flatten()]
+    # 1. Project density on 2D plane
     image = project_density(
         models_selected,
         quaternion,
-        sigma,
+        simulation_param["sigma"],
         shift,
-        num_pixels,
-        pixel_size,
+        simulation_param["num_pixels"], 
+        simulation_param["pixel_size"]
     )
     # detach and clone the clean image
     image_clean = image.detach().clone()
-    # add CTF
-    image = apply_ctf(image, defocus, b_factor, amp, pixel_size, voltage, cs)
-    # add noise
-    image = add_noise(image, snr)
-    # normalize noisy and clean images
+
+    # 2. Add CTF
+    image = apply_ctf(image, defocus, b_factor, amp, simulation_param["pixel_size"], simulation_param["voltage"], simulation_param["cs"])
+
+    # 3. Add noise
+    if simulation_param["noise"]=="Gaussian":
+       image = add_Gaussian_noise(image, snr)
+    elif simulation_param["noise"]=="Poisson":
+       image = add_Poisson_noise(image, snr)
+
+    # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)
     image_clean = gaussian_normalize_image(image_clean)
     return image, image_clean
@@ -70,41 +131,20 @@ def cryo_em_simulator(
 
 class CryoEmSimulator:
     def __init__(self, config_fname: str, device: str = "cpu"):
+        # store device
         self._device = device
-        self._load_params(config_fname)
-        self._load_models()
-        self._priors = get_image_priors(self.max_index, self._config, models=self._models, device=device)
-        self._num_pixels = torch.tensor(
-            self._config["N_PIXELS"], dtype=torch.float32, device=device
-        )
-        self._pixel_size = torch.tensor(
-            self._config["PIXEL_SIZE"], dtype=torch.float32, device=device
-        )
-        self._voltage = self._config.get("VOLTAGE", 300.0)
-        self._cs = self._config.get("SPHERICAL_ABERRATION", 0.0)
-        # sigma stuff 
-        natoms = self._models.shape[2]
-    
-        if "TOPOLOGY" in self._config: 
-            # Load TOPOLOGY from file path
-            topology_path = self._config["TOPOLOGY"]
-            self._sigma = torch.load(topology_path, map_location=device)
-    
-        elif "SIGMA" in self._config: 
-            sigma_value = self._config["SIGMA"]
 
-            # Extract scalar value (or first element if list)
-            if isinstance(sigma_value, (list, tuple)):
-                sigma_val = torch.as_tensor(sigma_value[0], device=device)
-            else:
-                sigma_val = torch.as_tensor(sigma_value, device=device)
-           
-            # Create sigma tensor [2, natoms] on device
-            self._sigma = torch.zeros(2, natoms, device=device)
-            self._sigma[0, :] = 1.0 / torch.sqrt(natoms * 2 * torch.pi * sigma_val**2)
-            self._sigma[1, :] = -0.5 / (sigma_val ** 2)
-        else:
-            raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
+        # load parameters from simulation file
+        self._load_params(config_fname)
+
+        # load models
+        self._load_models()
+
+        # initialize priors
+        self._priors = get_image_priors(self.max_index, self._config, models=self._models, device=self._device)
+
+        # get simulation parameters into dictionary 
+        self._simulation_param = create_simulation_param(self._config, models=self._models, device=self._device)
 
  
     def _load_params(self, config_fname: str) -> None:
@@ -117,7 +157,6 @@ class CryoEmSimulator:
         Returns:
             None
         """
-
         config = json.load(open(config_fname))
         check_image_params(config)
         self._config = config
@@ -204,11 +243,7 @@ class CryoEmSimulator:
                 self._models,
                 batch_indices,
                 *batch_parameters,
-                self._sigma,
-                self._num_pixels,
-                self._pixel_size,
-                self._voltage,
-                self._cs
+                self._simulation_param
             )
             images.append(batch_images.cpu())
 

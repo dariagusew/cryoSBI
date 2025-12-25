@@ -50,9 +50,20 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # other microscope parameters (for CTF and noise)
     simulation_param["voltage"] = image_config.get("VOLTAGE", 300.0)
     simulation_param["cs"] = image_config.get("SPHERICAL_ABERRATION", 0.0)
+    simulation_param["dose"] = image_config.get("DOSE", 0.0)
+    # detector stuff
+    simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.8)
+    simulation_param["mtf_a"] = image_config.get("MTF_A", 0.3)
+    simulation_param["readout_std"] = image_config.get("READOUT_STD", 1.0)
 
     # noise model
     simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
+
+    # check parameters for Poisson noise
+    if simulation_param["noise"]=="Poisson":
+       # Dose must be positive
+       if (simulation_param["dose"] <= 0):
+          raise ValueError("With Poisson noise model DOSE must be specified and positive")
 
     # Log configuration
     print("\nImage simulation parameters:")
@@ -67,6 +78,11 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     else:
         print(f"  Sigma: fixed ({sigma_val:.3f} Å)")
     print(f"  Noise model: {simulation_param['noise']}")
+    if simulation_param["noise"]=="Poisson":
+       print(f"  Dose: {simulation_param['dose']:.1f} e/Å²")
+       print(f"  Quantum efficiency: {simulation_param['qe']:.2f}")
+       print(f"  MTF_a at Nyquist: {simulation_param['mtf_a']:.1f}")
+       print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
     print("="*70)
     
     return simulation_param
@@ -121,7 +137,8 @@ def cryo_em_simulator(
     if simulation_param["noise"]=="Gaussian":
        image = add_Gaussian_noise(image, snr)
     elif simulation_param["noise"]=="Poisson":
-       image = add_Poisson_noise(image, snr)
+       # Poisson + detector noise
+       image = add_Poisson_noise(image, snr, simulation_param)
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)

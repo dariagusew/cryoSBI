@@ -656,7 +656,7 @@ def extract_defocus_statistics(star_file: str, output_plot_prefix: Optional[str]
     Args:
     - star_file (str): Path to the input STAR file.
     - output_plot_prefix (Optional[str]): If provided, saves plots with this prefix
-      (e.g., "defocus" -> "defocus_avg.png", "defocus_astigmatism.png").
+      (e.g., "defocus" -> "defocus_avg.png", "defocus_astigmatism.png", "defocus_angle.png").
 
     Returns:
     - dict: A dictionary containing stats for average defocus, astigmatism, and angle.
@@ -692,54 +692,43 @@ def extract_defocus_statistics(star_file: str, output_plot_prefix: Optional[str]
     astigmatism_plot_path = f"{output_plot_prefix}_astigmatism_distribution.png" if output_plot_prefix else None
     diff_stats = _analyze_and_plot_distribution(np.abs(defocus_diff), "Astigmatism", "µm", astigmatism_plot_path)
 
-    # --- DEFOCUS ANGLE ANALYSIS ---
+    # --- DEFOCUS ANGLE ANALYSIS (NOW WITH PLOTTING) ---
     print("\n" + "#"*20 + " 3. DEFOCUS ANGLE ANALYSIS " + "#"*19)
-    angle_stats = {}
+    angle_stats = None
     if 'rlnDefocusAngle' in particles.columns:
         angles = particles['rlnDefocusAngle'].values
-        angle_stats = {
-            'min': float(angles.min()),
-            'max': float(angles.max()),
-            'p25': float(np.percentile(angles, 25)), # NEW
-            'p75': float(np.percentile(angles, 75))  # NEW
-        }
-        print(f"\n✓ Defocus Angle Statistics (degrees):")
-        print(f"  Range:  {angle_stats['min']:.1f}° - {angle_stats['max']:.1f}°")
-        print(f"  IQR:    {angle_stats['p25']:.1f}° - {angle_stats['p75']:.1f}°")
+        ## NEW: Full analysis and plotting for angle ##
+        angle_plot_path = f"{output_plot_prefix}_angle_distribution.png" if output_plot_prefix else None
+        angle_stats = _analyze_and_plot_distribution(angles, "Defocus Angle", "degrees", angle_plot_path)
     else:
         print("\n⚠️ 'rlnDefocusAngle' column not found. Skipping angle analysis.")
-        angle_stats = None
 
     # --- RECOMMENDATIONS ---
     print("\n" + "="*60)
     print("RECOMMENDATIONS")
     print("="*60)
     
-    # Defocus Recommendation
     reco_defocus_min = max(0.5, avg_stats['p25'] - 0.5)
     reco_defocus_max = min(5.0, avg_stats['p75'] + 0.5)
     avg_stats['recommended_min'] = reco_defocus_min
     avg_stats['recommended_max'] = reco_defocus_max
     print(f"✓ Recommended defocus range:     [{reco_defocus_min:.2f}, {reco_defocus_max:.2f}] µm")
     
-    ## NEW ##
-    # Astigmatism Recommendation (expand IQR slightly, clip at 0 and a high value)
     reco_astig_min = max(0.0, diff_stats['p25'] - 0.05)
-    reco_astig_max = min(1.0, diff_stats['p75'] + 0.05) # Clip at 1.0 µm (high astig)
+    reco_astig_max = min(1.0, diff_stats['p75'] + 0.05)
     diff_stats['recommended_min'] = reco_astig_min
     diff_stats['recommended_max'] = reco_astig_max
     print(f"✓ Recommended astigmatism range: [{reco_astig_min:.2f}, {reco_astig_max:.2f}] µm")
 
-    ## NEW ##
-    # Angle Recommendation
     if angle_stats:
-        reco_angle_min = max(0.0, angle_stats['p25'] - 10.0) # Expand by 10 degrees
-        reco_angle_max = min(180.0, angle_stats['p75'] + 10.0) # Clip at 0-180
+        reco_angle_min = max(0.0, angle_stats['p25'] - 10.0)
+        reco_angle_max = min(180.0, angle_stats['p75'] + 10.0)
         angle_stats['recommended_min'] = reco_angle_min
         angle_stats['recommended_max'] = reco_angle_max
         print(f"✓ Recommended angle range:       [{reco_angle_min:.1f}, {reco_angle_max:.1f}] degrees")
     
     return {'avg': avg_stats, 'diff': diff_stats, 'angle': angle_stats}
+
 
 def extract_amplitude_contrast(star_file):
     """Extract amplitude contrast from STAR file."""
@@ -791,28 +780,29 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
         config['DEFOCUS_ASTIGMATISM_FIT_SCALE'] = diff_stats['fit_scale']
         config['DEFOCUS_ASTIGMATISM_FIT_MIN'] = diff_stats['min']
         config['DEFOCUS_ASTIGMATISM_FIT_MAX'] = diff_stats['max']
-        ## NEW ##
         config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'] = [diff_stats.get('recommended_min', 0.0), diff_stats.get('recommended_max', 0.1)]
         
     if angle_stats:
         config['DEFOCUS_ANGLE_RANGE'] = [angle_stats['min'], angle_stats['max']]
-        ## NEW ##
         config['DEFOCUS_ANGLE_RECOMMENDED_RANGE'] = [angle_stats.get('recommended_min', 0.0), angle_stats.get('recommended_max', 180.0)]
+        ## NEW ##
+        if 'fit_loc' in angle_stats:
+            config['DEFOCUS_ANGLE_FIT_LOC'] = angle_stats['fit_loc']
+            config['DEFOCUS_ANGLE_FIT_SCALE'] = angle_stats['fit_scale']
 
-    # (The rest of the function remains the same as the previous version)
     if ctf_params:
         config['VOLTAGE'] = ctf_params['voltage']
         config['CS'] = ctf_params['spherical_aberration']
-        if ctf_params['bfactor'] is not None:
+        if ctf_params.get('bfactor'):
             config['BFACTOR_MEAN'] = ctf_params['bfactor']['mean']
             config['BFACTOR_RANGE'] = [ctf_params['bfactor']['min'], ctf_params['bfactor']['max']]
-        if ctf_params['scalefactor'] is not None:
+        if ctf_params.get('scalefactor'):
             config['SCALEFACTOR_MEAN'] = ctf_params['scalefactor']['mean']
             config['SCALEFACTOR_RANGE'] = [ctf_params['scalefactor']['min'], ctf_params['scalefactor']['max']]
     if pixel_info:
-        if pixel_info['pixel_size']: config['PIXEL_SIZE'] = pixel_info['pixel_size']
-        if pixel_info['image_size']: config['BOX_SIZE'] = pixel_info['image_size'][0]
-        config['NUM_PARTICLES'] = pixel_info['num_particles']
+        if pixel_info.get('pixel_size'): config['PIXEL_SIZE'] = pixel_info['pixel_size']
+        if pixel_info.get('image_size'): config['BOX_SIZE'] = pixel_info['image_size'][0]
+        config['NUM_PARTICLES'] = pixel_info.get('num_particles')
         if 'physical_size_angstrom' in pixel_info:
             config['PHYSICAL_SIZE_ANGSTROM'] = pixel_info['physical_size_angstrom']
             config['PHYSICAL_SIZE_NM'] = pixel_info['physical_size_nm']
@@ -820,7 +810,6 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
     print("\n📝 FINAL CONFIGURATION SUMMARY:")
     print("-"*60)
     print("  SIMULATION PARAMETERS (RECOMMENDED RANGES):")
-    ## MODIFIED ##
     print(f"    Defocus Range:      [{config['DEFOCUS_RECOMMENDED_RANGE'][0]:.2f}, {config['DEFOCUS_RECOMMENDED_RANGE'][1]:.2f}] µm")
     if 'DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE' in config:
         print(f"    Astigmatism Range:  [{config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'][0]:.2f}, {config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'][1]:.2f}] µm")
@@ -833,6 +822,9 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
         print(f"    Defocus Fit:        loc={config['DEFOCUS_FIT_LOC']:.2f}, scale={config['DEFOCUS_FIT_SCALE']:.2f} µm (on range [{config['DEFOCUS_FIT_MIN']:.2f}, {config['DEFOCUS_FIT_MAX']:.2f}])")
     if 'DEFOCUS_ASTIGMATISM_FIT_LOC' in config:
         print(f"    Astigmatism Fit:    loc={config['DEFOCUS_ASTIGMATISM_FIT_LOC']:.2f}, scale={config['DEFOCUS_ASTIGMATISM_FIT_SCALE']:.2f} µm (on range [{config['DEFOCUS_ASTIGMATISM_FIT_MIN']:.2f}, {config['DEFOCUS_ASTIGMATISM_FIT_MAX']:.2f}])")
+    ## NEW ##
+    if 'DEFOCUS_ANGLE_FIT_LOC' in config:
+        print(f"    Angle Fit:          loc={config['DEFOCUS_ANGLE_FIT_LOC']:.1f}, scale={config['DEFOCUS_ANGLE_FIT_SCALE']:.1f} degrees (on range [{config['DEFOCUS_ANGLE_RANGE'][0]:.1f}, {config['DEFOCUS_ANGLE_RANGE'][1]:.1f}])")
 
     print("-"*60)
     print("  CTF PARAMETERS:")
@@ -842,14 +834,13 @@ def generate_config(defocus_stats, amp, pixel_info, ctf_params):
     if 'SCALEFACTOR_MEAN' in config: print(f"    Scale factor:   {config['SCALEFACTOR_MEAN']:.3f} (mean)")
     print("-"*60)
     print("  IMAGE PARAMETERS:")
-    if 'PIXEL_SIZE' in config: print(f"    Pixel size:     {config['PIXEL_SIZE']:.3f} Å/px")
-    if 'BOX_SIZE' in config: print(f"    Box size:       {config['BOX_SIZE']} px")
-    if 'PHYSICAL_SIZE_ANGSTROM' in config: print(f"    Physical size:  {config['PHYSICAL_SIZE_ANGSTROM']:.1f} Å")
-    if 'NUM_PARTICLES' in config: print(f"    Particles:      {config['NUM_PARTICLES']:,}")
+    if 'PIXEL_SIZE' in config: print(f"    Pixel size:     {config.get('PIXEL_SIZE'):.3f} Å/px")
+    if 'BOX_SIZE' in config: print(f"    Box size:       {config.get('BOX_SIZE')} px")
+    if 'PHYSICAL_SIZE_ANGSTROM' in config: print(f"    Physical size:  {config.get('PHYSICAL_SIZE_ANGSTROM'):.1f} Å")
+    if 'NUM_PARTICLES' in config: print(f"    Particles:      {config.get('NUM_PARTICLES'):,}")
     print("="*60)
     
     return config
-
 
 def estimate_param_simulation_RELION(star_file):
     # Extract parameters

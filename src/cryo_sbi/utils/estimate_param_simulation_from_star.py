@@ -135,6 +135,94 @@ def open_mrc_robust(filepath, max_size_gb=None):
     return None, False, "All methods failed"
 
 
+def _analyze_and_plot_distribution(data: np.ndarray, name: str, unit: str, output_plot_path: Optional[str] = None) -> Dict:
+    """
+    Internal helper to perform statistical analysis, fitting, and plotting for a given data distribution.
+    """
+    stats = {
+        'min': float(data.min()),
+        'max': float(data.max()),
+        'mean': float(data.mean()),
+        'median': float(np.median(data)),
+        'std': float(data.std()),
+        'p25': float(np.percentile(data, 25)),
+        'p75': float(np.percentile(data, 75)),
+    }
+    
+    print(f"\n✓ Basic {name} Statistics ({unit}):")
+    print(f"  Range:  {stats['min']:.2f} - {stats['max']:.2f} {unit}")
+    print(f"  Mean:   {stats['mean']:.2f} {unit}")
+    print(f"  StdDev: {stats['std']:.2f} {unit}")
+    
+    # --- Truncated Gaussian Fitting ---
+    print("\n" + "-"*60)
+    print(f"FITTING TRUNCATED GAUSSIAN TO {name.upper()}")
+    print("-"*60)
+    
+    lower_bound, upper_bound = stats['min'], stats['max']
+
+    def neg_log_likelihood(params, data_fit):
+        loc, scale = params
+        if scale <= 0: return np.inf
+        a = (lower_bound - loc) / scale
+        b = (upper_bound - loc) / scale
+        log_likelihood = np.sum(truncnorm.logpdf(data_fit, a=a, b=b, loc=loc, scale=scale))
+        return -log_likelihood
+
+    if stats['std'] > 1e-6: # Check for non-zero variance
+        initial_guess = [stats['mean'], stats['std']]
+        result = minimize(neg_log_likelihood, initial_guess, args=(data,), method='Nelder-Mead')
+        if result.success:
+            fit_loc, fit_scale = result.x
+            stats['fit_loc'] = float(fit_loc)
+            stats['fit_scale'] = float(fit_scale)
+            print("✓ Fit successful.")
+            print(f"  Fitted Location (µ): {fit_loc:.2f}")
+            print(f"  Fitted Scale (σ):    {fit_scale:.2f}")
+        else:
+            print("❌ Fitting failed. Using sample mean/std as fallback.")
+            stats['fit_loc'] = stats['mean']
+            stats['fit_scale'] = stats['std']
+    else:
+        print("⚠️ Data has near-zero variance. Skipping fit.")
+        stats['fit_loc'] = stats['mean']
+        stats['fit_scale'] = 0.0
+
+    # --- Plotting ---
+    if output_plot_path:
+        print("\n" + "-"*60)
+        print(f"GENERATING PLOT: {output_plot_path}")
+        print("-"*60)
+        plt.style.use('seaborn-v0_8-whitegrid')
+        fig, ax = plt.subplots(figsize=(10, 6))
+
+        sns.histplot(data, bins='auto', stat='density', kde=True, ax=ax,
+                     label='Data (Histogram + KDE)', color='skyblue', alpha=0.7)
+
+        x_fit = np.linspace(lower_bound, upper_bound, 400)
+        fit_loc, fit_scale = stats['fit_loc'], stats['fit_scale']
+        if fit_scale > 1e-6:
+            a_fit = (lower_bound - fit_loc) / fit_scale
+            b_fit = (upper_bound - fit_loc) / fit_scale
+            y_fit = truncnorm.pdf(x_fit, a=a_fit, b=b_fit, loc=fit_loc, scale=fit_scale)
+            ax.plot(x_fit, y_fit, 'r-', lw=2.5, label=f'Truncated Gaussian Fit\n(loc={fit_loc:.2f}, scale={fit_scale:.2f})')
+
+        ax.set_title(f'{name} Distribution Analysis', fontsize=16)
+        ax.set_xlabel(f'{name} ({unit})', fontsize=12)
+        ax.set_ylabel('Density', fontsize=12)
+        ax.legend()
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+        
+        try:
+            plt.savefig(output_plot_path, dpi=150, bbox_inches='tight')
+            print(f"✓ Plot successfully saved to {output_plot_path}")
+        except Exception as e:
+            print(f"❌ Failed to save plot: {e}")
+        plt.close(fig)
+        
+    return stats
+
+
 # ============================================================================
 # CTF PARAMETERS EXTRACTION
 # ============================================================================
@@ -561,20 +649,20 @@ def extract_pixel_and_image_info(star_file):
 # DEFOCUS EXTRACTION
 # ============================================================================
 
-def extract_defocus_statistics(star_file: str, output_plot_path: Optional[str] = None):
+def extract_defocus_statistics(star_file: str, output_plot_prefix: Optional[str] = None) -> Dict:
     """
-    Extracts defocus statistics, fits a truncated Gaussian, and plots the distribution.
+    Extracts defocus, astigmatism, and angle stats, fits distributions, and plots them.
 
     Args:
     - star_file (str): Path to the input STAR file.
-    - output_plot_path (Optional[str]): If provided, saves a plot of the defocus
-      distribution to this path (e.g., "defocus_distribution.png").
+    - output_plot_prefix (Optional[str]): If provided, saves plots with this prefix
+      (e.g., "defocus" -> "defocus_avg.png", "defocus_astigmatism.png").
 
     Returns:
-    - dict: A dictionary containing defocus statistics and fitted parameters.
+    - dict: A dictionary containing stats for average defocus, astigmatism, and angle.
     """
     print("\n" + "="*60)
-    print("EXTRACTING AND ANALYZING DEFOCUS PARAMETERS")
+    print("EXTRACTING AND ANALYZING DEFOCUS, ASTIGMATISM & ANGLE")
     print("="*60)
     
     try:
@@ -584,122 +672,74 @@ def extract_defocus_statistics(star_file: str, output_plot_path: Optional[str] =
         print(f"❌ Error reading STAR file: {e}")
         return {}
 
-    if not all(k in particles.columns for k in ['rlnDefocusU', 'rlnDefocusV']):
-        print("❌ 'rlnDefocusU' or 'rlnDefocusV' columns not found.")
+    required_cols = ['rlnDefocusU', 'rlnDefocusV']
+    if not all(k in particles.columns for k in required_cols):
+        print(f"❌ Required columns not found: {required_cols}")
         return {}
 
+    # --- CALCULATIONS ---
     defocus_u = particles['rlnDefocusU'].values / 10000  # Å → µm
     defocus_v = particles['rlnDefocusV'].values / 10000
     defocus_avg = (defocus_u + defocus_v) / 2
-    
-    stats = {
-        'min': float(defocus_avg.min()),
-        'max': float(defocus_avg.max()),
-        'mean': float(defocus_avg.mean()),
-        'median': float(np.median(defocus_avg)),
-        'std': float(defocus_avg.std()),
-        'p25': float(np.percentile(defocus_avg, 25)),
-        'p75': float(np.percentile(defocus_avg, 75)),
-    }
-    
-    print(f"\n✓ Basic Defocus Statistics (µm):")
-    print(f"  Range:  {stats['min']:.2f} - {stats['max']:.2f} µm")
-    print(f"  Mean:   {stats['mean']:.2f} µm")
-    print(f"  Median: {stats['median']:.2f} µm")
-    print(f"  StdDev: {stats['std']:.2f} µm")
-    
-    # --- NEW: Truncated Gaussian Fitting ---
-    print("\n" + "-"*60)
-    print("FITTING TRUNCATED GAUSSIAN DISTRIBUTION")
-    print("-"*60)
-    
-    # Define bounds for the fit
-    lower_bound, upper_bound = stats['min'], stats['max']
+    defocus_diff = (defocus_u - defocus_v) / 2
 
-    # The negative log-likelihood function to minimize
-    def neg_log_likelihood(params, data):
-        loc, scale = params
-        if scale <= 0: # Scale must be positive
-            return np.inf
-        # Calculate a and b parameters for truncnorm in standard units
-        a = (lower_bound - loc) / scale
-        b = (upper_bound - loc) / scale
-        # Calculate log-likelihood and return its negative
-        log_likelihood = np.sum(truncnorm.logpdf(data, a=a, b=b, loc=loc, scale=scale))
-        return -log_likelihood
+    # --- ANALYSIS OF DISTRIBUTIONS ---
+    print("\n" + "#"*20 + " 1. AVERAGE DEFOCUS ANALYSIS " + "#"*18)
+    avg_plot_path = f"{output_plot_prefix}_avg_distribution.png" if output_plot_prefix else None
+    avg_stats = _analyze_and_plot_distribution(defocus_avg, "Average Defocus", "µm", avg_plot_path)
 
-    # Initial guess and optimization
-    if stats['std'] > 0:
-        initial_guess = [stats['mean'], stats['std']]
-        result = minimize(
-            neg_log_likelihood,
-            initial_guess,
-            args=(defocus_avg,),
-            method='Nelder-Mead'
-        )
-        if result.success:
-            fit_loc, fit_scale = result.x
-            stats['fit_loc'] = float(fit_loc)
-            stats['fit_scale'] = float(fit_scale)
-            print("✓ Fit successful.")
-            print(f"  Fitted Location (µ): {fit_loc:.2f}")
-            print(f"  Fitted Scale (σ):    {fit_scale:.2f}")
-        else:
-            print("❌ Fitting failed. Using sample mean/std as fallback.")
-            stats['fit_loc'] = stats['mean']
-            stats['fit_scale'] = stats['std']
+    print("\n" + "#"*20 + " 2. ASTIGMATISM ANALYSIS " + "#"*20)
+    astigmatism_plot_path = f"{output_plot_prefix}_astigmatism_distribution.png" if output_plot_prefix else None
+    diff_stats = _analyze_and_plot_distribution(np.abs(defocus_diff), "Astigmatism", "µm", astigmatism_plot_path)
+
+    # --- DEFOCUS ANGLE ANALYSIS ---
+    print("\n" + "#"*20 + " 3. DEFOCUS ANGLE ANALYSIS " + "#"*19)
+    angle_stats = {}
+    if 'rlnDefocusAngle' in particles.columns:
+        angles = particles['rlnDefocusAngle'].values
+        angle_stats = {
+            'min': float(angles.min()),
+            'max': float(angles.max()),
+            'p25': float(np.percentile(angles, 25)), # NEW
+            'p75': float(np.percentile(angles, 75))  # NEW
+        }
+        print(f"\n✓ Defocus Angle Statistics (degrees):")
+        print(f"  Range:  {angle_stats['min']:.1f}° - {angle_stats['max']:.1f}°")
+        print(f"  IQR:    {angle_stats['p25']:.1f}° - {angle_stats['p75']:.1f}°")
     else:
-        print("⚠️ Data has zero variance. Skipping fit.")
-        stats['fit_loc'] = stats['mean']
-        stats['fit_scale'] = 0.0
+        print("\n⚠️ 'rlnDefocusAngle' column not found. Skipping angle analysis.")
+        angle_stats = None
 
-    # --- NEW: Plotting ---
-    if output_plot_path:
-        print("\n" + "-"*60)
-        print(f"GENERATING PLOT: {output_plot_path}")
-        print("-"*60)
-        plt.style.use('seaborn-v0_8-whitegrid')
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        # Plot histogram and KDE
-        sns.histplot(defocus_avg, bins='auto', stat='density', kde=True, ax=ax,
-                     label='Data (Histogram + KDE)', color='skyblue', alpha=0.7)
-
-        # Plot the fitted Truncated Gaussian PDF
-        x_fit = np.linspace(lower_bound, upper_bound, 400)
-        fit_loc, fit_scale = stats['fit_loc'], stats['fit_scale']
-        a_fit = (lower_bound - fit_loc) / fit_scale
-        b_fit = (upper_bound - fit_loc) / fit_scale
-        y_fit = truncnorm.pdf(x_fit, a=a_fit, b=b_fit, loc=fit_loc, scale=fit_scale)
-        ax.plot(x_fit, y_fit, 'r-', lw=2.5, label=f'Truncated Gaussian Fit\n(loc={fit_loc:.2f}, scale={fit_scale:.2f})')
-
-        ax.set_title('Defocus Distribution Analysis', fontsize=16)
-        ax.set_xlabel('Average Defocus (µm)', fontsize=12)
-        ax.set_ylabel('Density', fontsize=12)
-        ax.legend()
-        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
-        
-        try:
-            plt.savefig(output_plot_path, dpi=150, bbox_inches='tight')
-            print(f"✓ Plot successfully saved to {output_plot_path}")
-        except Exception as e:
-            print(f"❌ Failed to save plot: {e}")
-        plt.close(fig)
-
-    recommended_min = max(0.5, stats['p25'] - 0.5)
-    recommended_max = min(5.0, stats['p75'] + 0.5)
-    
-    print("\n" + "-"*60)
+    # --- RECOMMENDATIONS ---
+    print("\n" + "="*60)
     print("RECOMMENDATIONS")
-    print("-"*60)
-    print(f"✓ Recommended defocus range for simulation: [{recommended_min:.2f}, {recommended_max:.2f}] µm")
+    print("="*60)
     
-    stats['recommended_min'] = recommended_min
-    stats['recommended_max'] = recommended_max
-    stats['all_values'] = defocus_avg
+    # Defocus Recommendation
+    reco_defocus_min = max(0.5, avg_stats['p25'] - 0.5)
+    reco_defocus_max = min(5.0, avg_stats['p75'] + 0.5)
+    avg_stats['recommended_min'] = reco_defocus_min
+    avg_stats['recommended_max'] = reco_defocus_max
+    print(f"✓ Recommended defocus range:     [{reco_defocus_min:.2f}, {reco_defocus_max:.2f}] µm")
     
-    return stats
+    ## NEW ##
+    # Astigmatism Recommendation (expand IQR slightly, clip at 0 and a high value)
+    reco_astig_min = max(0.0, diff_stats['p25'] - 0.05)
+    reco_astig_max = min(1.0, diff_stats['p75'] + 0.05) # Clip at 1.0 µm (high astig)
+    diff_stats['recommended_min'] = reco_astig_min
+    diff_stats['recommended_max'] = reco_astig_max
+    print(f"✓ Recommended astigmatism range: [{reco_astig_min:.2f}, {reco_astig_max:.2f}] µm")
 
+    ## NEW ##
+    # Angle Recommendation
+    if angle_stats:
+        reco_angle_min = max(0.0, angle_stats['p25'] - 10.0) # Expand by 10 degrees
+        reco_angle_max = min(180.0, angle_stats['p75'] + 10.0) # Clip at 0-180
+        angle_stats['recommended_min'] = reco_angle_min
+        angle_stats['recommended_max'] = reco_angle_max
+        print(f"✓ Recommended angle range:       [{reco_angle_min:.1f}, {reco_angle_max:.1f}] degrees")
+    
+    return {'avg': avg_stats, 'diff': diff_stats, 'angle': angle_stats}
 
 def extract_amplitude_contrast(star_file):
     """Extract amplitude contrast from STAR file."""
@@ -731,80 +771,85 @@ def extract_amplitude_contrast(star_file):
 def generate_config(defocus_stats, amp, pixel_info, ctf_params):
     """Generate complete configuration dictionary."""
     
+    avg_stats = defocus_stats.get('avg', {})
+    diff_stats = defocus_stats.get('diff', {})
+    angle_stats = defocus_stats.get('angle', {})
+
     config = {
-        "DEFOCUS": [defocus_stats['recommended_min'], defocus_stats['recommended_max']],
+        "DEFOCUS_RECOMMENDED_RANGE": [avg_stats.get('recommended_min', 0.5), avg_stats.get('recommended_max', 3.0)],
         "AMP": amp
     }
     
-    ## NEW ##
-    # Add defocus fit parameters if they exist
-    if 'fit_loc' in defocus_stats:
-        config['DEFOCUS_FIT_LOC'] = defocus_stats['fit_loc']
-        config['DEFOCUS_FIT_SCALE'] = defocus_stats['fit_scale']
-        config['DEFOCUS_FIT_MIN'] = defocus_stats['min']
-        config['DEFOCUS_FIT_MAX'] = defocus_stats['max']
-    
-    # Add CTF parameters
+    if 'fit_loc' in avg_stats:
+        config['DEFOCUS_FIT_LOC'] = avg_stats['fit_loc']
+        config['DEFOCUS_FIT_SCALE'] = avg_stats['fit_scale']
+        config['DEFOCUS_FIT_MIN'] = avg_stats['min']
+        config['DEFOCUS_FIT_MAX'] = avg_stats['max']
+
+    if 'fit_loc' in diff_stats:
+        config['DEFOCUS_ASTIGMATISM_FIT_LOC'] = diff_stats['fit_loc']
+        config['DEFOCUS_ASTIGMATISM_FIT_SCALE'] = diff_stats['fit_scale']
+        config['DEFOCUS_ASTIGMATISM_FIT_MIN'] = diff_stats['min']
+        config['DEFOCUS_ASTIGMATISM_FIT_MAX'] = diff_stats['max']
+        ## NEW ##
+        config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'] = [diff_stats.get('recommended_min', 0.0), diff_stats.get('recommended_max', 0.1)]
+        
+    if angle_stats:
+        config['DEFOCUS_ANGLE_RANGE'] = [angle_stats['min'], angle_stats['max']]
+        ## NEW ##
+        config['DEFOCUS_ANGLE_RECOMMENDED_RANGE'] = [angle_stats.get('recommended_min', 0.0), angle_stats.get('recommended_max', 180.0)]
+
+    # (The rest of the function remains the same as the previous version)
     if ctf_params:
         config['VOLTAGE'] = ctf_params['voltage']
         config['CS'] = ctf_params['spherical_aberration']
-        
         if ctf_params['bfactor'] is not None:
             config['BFACTOR_MEAN'] = ctf_params['bfactor']['mean']
             config['BFACTOR_RANGE'] = [ctf_params['bfactor']['min'], ctf_params['bfactor']['max']]
-        
         if ctf_params['scalefactor'] is not None:
             config['SCALEFACTOR_MEAN'] = ctf_params['scalefactor']['mean']
             config['SCALEFACTOR_RANGE'] = [ctf_params['scalefactor']['min'], ctf_params['scalefactor']['max']]
-    
-    # Add pixel and image information
     if pixel_info:
-        if pixel_info['pixel_size']:
-            config['PIXEL_SIZE'] = pixel_info['pixel_size']
-        if pixel_info['image_size']:
-            config['BOX_SIZE'] = pixel_info['image_size'][0]
+        if pixel_info['pixel_size']: config['PIXEL_SIZE'] = pixel_info['pixel_size']
+        if pixel_info['image_size']: config['BOX_SIZE'] = pixel_info['image_size'][0]
         config['NUM_PARTICLES'] = pixel_info['num_particles']
-        
         if 'physical_size_angstrom' in pixel_info:
             config['PHYSICAL_SIZE_ANGSTROM'] = pixel_info['physical_size_angstrom']
             config['PHYSICAL_SIZE_NM'] = pixel_info['physical_size_nm']
     
     print("\n📝 FINAL CONFIGURATION SUMMARY:")
     print("-"*60)
-    print("  SIMULATION PARAMETERS:")
-    print(f"    Defocus Range:  [{config['DEFOCUS'][0]:.2f}, {config['DEFOCUS'][1]:.2f}] µm (Recommended)")
-    print(f"    Amplitude (A):  {config['AMP']:.3f}")
+    print("  SIMULATION PARAMETERS (RECOMMENDED RANGES):")
+    ## MODIFIED ##
+    print(f"    Defocus Range:      [{config['DEFOCUS_RECOMMENDED_RANGE'][0]:.2f}, {config['DEFOCUS_RECOMMENDED_RANGE'][1]:.2f}] µm")
+    if 'DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE' in config:
+        print(f"    Astigmatism Range:  [{config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'][0]:.2f}, {config['DEFOCUS_ASTIGMATISM_RECOMMENDED_RANGE'][1]:.2f}] µm")
+    if 'DEFOCUS_ANGLE_RECOMMENDED_RANGE' in config:
+        print(f"    Angle Range:        [{config['DEFOCUS_ANGLE_RECOMMENDED_RANGE'][0]:.1f}, {config['DEFOCUS_ANGLE_RECOMMENDED_RANGE'][1]:.1f}] degrees")
+    print(f"    Amplitude (A):      {config['AMP']:.3f}")
     
-    ## NEW ##
-    # Print the fit information if it was added to the config
+    print("\n  SIMULATION PARAMETERS (FITTED DISTRIBUTIONS):")
     if 'DEFOCUS_FIT_LOC' in config:
-        print(f"    Defocus Fit:    loc={config['DEFOCUS_FIT_LOC']:.2f}, scale={config['DEFOCUS_FIT_SCALE']:.2f} µm (Truncated Gaussian)")
-        print(f"    Fit Data Range: [{config['DEFOCUS_FIT_MIN']:.2f}, {config['DEFOCUS_FIT_MAX']:.2f}] µm (Min/Max)")
+        print(f"    Defocus Fit:        loc={config['DEFOCUS_FIT_LOC']:.2f}, scale={config['DEFOCUS_FIT_SCALE']:.2f} µm (on range [{config['DEFOCUS_FIT_MIN']:.2f}, {config['DEFOCUS_FIT_MAX']:.2f}])")
+    if 'DEFOCUS_ASTIGMATISM_FIT_LOC' in config:
+        print(f"    Astigmatism Fit:    loc={config['DEFOCUS_ASTIGMATISM_FIT_LOC']:.2f}, scale={config['DEFOCUS_ASTIGMATISM_FIT_SCALE']:.2f} µm (on range [{config['DEFOCUS_ASTIGMATISM_FIT_MIN']:.2f}, {config['DEFOCUS_ASTIGMATISM_FIT_MAX']:.2f}])")
 
     print("-"*60)
     print("  CTF PARAMETERS:")
-    if 'VOLTAGE' in config:
-        print(f"    Voltage:        {config['VOLTAGE']:.1f} kV")
-    if 'CS' in config:
-        print(f"    Cs:             {config['CS']:.2f} mm")
-    if 'BFACTOR_MEAN' in config:
-        print(f"    B-factor:       {config['BFACTOR_MEAN']:.1f} Å² (mean)")
-        print(f"                    [{config['BFACTOR_RANGE'][0]:.1f}, {config['BFACTOR_RANGE'][1]:.1f}] Å² (range)")
-    if 'SCALEFACTOR_MEAN' in config:
-        print(f"    Scale factor:   {config['SCALEFACTOR_MEAN']:.3f} (mean)")
+    if 'VOLTAGE' in config: print(f"    Voltage:        {config['VOLTAGE']:.1f} kV")
+    if 'CS' in config: print(f"    Cs:             {config['CS']:.2f} mm")
+    if 'BFACTOR_MEAN' in config: print(f"    B-factor:       {config['BFACTOR_MEAN']:.1f} Å² (mean)")
+    if 'SCALEFACTOR_MEAN' in config: print(f"    Scale factor:   {config['SCALEFACTOR_MEAN']:.3f} (mean)")
     print("-"*60)
     print("  IMAGE PARAMETERS:")
-    if 'PIXEL_SIZE' in config:
-        print(f"    Pixel size:     {config['PIXEL_SIZE']:.3f} Å/px")
-    if 'BOX_SIZE' in config:
-        print(f"    Box size:       {config['BOX_SIZE']} px")
-    if 'PHYSICAL_SIZE_ANGSTROM' in config:
-        print(f"    Physical size:  {config['PHYSICAL_SIZE_ANGSTROM']:.1f} Å ({config['PHYSICAL_SIZE_NM']:.1f} nm)")
-    if 'NUM_PARTICLES' in config:
-        print(f"    Particles:      {config['NUM_PARTICLES']:,}")
+    if 'PIXEL_SIZE' in config: print(f"    Pixel size:     {config['PIXEL_SIZE']:.3f} Å/px")
+    if 'BOX_SIZE' in config: print(f"    Box size:       {config['BOX_SIZE']} px")
+    if 'PHYSICAL_SIZE_ANGSTROM' in config: print(f"    Physical size:  {config['PHYSICAL_SIZE_ANGSTROM']:.1f} Å")
+    if 'NUM_PARTICLES' in config: print(f"    Particles:      {config['NUM_PARTICLES']:,}")
     print("="*60)
     
     return config
+
 
 def estimate_param_simulation_RELION(star_file):
     # Extract parameters
@@ -819,9 +864,9 @@ def estimate_param_simulation_RELION(star_file):
     ctf_params = extract_ctf_parameters(star_file)
     
     print("\n" + "█"*60)
-    print("  STEP 3/4: EXTRACTING DEFOCUS")
+    print("  STEP 3/4: EXTRACTING DEFOCUS, ASTIGMATISM, AND ANGLE")
     print("█"*60)
-    defocus_stats = extract_defocus_statistics(star_file, "defocus_distribution.png")
+    defocus_stats = extract_defocus_statistics(star_file, "defocus_analysis")
     
     print("\n" + "█"*60)
     print("  STEP 4/4: EXTRACTING AMPLITUDE CONTRAST")

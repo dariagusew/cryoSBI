@@ -138,7 +138,6 @@ class GPUIcePowerSpectrumAnalyzer:
         except Exception: return None, None
 
 def plot_power_spectrum_analysis(freq, power_mean, power_std, all_power_spectra, fitted_params=None):
-    # This function remains the same
     fig, axes = plt.subplots(1, 2, figsize=(14, 5)); ax = axes[0]
     n_show = min(50, len(all_power_spectra))
     for i in range(n_show): ax.loglog(freq, all_power_spectra[i], 'gray', alpha=0.1, linewidth=0.5)
@@ -205,7 +204,6 @@ class GPUSNRAnalyzer:
         return results
 
 def plot_snr_analysis(results, particles=None):
-    # This function remains the same
     snr = results['snr'][np.isfinite(results['snr'])]
     if len(snr) == 0:
         print("Warning: No valid SNR values to plot.")
@@ -256,7 +254,6 @@ def estimate_physical_parameters(image_stack, signal_mask, background_mask, lowp
 # 5. MAIN ANALYSIS PIPELINE AND REPORTING
 # ============================================================================
 def print_final_simulation_summary(results: dict):
-    # This function remains the same
     print("\n" + "="*80); print("      FINAL SIMULATION PARAMETER SUMMARY"); print("="*80)
     print("Use these parameters to generate realistic synthetic cryo-EM data.")
     phys_params = results.get('physical_params', {}); print("\n--- Physical Properties ---")
@@ -370,7 +367,7 @@ def run_comprehensive_analysis(args):
 def main():
     parser = argparse.ArgumentParser(description='Comprehensive Cryo-EM Particle Stack Analyzer for Simulation Parameter Estimation.', formatter_class=argparse.RawTextHelpFormatter)
     g_core = parser.add_argument_group('Core Parameters'); g_core.add_argument('--input', '-i', required=True, help='Particle stack path (.mrc, .mrcs)')
-    g_core.add_argument('--output', '-o', type=Path, default=Path("./sim_params"), help='Output directory for plots and data')
+    g_core.add_argument('--output', '-o', type=Path, default=Path("./sim_params"), help='Output directory to save plots and data files')
     g_core.add_argument('--pixel_size', '-p', type=float, default=1.0, help='Pixel size (Å/pixel) for spectrum analysis')
     g_core.add_argument('--max_particles', '-n', type=int, default=None, help='Max particles to analyze')
     g_core.add_argument('--device', '-d', type=str, default=None, help='Device: cuda or cpu (default: auto-detect)')
@@ -389,10 +386,12 @@ def main():
     g_ctrl = parser.add_argument_group('Execution Control')
     g_ctrl.add_argument('--no-snr', action='store_true', help="Skip SNR and Physical Parameter analysis.")
     g_ctrl.add_argument('--no-spectrum', action='store_true', help="Skip Ice Power Spectrum analysis.")
-    g_ctrl.add_argument('--show-plots', action='store_true', help="Display generated plots at the end.")
+    g_ctrl.add_argument('--show-plots', action='store_true', help="Display generated plots at the end (in addition to saving them).")
     
     args = parser.parse_args()
-    if args.output: args.output.mkdir(exist_ok=True, parents=True); print(f"Results will be saved to: {args.output.resolve()}")
+    if args.output:
+        args.output.mkdir(exist_ok=True, parents=True)
+        print(f"Results will be saved to: {args.output.resolve()}")
     run_comprehensive_analysis(args)
     print("\n✓ Analysis complete!")
 

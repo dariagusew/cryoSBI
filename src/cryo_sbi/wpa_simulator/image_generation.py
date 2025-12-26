@@ -48,56 +48,76 @@ def project_density(
     shift: torch.Tensor,
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
+    atom_batch_size: int = 2048,
 ) -> torch.Tensor:
     """
-    Generate 2D projections from a set of 3D coordinates
+    Generate 2D projections from a set of 3D coordinates using atom-batching
+    to reduce memory usage.
 
     Projects 3D atomic coordinates onto a 2D plane after rotation, where each atom
-    is represented as a Gaussian with standard deviation sigma. The projection is
-    computed on a regular grid.
+    is represented as a Gaussian. The projection is computed on a regular grid.
 
     Args:
         coords (torch.Tensor): Coordinates of shape (num_batch, 3, num_atoms)
         quats (torch.Tensor): Quaternions of shape (num_batch, 4) defining rotations
-        sigma (torch.Tensor): Parameters of Gaussian kernel
+        sigma (torch.Tensor): Parameters of Gaussian kernel of shape (2, num_atoms)
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
         num_pixels (torch.Tensor): Number of pixels along one image dimension
         pixel_size (torch.Tensor): Pixel size in Angstrom
+        atom_batch_size (int): The number of atoms to process in each chunk to
+                               save memory. Defaults to 2048.
 
     Returns:
         image (torch.Tensor): Projected images of shape (num_batch, num_pixels, num_pixels)
     """
     num_batch, _, num_atoms = coords.shape
-    
+    device, dtype = coords.device, coords.dtype
+
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
-   
+
     # Create grid using linspace
     grid_min = -pixel_size * num_pixels * 0.5
     grid_max = pixel_size * num_pixels * 0.5
-    grid = torch.linspace(grid_min, grid_max - pixel_size, num_pixels, 
-                         device=coords.device, dtype=coords.dtype)
-    
+    grid = torch.linspace(grid_min, grid_max - pixel_size, num_pixels,
+                         device=device, dtype=dtype)
+
     # Generate rotation matrices
     rot_matrix = gen_rot_matrix(quats)
     
-    # Apply rotation to coordinates
+    # Apply rotation to all coordinates
     coords_rot = torch.bmm(rot_matrix, coords)
     
-    # Apply shift to x and y coordinates
+    # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
 
-    # Compute Gaussian in x direction
-    # Shape: (num_batch, num_pixels, num_atoms)
-    dx = grid.unsqueeze(0).unsqueeze(-1) - coords_rot[:, 0, :].unsqueeze(1)
-    gauss_x = sigma[0, :].view(1, 1, -1) * torch.exp(sigma[1, :].view(1, 1, -1) * dx ** 2)
-   
-    # Compute Gaussian in y direction
-    # Shape: (num_batch, num_atoms, num_pixels)
-    dy = grid.unsqueeze(0).unsqueeze(0) - coords_rot[:, 1, :].unsqueeze(-1)
-    gauss_y = sigma[0, :].view(1, -1, 1) * torch.exp(sigma[1, :].view(1, -1, 1) * dy ** 2)
-   
-    # Matrix multiplication to get 2D projection
-    image = torch.bmm(gauss_x, gauss_y)
+    # Initialize the final image tensor with zeros
+    final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
 
-    return image
+    # Loop over atoms in batches
+    for i in range(0, num_atoms, atom_batch_size):
+        # Define the slice for the current atom batch
+        start_idx = i
+        end_idx = min(i + atom_batch_size, num_atoms)
+        
+        # Slice the rotated coordinates and sigma for the current batch
+        coords_rot_batch = coords_rot[:, :, start_idx:end_idx]
+        sigma_batch = sigma[:, start_idx:end_idx]
+
+        # Compute Gaussian in x direction for the batch
+        # Shape: (num_batch, num_pixels, atom_batch_size)
+        dx_batch = grid.unsqueeze(0).unsqueeze(-1) - coords_rot_batch[:, 0, :].unsqueeze(1)
+        gauss_x_batch = sigma_batch[0, :].view(1, 1, -1) * torch.exp(sigma_batch[1, :].view(1, 1, -1) * dx_batch ** 2)
+
+        # Compute Gaussian in y direction for the batch
+        # Shape: (num_batch, atom_batch_size, num_pixels)
+        dy_batch = grid.unsqueeze(0).unsqueeze(0) - coords_rot_batch[:, 1, :].unsqueeze(-1)
+        gauss_y_batch = sigma_batch[0, :].view(1, -1, 1) * torch.exp(sigma_batch[1, :].view(1, -1, 1) * dy_batch ** 2)
+
+        # Matrix multiplication to get 2D projection for this batch
+        image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
+        
+        # Accumulate the result
+        final_image += image_batch
+
+    return final_image

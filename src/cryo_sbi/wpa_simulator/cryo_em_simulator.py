@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
+from cryo_sbi.wpa_simulator.mtf import apply_mtf
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
 from cryo_sbi.wpa_simulator.normalization import gaussian_normalize_image
@@ -137,6 +138,8 @@ def cryo_em_simulator(
     if simulation_param["noise"]=="Gaussian":
        image = add_Gaussian_noise(image, snr)
     elif simulation_param["noise"]=="Poisson":
+       # apply MTF blurring
+       image = apply_mtf(image, simulation_param["mtf_a"], simulation_param["pixel_size"])
        # Poisson + detector noise
        image = add_Poisson_noise(image, snr, simulation_param)
 

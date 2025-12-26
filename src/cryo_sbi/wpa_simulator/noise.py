@@ -124,10 +124,7 @@ def add_Poisson_noise(
     signal_var = torch.var(image[:, mask], dim=[-1]).view(-1, 1, 1) # [B, 1, 1]
 
     # 3. Determine the contrast scale for each image based on its target SNR
-    # Empirical MTF boost factor - decrease target SNR - MTF will lowpass filter the image
-    mtf_boost_factor = simulation_param["mtf_a"]**0.9 / simulation_param["qe"]
-    # Calculate contrast 
-    contrast_scale = torch.sqrt(mtf_boost_factor * snr / mean_electron_dose / signal_var) # [B, 1, 1]
+    contrast_scale = torch.sqrt(snr / mean_electron_dose / simulation_param["qe"] / signal_var) # [B, 1, 1]
 
     # 4. Create the mean counts per pixel map (Weak Phase Object Approximation)
     mean_counts_per_pixel = mean_electron_dose * (1.0 + contrast_scale * image)
@@ -141,62 +138,8 @@ def add_Poisson_noise(
     mean_counts_per_pixel = torch.clamp(mean_counts_per_pixel, min=0)
     image_noise = torch.poisson(mean_counts_per_pixel)
 
-    # 7. Apply detector effects
-    image_noise = apply_detector_effects(image_noise, simulation_param["mtf_a"], simulation_param["readout_std"], pixel_size_val)
+    # 7. Add Readout Noise
+    readout_noise = torch.randn_like(image_noise) * simulation_param["readout_std"]
+    final_image = image_noise + readout_noise
 
-    return image_noise
-
-
-def apply_detector_effects(
-    image_counts: torch.Tensor,
-    mtf_a: float,
-    readout_std_dev: float,
-    pixel_size: float
-) -> torch.Tensor:
-    """
-    Applies MTF blurring and readout noise to a detected electron image.
-
-    Args:
-        image_counts: The image after Poisson sampling (shot noise), shape [..., H, W].
-        mtf_a: MTF parameter (dimensionless, mtf at Nyquist). 
-               Typical values: 0.15-0.25 for modern detectors.
-        readout_std_dev: Standard deviation of Gaussian readout noise (in electrons).
-                         Typical values: 1-2 e⁻ for counting mode.
-        pixel_size: Pixel size at specimen level (in Å).
-    
-    Returns:
-        Final detector image with MTF blur and readout noise applied.
-    
-    Physics:
-        1. MTF blur: exp(-k² / (2σ²)) where σ = mtf_a × k_Nyquist
-        2. Readout noise: Gaussian with std = readout_std_dev
-    """
-
-    device = image_counts.device
-    num_pixels = image_counts.shape[-1]
-
-    # 1. Create frequency grid (in 1/Å) ---
-    freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size, device=device)
-    kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
-    k2 = kx**2 + ky**2
-
-    # 2. Apply MTF (Modulation Transfer Function)
-    # Compute Nyquist frequency in Å⁻¹
-    k_nyquist = 1.0 / (2.0 * pixel_size)
-    # Solve: exp(-k_nyquist² / (2σ²)) = mtf_a
-    # σ² = -k_nyquist² / (2 × ln(target))
-    mtf_a_physical = k_nyquist / math.sqrt(-2 * math.log(mtf_a))
-
-    # 3. Gaussian MTF model: exp(-k²/(2σ²))
-    mtf = torch.exp(-k2 / (2 * mtf_a_physical**2))
-
-    # 4. Apply MTF in Fourier space
-    image_fft = torch.fft.fft2(image_counts.float(), norm='ortho')
-    image_fft_mtf = image_fft * mtf
-    image_blurred = torch.fft.ifft2(image_fft_mtf, norm='ortho').real
-
-    # 5. Add Readout Noise
-    readout_noise = torch.randn_like(image_blurred) * readout_std_dev
-    final_image = image_blurred + readout_noise
-
-    return final_image
+    return final_image 

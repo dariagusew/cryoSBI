@@ -429,7 +429,7 @@ def models_to_tensor_topology(
 
     elif(topo_type=="martini3"):
        # lists of residue and bead names
-       resnames = [at.residue.name for at in at_list[0]]
+       resnames = [at.residue.resname for at in at_list[0]]
        beadnames = [at.name for at in at_list[0]]
        # get topo
        topo = get_martini_topology(resnames, beadnames)

@@ -181,7 +181,7 @@ def get_allatom_topology(atypes):
     torch.Tensor
         Tensor of shape [2, n_atoms] containing A and B scattering factors.
     """
-    # Scattering factors: 1-Gaussian approximation in reciprocal space
+    # Scattering factors: 1-Gaussian fit of experimental scattering factors
     # 
     # Reciprocal space form: f(s) = A * exp(-B*s²)
     #   A: scattering amplitude (electrons)
@@ -217,54 +217,11 @@ def get_allatom_topology(atypes):
 
     return topo
 
-
-def get_oneatom_topology(resnames):
-    """
-    Extract scattering factors (A and B values) for given residues.
-    
-    Parameters
-    ----------
-    resnames : list
-        List of residue names (3-letter codes for amino acids, 1-2 letter codes for nucleic acids).
-    
-    Returns
-    -------
-    torch.Tensor
-        Tensor of shape [2, n_residues] containing A and B scattering factors.
-    """
-    # Atomic positions: Protein centered on CA, RNA/DNA centered on C1'
-    # Scattering factors: 1-Gaussian approximation in reciprocal space
-    # see comments above 
-    scattering = {
-        # Amino acids
-        'ALA': (11.7241, 27.9), 'ARG': (25.8910, 62.8), 'ASN': (18.4298, 42.6), 'ASP': (18.2001, 42.1),
-        'CYS': (16.8838, 38.9), 'GLN': (20.9390, 49.2), 'GLU': (20.7093, 48.7), 'GLY': (9.2149, 26.2),
-        'HIS': (23.6779, 55.8), 'ILE': (19.2517, 42.9), 'LEU': (19.2517, 44.8), 'LYS': (21.4648, 50.3),
-        'MET': (21.9022, 51.4), 'PHE': (26.7793, 63.5), 'PRO': (16.7425, 36.9), 'SER': (13.7075, 32.0),
-        'THR': (16.2167, 36.6), 'TRP': (34.0108, 83.5), 'TYR': (28.7627, 69.0), 'VAL': (16.7425, 37.6),
-        # RNA
-        'A': (53.5441, 97.9), 'C': (48.5921, 87.5), 'G': (55.5275, 101.3), 'U': (48.3624, 87.2),
-        # DNA
-        'DA': (51.5607, 98.3), 'DC': (46.6087, 88.7), 'DG': (53.5441, 102.8), 'DT': (48.8882, 92.7)
-    }
-    # Transform scattering factors from reciprocal space to real space via Fourier transform
-    # see comments above 
-    try:
-        A1 = [math.sqrt(scattering[res][0] * math.pi / scattering[res][1]) for res in resnames]
-        B1 = [-math.pi**2 / scattering[res][1] for res in resnames]
-    except KeyError as e:
-        raise ValueError(f"Unknown residue name: {e}. Please check your topology.")
-
-    # Store as tensor with shape [2, n_residues] for efficient GPU computation
-    # topo[0, :] = A1 coefficients, topo[1, :] = B1 coefficients
-    topo = torch.tensor([A1, B1], dtype=torch.float32)
-
-    return topo
-
-
 def get_calvados_topology(resnames):
     """
     Extract CALVADOS scattering factors (A and B values) for given residues.
+    These parameters can be used with any one bead per residue representation,
+    where the bead is centered on the residue COM.
     
     Parameters
     ----------
@@ -281,11 +238,11 @@ def get_calvados_topology(resnames):
     # Scattering factors: 1-Gaussian approximation in reciprocal space
     # see comments above 
     scattering = {
-        'ALA': (11.7241, 27.3), 'ARG': (25.8910, 73.2), 'ASN': (18.4298, 41.6), 'ASP': (18.2001, 41.2),
-        'CYS': (16.8838, 38.3), 'GLN': (20.9390, 52.5), 'GLU': (20.7093, 52.2), 'GLY': (9.2149, 23.6),
-        'HIS': (23.6779, 52.9), 'ILE': (19.2517, 41.5), 'LEU': (19.2517, 45.0), 'LYS': (21.4648, 57.1),
-        'MET': (21.9022, 54.2), 'PHE': (26.7793, 58.4), 'PRO': (16.7425, 34.3), 'SER': (13.7075, 31.3),
-        'THR': (16.2167, 35.0), 'TRP': (34.0108, 67.6), 'TYR': (28.7627, 61.0), 'VAL': (16.7425, 36.3)
+        'ALA': (11.6, 27.0), 'ARG': (32.8, 89.5), 'ASN': (19.0, 42.5), 'ASP': (18.6, 42.0),
+        'CYS': (17.2, 39.0), 'GLN': (21.6, 54.0), 'GLU': (21.6, 54.0), 'GLY': (8.8, 23.0),
+        'HIS': (25.0, 55.5), 'ILE': (19.0, 41.0), 'LEU': (18.8, 44.0), 'LYS': (21.2, 56.5),
+        'MET': (22.8, 56.0), 'PHE': (29.0, 62.5), 'PRO': (17.2, 35.0), 'SER': (14.0, 32.0),
+        'THR': (16.8, 36.0), 'TRP': (38.6, 75.5), 'TYR': (31.0, 65.0), 'VAL': (17.0, 36.5)
     }
     # Transform scattering factors from reciprocal space to real space via Fourier transform
     # see comments above 
@@ -318,54 +275,56 @@ def get_martini_topology(resnames, beadnames):
         Tensor of shape [2, n_beads] containing A and B scattering factors
         for the Martini 3 coarse-grained model.
     """
-    # Scattering factors for Martini 3 beads from Table S1 of:
+    # Scattering factors for Martini 3 beads re-calculated using the approach in:
+    #
     # Hoff SE, Thomasen FE, Lindorff-Larsen K, Bonomi M
     # PLoS Comput Biol 20(7): e1012180 (2024). https://doi.org/10.1371/journal.pcbi.1012180
- 
+    #
+    # using a set of high-res X-ray structures. 
     # Keys are formatted as 'RESNAME_BEADNAME'.
     #
     # Reciprocal space form: f(s) = A * exp(-B*s²)
     scattering = {
         # Alanine (ALA)
-        'ALA_BB': (9.00, 22.00), 'ALA_SC1': (0.50, 0.50),
-        # Cysteine (CYS)
-        'CYS_BB': (9.50, 23.00), 'CYS_SC1': (5.50, 8.50),
-        # Aspartic Acid (ASP)
-        'ASP_BB': (9.50, 23.00), 'ASP_SC1': (8.50, 17.00),
-        # Glutamic Acid (GLU)
-        'GLU_BB': (9.00, 22.00), 'GLU_SC1': (11.50, 24.00),
-        # Phenylalanine (PHE)
-        'PHE_BB': (9.50, 23.00), 'PHE_SC1': (7.00, 17.50), 'PHE_SC2': (4.50, 11.00), 'PHE_SC3': (4.50, 11.00),
-        # Glycine (GLY)
-        'GLY_BB': (9.50, 23.00),
-        # Histidine (HIS)
-        'HIS_BB': (9.50, 23.00), 'HIS_SC1': (4.50, 11.50), 'HIS_SC2': (4.00, 9.00), 'HIS_SC3': (4.00, 8.50),
-        # Isoleucine (ILE)
-        'ILE_BB': (9.50, 23.00), 'ILE_SC1': (10.00, 25.50),
-        # Lysine (LYS)
-        'LYS_BB': (9.00, 22.00), 'LYS_SC1': (7.00, 18.00), 'LYS_SC2': (4.50, 11.00),
-        # Leucine (LEU)
-        'LEU_BB': (9.00, 22.00), 'LEU_SC1': (9.50, 21.50),
-        # Methionine (MET)
-        'MET_BB': (9.00, 22.00), 'MET_SC1': (11.50, 22.50),
-        # Asparagine (ASN)
-        'ASN_BB': (9.00, 22.00), 'ASN_SC1': (9.00, 18.50),
-        # Proline (PRO)
-        'PRO_BB': (9.50, 23.50), 'PRO_SC1': (7.00, 17.50),
-        # Glutamine (GLN)
-        'GLN_BB': (9.00, 22.00), 'GLN_SC1': (11.50, 24.50),
+        'ALA_BB': (8.9, 23.0), 'ALA_SC1': (1.3, 4.0),
         # Arginine (ARG)
-        'ARG_BB': (9.50, 23.00), 'ARG_SC1': (7.00, 18.00), 'ARG_SC2': (9.00, 18.00),
+        'ARG_BB': (8.9, 23.0), 'ARG_SC1': (6.9, 19.0), 'ARG_SC2': (8.7, 18.5),
+        # Asparagine (ASN)
+        'ASN_BB': (8.9, 23.0), 'ASN_SC1': (8.5, 18.5),
+        # Aspartic Acid (ASP)
+        'ASP_BB': (8.9, 23.0), 'ASP_SC1': (8.3, 18.0),
+        # Cysteine (CYS)
+        'CYS_BB': (8.9, 23.0), 'CYS_SC1': (5.7, 11.5),
+        # Glutamine (GLN)
+        'GLN_BB': (8.9, 23.0), 'GLN_SC1': (11.1, 25.0),
+        # Glutamic Acid (GLU)
+        'GLU_BB': (8.9, 23.0), 'GLU_SC1': (10.9, 24.0),
+        # Glycine (GLY)
+        'GLY_BB': (8.9, 23.0),
+        # Histidine (HIS)
+        'HIS_BB': (8.9, 23.0), 'HIS_SC1': (4.3, 13.0), 'HIS_SC2': (3.9, 10.5), 'HIS_SC3': (3.9, 10.0),
+        # Isoleucine (ILE)
+        'ILE_BB': (8.9, 23.0), 'ILE_SC1': (9.7, 26.0),
+        # Leucine (LEU)
+        'LEU_BB': (8.9, 23.0), 'LEU_SC1': (9.3, 22.5),
+        # Lysine (LYS)
+        'LYS_BB': (8.9, 23.0), 'LYS_SC1': (6.9, 19.0), 'LYS_SC2': (4.1, 12.0),
+        # Methionine (MET)
+        'MET_BB': (8.9, 23.0), 'MET_SC1': (11.3, 23.5),
+        # Phenylalanine (PHE)
+        'PHE_BB': (8.9, 23.0), 'PHE_SC1': (9.1, 21.0), 'PHE_SC2': (6.7, 17.0), 'PHE_SC3': (6.7, 17.0),
+        # Proline (PRO)
+        'PRO_BB': (9.1, 23.5), 'PRO_SC1': (6.9, 18.5),
         # Serine (SER)
-        'SER_BB': (9.50, 23.00), 'SER_SC1': (4.00, 9.00),
+        'SER_BB': (8.9, 23.0), 'SER_SC1': (3.7, 10.0),
         # Threonine (THR)
-        'THR_BB': (9.50, 23.00), 'THR_SC1': (7.00, 17.00),
-        # Valine (VAL)
-        'VAL_BB': (9.50, 23.00), 'VAL_SC1': (7.00, 18.00),
+        'THR_BB': (8.9, 23.0), 'THR_SC1': (6.5, 17.5),
         # Tryptophan (TRP)
-        'TRP_BB': (9.50, 23.00), 'TRP_SC1': (4.50, 11.50), 'TRP_SC2': (4.00, 9.00), 'TRP_SC3': (4.50, 11.00), 'TRP_SC4': (4.50, 11.00), 'TRP_SC5': (4.00, 9.50),
+        'TRP_BB': (8.9, 23.0), 'TRP_SC1': (4.3, 13.0), 'TRP_SC2': (3.9, 10.5), 'TRP_SC3': (4.1, 11.5), 'TRP_SC4': (4.1, 11.5), 'TRP_SC5': (4.1, 11.5),
         # Tyrosine (TYR)
-        'TYR_BB': (9.50, 23.00), 'TYR_SC1': (4.50, 12.00), 'TYR_SC2': (4.50, 11.00), 'TYR_SC3': (4.50, 11.00), 'TYR_SC4': (4.00, 8.50)
+        'TYR_BB': (8.9, 23.0), 'TYR_SC1': (4.3, 13.0), 'TYR_SC2': (4.1, 11.5), 'TYR_SC3': (4.1, 11.5), 'TYR_SC4': (3.7, 10.0),
+        # Valine (VAL)
+        'VAL_BB': (9.1, 23.5), 'VAL_SC1': (6.9, 19.0)
     }
     # Transform scattering factors from reciprocal space to real space via Fourier transform 
     # see comments above 
@@ -408,30 +367,27 @@ def models_to_tensor_topology(
     None
     """
     
-    # Initialize lists to store positions and atoms from all models
+    # Initialize lists to store models data
     pos_list = []
     at_list = []
-    
+ 
     # Loop through all PDB files to extract atomic information
     for pdb in pdb_files:
+
         # Create MDAnalysis Universe object from PDB file
         u = mda.Universe(pdb)
+        # Select all heavy atoms / coarse-grained beads
+        atoms = u.select_atoms("not type H")
 
-        # Atoms selection - to be sure there are only
-        # the supported atoms/beads with scattering factors
-        if(topo_type=="allatom"):
-          at_selection="not type H"
+        # Get positions
+        if topo_type in ["allatom", "calvados3", "martini3"]:
+           # Extract atom positions as numpy array with shape [natoms, 3]
+           pos = atoms.positions
 
-        elif(topo_type=="oneatom"):
-          at_selection="name CA C1'"
+        elif(topo_type=="allatom_com"):
+           # Compute positions of residues COM [nres, 3]
+           pos = np.array([r.atoms.select_atoms("not type H").center_of_mass() for r in atoms.residues])
 
-        elif(topo_type=="calvados3" or topo_type=="martini3"): 
-          at_selection="all"
-
-        # Select
-        atoms = u.select_atoms(at_selection)
-        # Extract atom positions as numpy array with shape [natoms, 3]
-        pos = atoms.positions
         # Transpose and append positions to the list
         pos_list.append(pos.T)
         # Append atoms to the list
@@ -465,21 +421,15 @@ def models_to_tensor_topology(
        # get topo
        topo = get_allatom_topology(atypes)
  
-    elif(topo_type=="oneatom"):
+    elif(topo_type=="allatom_com" or topo_type=="calvados3"):
        # list of residue names
-       resnames = [at.residue.resname for at in at_list[0]] 
-       # get topo
-       topo = get_oneatom_topology(resnames)
-       
-    elif(topo_type=="calvados3"):
-       # list of residue names
-       resnames = [at.residue.resname for at in at_list[0]]
+       resnames = [r.resname for r in at_list[0].residues]
        # get topo
        topo = get_calvados_topology(resnames)
 
     elif(topo_type=="martini3"):
        # lists of residue and bead names
-       resnames = [at.residue.resname for at in at_list[0]]
+       resnames = [at.residue.name for at in at_list[0]]
        beadnames = [at.name for at in at_list[0]]
        # get topo
        topo = get_martini_topology(resnames, beadnames)

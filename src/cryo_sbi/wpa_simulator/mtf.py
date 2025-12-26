@@ -32,13 +32,13 @@ def apply_mtf(
 
     # 2. Apply MTF (Modulation Transfer Function)
     # Compute Nyquist frequency in Å⁻¹
-    k_nyquist = 1.0 / (2.0 * pixel_size.item())
+    k_nyquist = 0.5 / pixel_size.item()
     # Solve: exp(-k_nyquist² / (2σ²)) = mtf_a
-    # σ² = -k_nyquist² / (2 × ln(target))
-    mtf_a_physical = k_nyquist / math.sqrt(-2 * math.log(mtf_a))
+    # σ² = -k_nyquist² / (2 × ln(mtf_a))
+    sigma_k_sq = - 0.5 * k_nyquist**2 / math.log(mtf_a)
 
     # 3. Gaussian MTF model: exp(-k²/(2σ²))
-    mtf = torch.exp(-0.5 * k2 / mtf_a_physical**2)
+    mtf = torch.exp(-0.5 * k2 / sigma_k_sq)
 
     # 4. Apply MTF in Fourier space
     image_fft = torch.fft.fft2(image)

@@ -61,7 +61,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
 
     # check parameters for Poisson noise
-    if simulation_param["noise"]=="Poisson":
+    if (simulation_param["noise"]=="Poisson" or simulation_param["noise"]=="Poisson-MTF"):
        # Dose must be positive
        if (simulation_param["dose"] <= 0):
           raise ValueError("With Poisson noise model DOSE must be specified and positive")
@@ -79,11 +79,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     else:
         print(f"  Sigma: fixed ({sigma_val:.3f} Å)")
     print(f"  Noise model: {simulation_param['noise']}")
-    if simulation_param["noise"]=="Poisson":
+    if (simulation_param["noise"]=="Poisson" or simulation_param["noise"]=="Poisson-MTF"):
        print(f"  Dose: {simulation_param['dose']:.1f} e/Å²")
        print(f"  Quantum efficiency: {simulation_param['qe']:.2f}")
-       print(f"  MTF_a at Nyquist: {simulation_param['mtf_a']:.1f}")
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+       if simulation_param["noise"]=="Poisson-MTF":
+          print(f"  MTF_a at Nyquist: {simulation_param['mtf_a']:.1f}")
     print("="*70)
     
     return simulation_param
@@ -137,9 +138,10 @@ def cryo_em_simulator(
     # 3. Add noise
     if simulation_param["noise"]=="Gaussian":
        image = add_Gaussian_noise(image, snr)
-    elif simulation_param["noise"]=="Poisson":
-       # apply MTF blurring
-       image = apply_mtf(image, simulation_param["mtf_a"], simulation_param["pixel_size"])
+    else:
+       if simulation_param["noise"]=="Poisson-MTF":
+          # apply MTF blurring
+          image = apply_mtf(image, simulation_param["mtf_a"], simulation_param["pixel_size"])
        # Poisson + detector noise
        image = add_Poisson_noise(image, snr, simulation_param)
 

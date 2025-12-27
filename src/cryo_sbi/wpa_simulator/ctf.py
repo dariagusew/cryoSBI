@@ -1,5 +1,6 @@
-import numpy as np
 import torch
+from cryo_sbi.wpa_simulator.image_tools import make_fft_k2_grid
+
 
 def apply_ctf(
     image: torch.Tensor, 
@@ -36,10 +37,7 @@ def apply_ctf(
     )
    
     # Create frequency grid (in 1/Å)
-    freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size.item(), device=device)
-    kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
-    k2 = kx**2 + ky**2  # [num_pixels, num_pixels]
-    k2 = k2.unsqueeze(0)  # [1, num_pixels, num_pixels] - broadcasting will handle batch
+    k2 = make_fft_k2_grid(num_pixels, pixel_size, device) 
    
     # Convert units and reshape for broadcasting
     defocus_angstrom = defocus.view(-1, 1, 1) * 1e4  # [num_batch, 1, 1]

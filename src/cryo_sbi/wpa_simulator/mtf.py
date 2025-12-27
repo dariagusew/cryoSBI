@@ -1,11 +1,12 @@
 import torch
-from typing import Optional
+from typing import Union
+from cryo_sbi.wpa_simulator.image_tools import make_fft_k2_grid
 import math
 
 def apply_mtf(
     image: torch.Tensor,
     mtf_a: float,
-    pixel_size: torch.Tensor  # in Å 
+    pixel_size: Union[float, torch.Tensor]
 ) -> torch.Tensor:
     """
     Applies MTF blurring to the image in Fourier space 
@@ -24,15 +25,15 @@ def apply_mtf(
     device = image.device
     num_pixels = image.shape[-1]
 
-    # 1. Create frequency grid (in 1/Å) ---
-    freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size.item(), device=device)
-    kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
-    k2 = kx**2 + ky**2
-    k2 = k2.unsqueeze(0)  # [1, num_pixels, num_pixels] - broadcasting will handle batch 
+    if isinstance(pixel_size, torch.Tensor):
+        pixel_size = pixel_size.item()
+
+    # 1. Create k2 frequency grid
+    k2 = make_fft_k2_grid(num_pixels, pixel_size, device) 
 
     # 2. Apply MTF (Modulation Transfer Function)
     # Compute Nyquist frequency in Å⁻¹
-    k_nyquist = 0.5 / pixel_size.item()
+    k_nyquist = 0.5 / pixel_size
     # Solve: exp(-k_nyquist² / (2σ²)) = mtf_a
     # σ² = -k_nyquist² / (2 × ln(mtf_a))
     sigma_k_sq = - 0.5 * k_nyquist**2 / math.log(mtf_a)

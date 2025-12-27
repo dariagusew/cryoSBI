@@ -7,7 +7,7 @@ from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.mtf import apply_mtf
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
-from cryo_sbi.wpa_simulator.normalization import gaussian_normalize_image
+from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
 from cryo_sbi.inference.priors import get_image_priors
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
 

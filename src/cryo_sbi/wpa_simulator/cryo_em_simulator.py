@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
-from cryo_sbi.wpa_simulator.mtf import apply_mtf
+from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
@@ -54,14 +54,15 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["dose"] = image_config.get("DOSE", 0.0)
     # detector stuff
     simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.8)
-    simulation_param["mtf_a"] = image_config.get("MTF_A", 0.3)
+    simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.2)
+    simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.5792)
     simulation_param["readout_std"] = image_config.get("READOUT_STD", 1.0)
 
     # noise model
     simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
 
     # check parameters for Poisson noise
-    if (simulation_param["noise"]=="Poisson" or simulation_param["noise"]=="Poisson-MTF"):
+    if simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
        # Dose must be positive
        if (simulation_param["dose"] <= 0):
           raise ValueError("With Poisson noise model DOSE must be specified and positive")
@@ -77,14 +78,16 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         print(f"  Sigma: variable (from topology)")
         print(f"  Topology file: {topology_path}")
     else:
-        print(f"  Sigma: fixed ({sigma_val:.3f} Å)")
+        print(f"  Sigma: fixed ({sigma_val:.1f} Å)")
     print(f"  Noise model: {simulation_param['noise']}")
-    if (simulation_param["noise"]=="Poisson" or simulation_param["noise"]=="Poisson-MTF"):
+    if simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
        print(f"  Dose: {simulation_param['dose']:.1f} e/Å²")
-       print(f"  Quantum efficiency: {simulation_param['qe']:.2f}")
-       print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+       print(f"  QDE(0): {simulation_param['qe']:.3f}")
        if simulation_param["noise"]=="Poisson-MTF":
-          print(f"  MTF_a at Nyquist: {simulation_param['mtf_a']:.1f}")
+          print(f"  QDE(Nyq): {simulation_param['qe_n']:.3f}")
+          print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
+    print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+ 
     print("="*70)
     
     return simulation_param
@@ -138,16 +141,27 @@ def cryo_em_simulator(
     # 3. Add noise
     if simulation_param["noise"]=="Gaussian":
        image = add_Gaussian_noise(image, snr)
+
     else:
+       # Prepare useful tensors
+       mtf = None # MTF grid
+       nps = None # NPS grid
+       scaling_factor = torch.ones_like(snr) # scaling factor target SNR
+
+       # Initialize tensors based on noise model
        if simulation_param["noise"]=="Poisson-MTF":
-          # apply MTF blurring
-          image = apply_mtf(image, simulation_param["mtf_a"], simulation_param["pixel_size"])
-       # Poisson + detector noise
-       image = add_Poisson_noise(image, snr, simulation_param)
+          mtf, nps, scaling_factor = get_mtf_nps_grids(image, simulation_param)
+
+       # Define target snr to account for MTF/NPS:
+       target_snr = scaling_factor * snr
+
+       # Add Poisson + (optional MTF/DQE) + detector noise
+       image = add_Poisson_noise(image, target_snr, simulation_param, mtf, nps)
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)
     image_clean = gaussian_normalize_image(image_clean)
+
     return image, image_clean
 
 

@@ -3,6 +3,27 @@ from typing import Union
 import torchvision.transforms as transforms
 
 
+def circular_mask(n_pixels: int, radius: float, device: str = "cpu") -> torch.Tensor:
+    """
+    Creates a circular mask of radius centered in the image.
+    
+    Args:
+        n_pixels: Number of pixels along image side
+        radius: Radius of the mask in pixels
+        device: Device to create mask on
+        
+    Returns:
+        Boolean mask of shape (n_pixels, n_pixels)
+    """
+    grid = torch.linspace(
+        -0.5 * (n_pixels - 1), 0.5 * (n_pixels - 1), n_pixels, device=device
+    )
+    r_2d = grid[None, :] ** 2 + grid[:, None] ** 2
+    mask = r_2d < radius**2
+    
+    return mask
+
+
 def make_fft_k2_grid(
     num_pixels: Union[float, torch.Tensor], 
     pixel_size: Union[float, torch.Tensor],

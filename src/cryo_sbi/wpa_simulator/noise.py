@@ -1,26 +1,7 @@
 import torch
 from typing import Optional
+from cryo_sbi.wpa_simulator.image_tools import circular_mask 
 import math
-
-def circular_mask(n_pixels: int, radius: float, device: str = "cpu") -> torch.Tensor:
-    """
-    Creates a circular mask of radius centered in the image.
-    
-    Args:
-        n_pixels: Number of pixels along image side
-        radius: Radius of the mask in pixels
-        device: Device to create mask on
-        
-    Returns:
-        Boolean mask of shape (n_pixels, n_pixels)
-    """
-    grid = torch.linspace(
-        -0.5 * (n_pixels - 1), 0.5 * (n_pixels - 1), n_pixels, device=device
-    )
-    r_2d = grid[None, :] ** 2 + grid[:, None] ** 2
-    mask = r_2d < radius**2
-    
-    return mask
 
 
 def add_Gaussian_noise(
@@ -77,69 +58,92 @@ def add_Gaussian_noise(
 
 
 def add_Poisson_noise(
-    image: torch.Tensor, 
-    snr: torch.Tensor,
+    image: torch.Tensor,
+    target_snr: torch.Tensor,
     simulation_param: dict,
+    mtf: Optional[torch.Tensor] = None,
+    nps: Optional[torch.Tensor] = None,
     mask_radius: Optional[float] = None,
     seed: Optional[int] = None
 ) -> torch.Tensor:
     """
-    Adds Poisson noise to images based on power SNR.
-    
-    SNR definition: SNR = signal_variance / noise_variance
-    
-    Args:
-        image: Image tensor of shape (batch, height, width)
-        snr: Signal-to-noise ratio (power SNR)
-             Typical values: 0.001 - 0.1 for single particles
-        simulation_param: Dictionary of simulation parameters
-        mask_radius: Radius for signal calculation. If None, uses image_size//2
-        seed: Random seed for reproducibility
-        
-    Returns:
-        Noisy image with same shape as input
-    """
+    Adds Poisson and readout noise to images.
 
-    # Convert pixel_size to float if tensor
+    Args:
+        image: Image tensor. Can be a clean signal or a composite of signal and
+               structural noise. Shape: (batch, height, width).
+        target_snr: Signal-to-noise target ratio (power SNR).
+        simulation_param: Dictionary of simulation parameters.
+        mtf (optional): MTF grid.
+        nps (optional): NPS excess noise grid.
+        mask_radius (optional): Radius for signal calculation.
+        seed (optional): Random seed for reproducibility.
+
+    Returns:
+        Noisy image with the same shape as the input.
+    """
+    # 1. Setup and Parameter Extraction
     if isinstance(simulation_param["pixel_size"], torch.Tensor):
-        pixel_size_val = simulation_param["pixel_size"].item() 
+        pixel_size = simulation_param["pixel_size"].item() 
     else:
-        pixel_size_val = simulation_param["pixel_size"]
+        pixel_size = simulation_param["pixel_size"]
 
     if seed is not None:
         torch.manual_seed(seed)
     
     device = image.device
     n_pixels = image.shape[-1]
-
-    # 0. Create mask for signal region
+    
+    # 2. Calculate Signal Variance
     if mask_radius is None:
         mask_radius = 0.5 * n_pixels
     mask = circular_mask(n_pixels, mask_radius, device=device)
+    
+    # Calculate variance from the input image within the mask.
+    signal_var = torch.var(image[:, mask], dim=[-1]).view(-1, 1, 1)
 
-    # 1. Convert experimental dose (e/Å²) to simulation dose (e/pixel)
-    mean_electron_dose = simulation_param["dose"] * pixel_size_val**2
+    # 3. Core Noise Simulation
+    # Convert dose from e/Å² to e/pixel
+    mean_electron_dose = simulation_param["dose"] * pixel_size**2
 
-    # 2. Calculate signal variance within mask
-    signal_var = torch.var(image[:, mask], dim=[-1]).view(-1, 1, 1) # [B, 1, 1]
+    # 4. Define quantum efficieny
+    # With "Poisson" noise: use qe = DQE(0) = simulation_param["qe"]
+    # With "Poisson-MTF": set qe=1.0 -> it will be taken care by MTF/DQE
+    if mtf is None and nps is None:
+       qe = simulation_param["qe"]
+    else:
+       qe = 1.0
 
-    # 3. Determine the contrast scale for each image based on its target SNR
-    contrast_scale = torch.sqrt(snr / mean_electron_dose / simulation_param["qe"] / signal_var) # [B, 1, 1]
+    # 5. Determine the contrast scale for each image based on its target SNR 
+    contrast_scale = torch.sqrt(target_snr / mean_electron_dose / qe / signal_var)
 
-    # 4. Create the mean counts per pixel map (Weak Phase Object Approximation)
-    mean_counts_per_pixel = mean_electron_dose * (1.0 + contrast_scale * image)
+    # 6. Determine the mean electron count per pixel
+    mean_counts_per_pixel = qe * mean_electron_dose * (1.0 + contrast_scale * image)
 
-    # 5. Apply Imperfect QE
-    # We thin the incoming electron beam before the shot noise occurs
-    mean_counts_per_pixel = simulation_param["qe"] * mean_counts_per_pixel
-
-    # 6. Generate the noisy image by sampling from a Poisson distribution.
-    # first check all positive
+    # 7. Generate Poisson shot noise. Clamp mean counts to be non-negative.
     mean_counts_per_pixel = torch.clamp(mean_counts_per_pixel, min=0)
     image_noise = torch.poisson(mean_counts_per_pixel)
 
-    # 7. Add Readout Noise
+    # 8. Adding MTF/NPS corrections
+    if mtf is not None and nps is not None:
+       # 8.1 Apply Modulation Transfer Function 
+       image_fft = torch.fft.fft2(image_noise)
+       image_fft_mtf = image_fft * mtf
+       image_noise = torch.fft.ifft2(image_fft_mtf).real
+
+       # 8.2 Apply Detective Quantum Efficiency correction by adding excess noise
+       # Generate white noise in Fourier space
+       white_noise_fft = torch.fft.fft2(torch.randn_like(image_noise))
+       
+       # Scale by sqrt(NPS) to color the noise
+       colored_noise_fft = white_noise_fft * torch.sqrt(nps)
+       
+       # Inverse FFT to get the noise in real space and add it
+       colored_noise = torch.fft.ifft2(colored_noise_fft).real
+       image_noise = image_noise + colored_noise 
+
+    # 9. Add Gaussian Readout Noise
     readout_noise = torch.randn_like(image_noise) * simulation_param["readout_std"]
     final_image = image_noise + readout_noise
 
-    return final_image 
+    return final_image

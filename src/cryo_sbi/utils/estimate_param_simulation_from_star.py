@@ -703,30 +703,32 @@ def extract_defocus_statistics(star_file: str, output_plot_prefix: Optional[str]
     else:
         print("\n⚠️ 'rlnDefocusAngle' column not found. Skipping angle analysis.")
 
-    # --- RECOMMENDATIONS ---
+
+# --- RECOMMENDATIONS ---
     print("\n" + "="*60)
     print("RECOMMENDATIONS")
     print("="*60)
     
-    reco_defocus_min = max(0.5, avg_stats['p25'] - 0.5)
-    reco_defocus_max = min(5.0, avg_stats['p75'] + 0.5)
+    # Clamp recommendation not only to absolute limits but also to the data's actual min/max
+    reco_defocus_min = max(0.5, avg_stats['min'], avg_stats['p25'] - 0.5)
+    reco_defocus_max = min(5.0, avg_stats['max'], avg_stats['p75'] + 0.5)
     avg_stats['recommended_min'] = reco_defocus_min
     avg_stats['recommended_max'] = reco_defocus_max
     print(f"✓ Recommended defocus range:     [{reco_defocus_min:.2f}, {reco_defocus_max:.2f}] µm")
     
-    reco_astig_min = max(0.0, diff_stats['p25'] - 0.05)
-    reco_astig_max = min(1.0, diff_stats['p75'] + 0.05)
+    reco_astig_min = max(0.0, diff_stats['min'], diff_stats['p25'] - 0.05)
+    reco_astig_max = min(1.0, diff_stats['max'], diff_stats['p75'] + 0.05)
     diff_stats['recommended_min'] = reco_astig_min
     diff_stats['recommended_max'] = reco_astig_max
     print(f"✓ Recommended astigmatism range: [{reco_astig_min:.2f}, {reco_astig_max:.2f}] µm")
 
     if angle_stats:
-        reco_angle_min = max(0.0, angle_stats['p25'] - 10.0)
-        reco_angle_max = min(180.0, angle_stats['p75'] + 10.0)
+        reco_angle_min = max(0.0, angle_stats['min'], angle_stats['p25'] - 10.0)
+        reco_angle_max = min(180.0, angle_stats['max'], angle_stats['p75'] + 10.0)
         angle_stats['recommended_min'] = reco_angle_min
         angle_stats['recommended_max'] = reco_angle_max
         print(f"✓ Recommended angle range:       [{reco_angle_min:.1f}, {reco_angle_max:.1f}] degrees")
-    
+
     return {'avg': avg_stats, 'diff': diff_stats, 'angle': angle_stats}
 
 

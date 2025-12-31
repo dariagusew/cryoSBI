@@ -1,5 +1,6 @@
 import torch
 import zuko
+import starfile
 import numpy as np
 from torch.distributions.distribution import Distribution
 from torch.distributions import constraints
@@ -44,6 +45,78 @@ def compute_covariance_matrix(coords: torch.Tensor) -> tuple[torch.Tensor, torch
     cov = (coords_centered @ coords_centered.T) / coords_centered.shape[1]
     eigenvalues, eigenvectors = torch.linalg.eigh(cov)
     return eigenvalues, eigenvectors
+
+
+class DefocusPrior:
+    """
+    Samples defocus triplets (mean defocus, astigmatism, angle)
+    from an empirical distribution defined by a RELION STAR file.
+    """
+    def __init__(self, star_file_path: str, device: str = 'cpu'):
+        """
+        Args:
+            star_file_path: Path to the RELION STAR file (e.g., from CTFFIND).
+            device: The torch device to store the parameters on.
+        """
+        self.device = device
+        self.param_triplets = self._load_and_process_star_file(star_file_path)
+
+    def _load_and_process_star_file(self, path: str) -> torch.Tensor:
+        """Reads, parses, and converts STAR file data."""
+        print(f"Loading defocus parameters from: {path}")
+        try:
+            data = starfile.read(path)
+            df = data['particles'] if 'particles' in data else data 
+        except Exception as e:
+            raise IOError(f"Failed to read or parse STAR file '{path}'. Error: {e}")
+
+        # Check for required columns
+        required_cols = ['rlnDefocusU', 'rlnDefocusV', 'rlnDefocusAngle']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"STAR file must contain the columns: {required_cols}")
+
+        # Convert from Ångströms (RELION standard) to micrometers
+        defocus_u_um = df['rlnDefocusU'].values / 10000.0
+        defocus_v_um = df['rlnDefocusV'].values / 10000.0
+        angle_deg = df['rlnDefocusAngle'].values
+
+        # Convert to the parameterization used by apply_ctf
+        # defocus = 0.5 * (DefocusU + DefocusV)
+        # defocus_astig = 0.5 * |DefocusU - DefocusV|
+        # defocus_astig_angle = angle
+        mean_defocus = 0.5 * (defocus_u_um + defocus_v_um)
+        astig_magnitude = 0.5 * abs(defocus_u_um - defocus_v_um)
+
+        # Stack into a single tensor for efficient sampling
+        triplets = torch.tensor(
+            np.stack([mean_defocus, astig_magnitude, angle_deg], axis=1),
+            dtype=torch.float32,
+            device=self.device
+        )
+        print(f"Successfully loaded {len(triplets)} defocus triplets.")
+        return triplets
+
+    def sample(self, shape: tuple) -> torch.Tensor:
+        """
+        Samples a batch of defocus triplets.
+
+        Args:
+            shape: tuple, batch shape, e.g., (batch_size,).
+
+        Returns:
+            A single tensor of shape [batch_size, 3] where the columns are:
+            - 0: defocus (mean)
+            - 1: defocus_astig (magnitude)
+            - 2: defocus_astig_angle
+        """
+        batch_size = shape[0]
+        num_total_triplets = self.param_triplets.shape[0]
+
+        # Randomly select indices with replacement
+        indices = torch.randint(0, num_total_triplets, (batch_size,), device=self.device)
+
+        # Gather the sampled triplets and return directly
+        return self.param_triplets[indices]  # Shape: [batch_size, 3]
 
 
 class PreferredOrientationPrior:
@@ -187,8 +260,6 @@ class ImagePrior:
         quaternion_prior,
         shift_prior,
         defocus_prior,
-        defocus_astig_prior,
-        defocus_astig_angle_prior,
         b_factor_prior,
         amp_prior,
         snr_prior,
@@ -199,8 +270,6 @@ class ImagePrior:
             quaternion_prior,
             shift_prior,
             defocus_prior,
-            defocus_astig_prior,
-            defocus_astig_angle_prior,
             b_factor_prior,
             amp_prior,
             snr_prior,
@@ -240,64 +309,55 @@ def get_image_priors(
     Returns:
         ImagePrior: Combined prior object
     """
+
     # Shift prior
     shift = image_config["SHIFT"]
     lower=torch.tensor([-shift, -shift], dtype=torch.float32, device=device) 
     upper=torch.tensor([+shift, +shift], dtype=torch.float32, device=device)
     # get prior type
-    shift_gauss = image_config.get("SHIFT_GAUSS", False)
-    # Gaussian
-    if isinstance(shift_gauss, (float, int)):
-       loc = torch.tensor([0, 0], dtype=torch.float32, device=device) 
+    shift_gauss = image_config.get("SHIFT_GAUSS", None)
+
+    # Truncated Gaussian prior
+    if isinstance(shift_gauss, (float, int)) and shift_gauss>0:
+       loc   = torch.tensor([0, 0], dtype=torch.float32, device=device) 
        scale = torch.tensor([shift_gauss, shift_gauss], dtype=torch.float32, device=device)
        shift_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
-    # Uniform
+
+    # Uniform prior
     else:
        shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
 
+
     # Defocus prior
-    # 1. Average defocus: this corresponds to 0.5 * (DefocusU + DefocusV)
-    if isinstance(image_config["DEFOCUS"], list) and len(image_config["DEFOCUS"]) == 2:
-        defocus = image_config["DEFOCUS"]
+    defocus = image_config["DEFOCUS"]
+    if isinstance(defocus, str):
+        # Astigmatism prior
+        defocus_prior = DefocusPrior(defocus, device=device)
+
+    # Uniform / Truncated Gaussian prior 
+    elif isinstance(defocus, list) and len(defocus) == 2:
         lower = torch.tensor([[ defocus[0] ]], dtype=torch.float32, device=device)
         upper = torch.tensor([[ defocus[1] ]], dtype=torch.float32, device=device) 
         if lower <= 0.0:
             raise ValueError("DEFOCUS lower bound must be positive")
         if lower > upper:
             raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+
         # check prior type
-        defocus_gauss = image_config.get("DEFOCUS_GAUSS", False)
+        defocus_gauss = image_config.get("DEFOCUS_GAUSS", None)
+
         if isinstance(defocus_gauss, list) and len(defocus_gauss) == 2: 
-           # Truncated Gaussian 
-           loc = image_config["DEFOCUS_GAUSS"][0] 
-           scale = image_config["DEFOCUS_GAUSS"][1]
+           # Truncated Gaussian prior 
+           loc   = defocus_gauss[0]
+           scale = defocus_gauss[1] 
            defocus_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
+           # Uniform prior
         else:
            defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
-    # 2. Delta defocus: this corresponds to 0.5 * (DefocusU - DefocusV)
-    defocus_astig = image_config.get("DEFOCUS_ASTIG", [0, 0])
-    lower = torch.tensor([[ defocus_astig[0] ]], dtype=torch.float32, device=device)
-    upper = torch.tensor([[ defocus_astig[1] ]], dtype=torch.float32, device=device)
-    if lower < 0.0:
-        raise ValueError("DEFOCUS_ASTIG lower bound must be positive")
-    if lower > upper:
-        raise ValueError(f"DEFOCUS_ASTIG lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-    defocus_astig_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
-
-    # 3. Astigmatism angle in degrees
-    defocus_astig_angle = image_config.get("DEFOCUS_ASTIG_ANGLE", [0, 0])
-    lower = torch.tensor([[ defocus_astig_angle[0] ]], dtype=torch.float32, device=device)
-    upper = torch.tensor([[ defocus_astig_angle[1] ]], dtype=torch.float32, device=device)
-    if lower < 0.0:
-        raise ValueError("DEFOCUS_ASTIG_ANGLE lower bound must be positive")
-    if lower > upper:
-        raise ValueError(f"DEFOCUS_ASTIG_ANGLE lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-    defocus_astig_angle_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
-
     # B-factor prior
-    if isinstance(image_config["B_FACTOR"], list) and len(image_config["B_FACTOR"]) == 2:
-        b_factor = image_config["B_FACTOR"]
+    b_factor = image_config["B_FACTOR"]
+    if isinstance(b_factor, list) and len(b_factor) == 2:
         lower = torch.tensor([[ b_factor[0] ]], dtype=torch.float32, device=device)
         upper = torch.tensor([[ b_factor[1] ]], dtype=torch.float32, device=device)
         if lower < 0.0:
@@ -311,8 +371,8 @@ def get_image_priors(
            b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
     # SNR prior
-    if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:
-        snr = image_config["SNR"]
+    snr = image_config["SNR"]
+    if isinstance(snr, list) and len(snr) == 2:
         lower = torch.tensor([[ snr[0] ]], dtype=torch.float32, device=device)
         upper = torch.tensor([[ snr[1] ]], dtype=torch.float32, device=device)
         if lower > upper:
@@ -358,8 +418,6 @@ def get_image_priors(
         quaternion_prior,
         shift_prior,
         defocus_prior,
-        defocus_astig_prior,
-        defocus_astig_angle_prior,
         b_factor_prior,
         amp_prior,
         snr_prior,

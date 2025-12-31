@@ -5,8 +5,6 @@ from cryo_sbi.wpa_simulator.image_tools import make_fft_k2_grid
 def apply_ctf(
     image: torch.Tensor, 
     defocus: torch.Tensor,  # Defocus in µm (positive = underfocus)
-    defocus_astig: torch.Tensor, # Astigmatism magnitude in µm
-    defocus_astig_angle: torch.Tensor, # Astigmatism angle in degrees
     b_factor: torch.Tensor,  # in Å²
     amp: torch.Tensor,  # amplitude contrast (0.07-0.1 typical)
     pixel_size: torch.Tensor,  # in Å
@@ -18,9 +16,9 @@ def apply_ctf(
     
     Args:
         image: Input image (num_batch, num_pixels, num_pixels)
-        defocus: Defocus in micrometers (positive = underfocus) - 0.5 * (DefocusU + DefocusV)
-        defocus_astig: Magnitude of astigmatism in micrometers - 0.5 * (DefocusU - DefocusV)
-        defocus_astig_angle: Angle of astigmatism in degrees
+        defocus: Defocus in micrometers. Can be a tensor of shape [batch_size, 1] 
+                 (for no astigmatism) or [batch_size, 3] to include astigmatism
+                 in the format [defocus, defocus_astig, defocus_astig_angle].
         b_factor: B-factor
         amp: Amplitude contrast ratio (typically 0.07-0.1)
         pixel_size: Pixel size in Ångströms
@@ -42,25 +40,32 @@ def apply_ctf(
    
     # Create frequency grid (in 1/Å)
     k2 = make_fft_k2_grid(num_pixels, pixel_size, device) 
-   
+
+    # Handle different defocus input formats
+    if defocus.ndim == 2 and defocus.shape[1] == 3:
+        # ASTIGMATIC CASE: Defocus map is azimuthally dependent
+        defocus_angstrom = defocus[:, 0].view(-1, 1, 1) * 1e4
+        defocus_astig_angstrom = defocus[:, 1].view(-1, 1, 1) * 1e4
+        angle_astig_rad = torch.deg2rad(defocus[:, 2]).view(-1, 1, 1)
+        
+        # We need the angle (phi) for each point in the Fourier grid
+        freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size.item(), device=device)
+        kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
+        phi = torch.atan2(ky, kx).unsqueeze(0)
+    
+        # Defocus(phi) = Mean_Defocus + Astig_Defocus * cos(2 * (phi - angle_astig))
+        defocus_map_angstrom = (
+            defocus_angstrom +
+            defocus_astig_angstrom * torch.cos(2 * (phi - angle_astig_rad))
+        )
+    else:
+        # NON-ASTIGMATIC CASE: Defocus is radially symmetric. No need for phi.
+        defocus_map_angstrom = defocus.view(-1, 1, 1) * 1e4
+
     # Convert units and reshape for broadcasting
-    defocus_angstrom = defocus.view(-1, 1, 1) * 1e4  # [num_batch, 1, 1]
-    defocus_astig_angstrom = defocus_astig.view(-1, 1, 1) * 1e4 # [num_batch, 1, 1]
-    angle_astig_rad = torch.deg2rad(defocus_astig_angle).view(-1, 1, 1) # [num_batch, 1, 1]
     cs_angstrom = cs * 1e7  # scalar
     amp_reshaped = amp.view(-1, 1, 1)  # [num_batch, 1, 1]
     b_factor_reshaped = b_factor.view(-1, 1, 1)  # [num_batch, 1, 1]
-
-    # We need the angle (phi) for each point in the Fourier grid
-    freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size.item(), device=device)
-    kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
-    phi = torch.atan2(ky, kx).unsqueeze(0) # [1, num_pixels, num_pixels]
- 
-    # Defocus(phi) = Mean_Defocus + Astig_Defocus * cos(2 * (phi - angle_astig))
-    defocus_map_angstrom = (
-        defocus_angstrom +
-        defocus_astig_angstrom * torch.cos(2 * (phi - angle_astig_rad))
-    )
 
     # Phase aberration function [num_batch, num_pixels, num_pixels]
     gamma = (

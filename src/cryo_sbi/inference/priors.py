@@ -187,6 +187,8 @@ class ImagePrior:
         quaternion_prior,
         shift_prior,
         defocus_prior,
+        defocus_astig_prior,
+        defocus_astig_angle_prior,
         b_factor_prior,
         amp_prior,
         snr_prior,
@@ -197,6 +199,8 @@ class ImagePrior:
             quaternion_prior,
             shift_prior,
             defocus_prior,
+            defocus_astig_prior,
+            defocus_astig_angle_prior,
             b_factor_prior,
             amp_prior,
             snr_prior,
@@ -237,28 +241,26 @@ def get_image_priors(
         ImagePrior: Combined prior object
     """
     # Shift prior
-    shift_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor(
-            [-image_config["SHIFT"], -image_config["SHIFT"]],
-            dtype=torch.float32,
-            device=device,
-        ),
-        upper=torch.tensor(
-            [image_config["SHIFT"], image_config["SHIFT"]],
-            dtype=torch.float32,
-            device=device,
-        ),
-        ndims=1,
-    )
+    shift = image_config["SHIFT"]
+    lower=torch.tensor([-shift, -shift], dtype=torch.float32, device=device) 
+    upper=torch.tensor([+shift, +shift], dtype=torch.float32, device=device)
+    # get prior type
+    shift_gauss = image_config.get("SHIFT_GAUSS", False)
+    # Gaussian
+    if isinstance(shift_gauss, (float, int)):
+       loc = torch.tensor([0, 0], dtype=torch.float32, device=device) 
+       scale = torch.tensor([shift_gauss, shift_gauss], dtype=torch.float32, device=device)
+       shift_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
+    # Uniform
+    else:
+       shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
 
     # Defocus prior
+    # 1. Average defocus: this corresponds to 0.5 * (DefocusU + DefocusV)
     if isinstance(image_config["DEFOCUS"], list) and len(image_config["DEFOCUS"]) == 2:
-        lower = torch.tensor(
-            [[image_config["DEFOCUS"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["DEFOCUS"][1]]], dtype=torch.float32, device=device
-        )
+        defocus = image_config["DEFOCUS"]
+        lower = torch.tensor([[ defocus[0] ]], dtype=torch.float32, device=device)
+        upper = torch.tensor([[ defocus[1] ]], dtype=torch.float32, device=device) 
         if lower <= 0.0:
             raise ValueError("DEFOCUS lower bound must be positive")
         if lower > upper:
@@ -273,14 +275,31 @@ def get_image_priors(
         else:
            defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
+    # 2. Delta defocus: this corresponds to 0.5 * (DefocusU - DefocusV)
+    defocus_astig = image_config.get("DEFOCUS_ASTIG", [0, 0])
+    lower = torch.tensor([[ defocus_astig[0] ]], dtype=torch.float32, device=device)
+    upper = torch.tensor([[ defocus_astig[1] ]], dtype=torch.float32, device=device)
+    if lower < 0.0:
+        raise ValueError("DEFOCUS_ASTIG lower bound must be positive")
+    if lower > upper:
+        raise ValueError(f"DEFOCUS_ASTIG lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+    defocus_astig_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
+    # 3. Astigmatism angle in degrees
+    defocus_astig_angle = image_config.get("DEFOCUS_ASTIG_ANGLE", [0, 0])
+    lower = torch.tensor([[ defocus_astig_angle[0] ]], dtype=torch.float32, device=device)
+    upper = torch.tensor([[ defocus_astig_angle[1] ]], dtype=torch.float32, device=device)
+    if lower < 0.0:
+        raise ValueError("DEFOCUS_ASTIG_ANGLE lower bound must be positive")
+    if lower > upper:
+        raise ValueError(f"DEFOCUS_ASTIG_ANGLE lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
+    defocus_astig_angle_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+
     # B-factor prior
     if isinstance(image_config["B_FACTOR"], list) and len(image_config["B_FACTOR"]) == 2:
-        lower = torch.tensor(
-            [[image_config["B_FACTOR"][0]]], dtype=torch.float32, device=device
-        )
-        upper = torch.tensor(
-            [[image_config["B_FACTOR"][1]]], dtype=torch.float32, device=device
-        )
+        b_factor = image_config["B_FACTOR"]
+        lower = torch.tensor([[ b_factor[0] ]], dtype=torch.float32, device=device)
+        upper = torch.tensor([[ b_factor[1] ]], dtype=torch.float32, device=device)
         if lower < 0.0:
             raise ValueError("B_FACTOR lower bound must be positive")
         if lower > upper:
@@ -293,13 +312,9 @@ def get_image_priors(
 
     # SNR prior
     if isinstance(image_config["SNR"], list) and len(image_config["SNR"]) == 2:
-        # removed log10() from boundaries
-        lower = torch.tensor(
-            [[image_config["SNR"][0]]], dtype=torch.float32, device=device
-        ) #.log10()
-        upper = torch.tensor(
-            [[image_config["SNR"][1]]], dtype=torch.float32, device=device
-        ) #.log10()
+        snr = image_config["SNR"]
+        lower = torch.tensor([[ snr[0] ]], dtype=torch.float32, device=device)
+        upper = torch.tensor([[ snr[1] ]], dtype=torch.float32, device=device)
         if lower > upper:
             raise ValueError(f"SNR lower bound must be ≤ upper bound")
         # check if you want uniform SNR, otherwise back to old log-uniform/Jeffreys
@@ -310,8 +325,8 @@ def get_image_priors(
 
     # Amplitude prior
     amp_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
-        upper=torch.tensor([[image_config["AMP"]]], dtype=torch.float32, device=device),
+        lower=torch.tensor([[ image_config["AMP"] ]], dtype=torch.float32, device=device),
+        upper=torch.tensor([[ image_config["AMP"] ]], dtype=torch.float32, device=device),
         ndims=1,
     )
 
@@ -343,6 +358,8 @@ def get_image_priors(
         quaternion_prior,
         shift_prior,
         defocus_prior,
+        defocus_astig_prior,
+        defocus_astig_angle_prior,
         b_factor_prior,
         amp_prior,
         snr_prior,

@@ -99,6 +99,8 @@ def cryo_em_simulator(
     quaternion,
     shift,
     defocus,
+    defocus_astig,
+    defocus_astig_angle,
     b_factor,
     amp,
     snr,
@@ -136,7 +138,7 @@ def cryo_em_simulator(
     image_clean = image.detach().clone()
 
     # 2. Add CTF
-    image = apply_ctf(image, defocus, b_factor, amp, simulation_param["pixel_size"], simulation_param["voltage"], simulation_param["cs"])
+    image = apply_ctf(image, defocus, defocus_astig, defocus_astig_angle, b_factor, amp, simulation_param["pixel_size"], simulation_param["voltage"], simulation_param["cs"])
 
     # 3. Add noise
     if simulation_param["noise"]=="Gaussian":

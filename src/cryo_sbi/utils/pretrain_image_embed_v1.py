@@ -670,7 +670,7 @@ def pretrain_image_embed(
                         synthetic_iter = iter(synthetic_loader)
                         parameters = next(synthetic_iter)
 
-                    (indices, quaternions, shift, defocus, defocus_astig, defocus_astig_angle, b_factor, amp, snr) = parameters
+                    (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
 
                     # get synthetic images
                     syn_images, _ = cryo_em_simulator(
@@ -679,8 +679,6 @@ def pretrain_image_embed(
                         quaternions.to(device, non_blocking=True),
                         shift.to(device, non_blocking=True),
                         defocus.to(device, non_blocking=True),
-                        defocus_astig.to(device, non_blocking=True),
-                        defocus_astig_angle.to(device, non_blocking=True),
                         b_factor.to(device, non_blocking=True),
                         amp.to(device, non_blocking=True),
                         snr.to(device, non_blocking=True),

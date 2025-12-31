@@ -98,7 +98,7 @@ def generate_synthetic_images(image_config, models, n_images, device):
     
     with torch.no_grad():
         for parameters in tqdm(prior_loader, desc="Simulating"):
-            (indices, quaternions, shift, defocus, defocus_astig, defocus_astig_angle, b_factor, amp, snr) = parameters
+            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
             
             # Simulate batch
             images, _ = cryo_em_simulator(
@@ -107,8 +107,6 @@ def generate_synthetic_images(image_config, models, n_images, device):
                 quaternions.to(device),
                 shift.to(device),
                 defocus.to(device),
-                defocus_astig.to(device),
-                defocus_astig_angle.to(device),
                 b_factor.to(device),
                 amp.to(device),
                 snr.to(device),

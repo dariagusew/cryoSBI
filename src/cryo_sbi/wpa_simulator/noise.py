@@ -114,20 +114,20 @@ def add_Poisson_noise(
     else:
        qe = 1.0
 
-    # 5. Determine the contrast scale for each image based on its target SNR 
-    contrast_scale = torch.sqrt(target_snr / mean_electron_dose / qe / signal_var)
+    # 5. Determine the contrast scale for each image based on its target SNR
+    # Deal with zero variance corner cases
+    eps = torch.finfo(signal_var.dtype).eps
+    contrast_scale = torch.where(
+          signal_var > eps,
+          torch.sqrt(target_snr / (mean_electron_dose * qe * signal_var)),
+          torch.zeros_like(signal_var)
+    )
 
     # 6. Determine the mean electron count per pixel
     mean_counts_per_pixel = qe * mean_electron_dose * (1.0 + contrast_scale * image)
 
     # 7. Generate Poisson shot noise
-    # First, sanitize and clamp mean_counts_per_pixel to be non-negative
-    mean_counts_per_pixel = torch.nan_to_num(
-        mean_counts_per_pixel,
-        nan=0.0,
-        posinf=torch.finfo(mean_counts_per_pixel.dtype).max,
-        neginf=0.0
-    )
+    # First, clamp mean_counts_per_pixel to be non-negative
     mean_counts_per_pixel = torch.clamp(mean_counts_per_pixel, min=0)
     image_noise = torch.poisson(mean_counts_per_pixel)
 

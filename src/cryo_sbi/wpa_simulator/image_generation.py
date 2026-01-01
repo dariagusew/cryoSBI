@@ -67,6 +67,7 @@ def project_density(
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
         num_pixels (torch.Tensor): Number of pixels along one image dimension
         pixel_size (torch.Tensor): Pixel size in Angstrom
+        add_garbage (bool): Add a garbage-collector model
         atom_batch_size (int): The number of atoms to process in each chunk to
                                save memory. Defaults to 2048.
 
@@ -135,7 +136,7 @@ def project_density(
         # Matrix multiplication to get 2D projection for this batch
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
         
-        # Accumulate the result
+        # Accumulate the result, with optional mask for the garbage collector
         final_image += mask * image_batch
 
     return final_image

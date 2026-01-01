@@ -78,7 +78,7 @@ def project_density(
 
     # Create grid using linspace
     grid_min = -pixel_size * num_pixels * 0.5
-    grid_max = pixel_size * num_pixels * 0.5
+    grid_max =  pixel_size * num_pixels * 0.5
     grid = torch.linspace(grid_min, grid_max - pixel_size, num_pixels,
                          device=device, dtype=dtype)
 

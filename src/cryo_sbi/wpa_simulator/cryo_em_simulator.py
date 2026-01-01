@@ -17,7 +17,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # initialize dictionary
     simulation_param = {}
     
-    # number of models
+    # number of atoms
     natoms = models.shape[2]
  
     # sigma param
@@ -55,7 +55,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # detector stuff
     simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.8)
     simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.2)
-    simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.5792)
+    simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.4)
     simulation_param["readout_std"] = image_config.get("READOUT_STD", 1.0)
 
     # noise model

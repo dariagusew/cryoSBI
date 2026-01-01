@@ -162,8 +162,8 @@ class PreferredOrientationPrior:
             torch tensor of quaternions [batch_size, 4] in [w, x, y, z] format
         """
         batch_size = shape[0]
-        model_indices_np = model_indices.cpu().numpy().astype(int).flatten()
-        
+        model_indices_np = np.round(model_indices.cpu().numpy()).astype(int).flatten()
+ 
         # Vectorized random generation
         wobble_angles = np.random.randn(batch_size, 3) * np.radians(self.wobble_angle)
         z_angles = np.random.uniform(0, 2 * np.pi, size=batch_size)
@@ -392,8 +392,8 @@ def get_image_priors(
 
     # Index prior
     index_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([0], dtype=torch.float32, device=device),
-        upper=torch.tensor([max_index], dtype=torch.float32, device=device),
+        lower=torch.tensor([-0.4999], dtype=torch.float32, device=device),
+        upper=torch.tensor([max_index+0.4999], dtype=torch.float32, device=device),
     )
     
     # Quaternion prior

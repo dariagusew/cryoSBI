@@ -84,6 +84,12 @@ def cl_models_to_tensor_topology():
         default="topology.pt",
         help="Output topology file path (Optional, default topology.pt)."
     )
+    cl_parser.add_argument(
+        "--add_garbage_model",
+        action="store_true",  # Stores True if the flag is present, False otherwise.
+        help="If specified, add a garbage collector model."
+    )
+
     
     args = cl_parser.parse_args()
     
@@ -92,7 +98,8 @@ def cl_models_to_tensor_topology():
         pdb_files=args.pdb_files,
         output_models=args.output_models,
         topo_type=args.topo_type,
-        output_topology=args.output_topology
+        output_topology=args.output_topology,
+        add_garbage_model=args.add_garbage_model 
     )
 
 

@@ -49,6 +49,7 @@ def project_density(
     shift: torch.Tensor,
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
+    add_garbage: bool = False,
     atom_batch_size: int = 2048,
 ) -> torch.Tensor:
     """
@@ -72,12 +73,15 @@ def project_density(
     Returns:
         image (torch.Tensor): Projected images of shape (num_batch, num_pixels, num_pixels)
     """
+    # Convert index to integer 
+    index = index.round().long()
     # Get coordinates of selected models
-    coords = models[index.round().long().flatten()]
+    coords = models[index.flatten()]
 
     num_batch, _, num_atoms = coords.shape
     device, dtype = coords.device, coords.dtype
-
+    max_num_model = models.shape[0]-1
+ 
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
 
@@ -98,6 +102,15 @@ def project_density(
 
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
+
+    # Create the mask based on the condition
+    if add_garbage:
+       mask = (index != max_num_model).to(torch.float32)
+    else:
+       mask = torch.ones_like(index)
+
+    # Get ready for broadcast 
+    mask = mask.view(-1, 1, 1) 
 
     # Loop over atoms in batches
     for i in range(0, num_atoms, atom_batch_size):
@@ -123,6 +136,6 @@ def project_density(
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
         
         # Accumulate the result
-        final_image += image_batch
+        final_image += mask * image_batch
 
     return final_image

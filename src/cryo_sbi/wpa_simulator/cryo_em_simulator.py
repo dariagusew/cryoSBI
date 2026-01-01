@@ -67,6 +67,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        if (simulation_param["dose"] <= 0):
           raise ValueError("With Poisson noise model DOSE must be specified and positive")
 
+    # add garbage model
+    simulation_param["add_garbage_model"] = image_config.get("ADD_GARBAGE_MODEL", False)
+    # check noise model
+    if simulation_param["add_garbage_model"] and simulation_param["noise"]=="Gaussian":
+       raise ValueError("Garbage collector model only compatible with Poisson noise models")
+
     # Log configuration
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
@@ -87,6 +93,8 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
           print(f"  QDE(Nyq): {simulation_param['qe_n']:.3f}")
           print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
     print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+    if simulation_param["add_garbage_model"]:
+       print(f"  Adding garbage collector model")
  
     print("="*70)
     
@@ -130,7 +138,8 @@ def cryo_em_simulator(
         simulation_param["sigma"],
         shift,
         simulation_param["num_pixels"], 
-        simulation_param["pixel_size"]
+        simulation_param["pixel_size"],
+        simulation_param["add_garbage_model"]
     )
     # detach and clone the clean image
     image_clean = image.detach().clone()
@@ -160,7 +169,7 @@ def cryo_em_simulator(
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)
-    image_clean = gaussian_normalize_image(image_clean)
+    #image_clean = gaussian_normalize_image(image_clean)
 
     return image, image_clean
 

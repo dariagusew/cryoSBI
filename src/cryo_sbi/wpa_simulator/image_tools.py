@@ -72,7 +72,11 @@ def gaussian_normalize_image(images: torch.Tensor) -> torch.Tensor:
         normalized (torch.Tensor): Normalized image.
     """
 
+    # calculate mean
     mean = images.mean(dim=[1, 2])
+    # calculate std
     std = images.std(dim=[1, 2])
+    # take care of special cases
+    std = torch.where(std > 0, std, torch.ones_like(std))
 
     return transforms.functional.normalize(images, mean=mean, std=std)

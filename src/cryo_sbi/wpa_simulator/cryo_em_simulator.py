@@ -168,7 +168,7 @@ def cryo_em_simulator(
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)
-    #image_clean = gaussian_normalize_image(image_clean)
+    image_clean = gaussian_normalize_image(image_clean)
 
     return image, image_clean
 

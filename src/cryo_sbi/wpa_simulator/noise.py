@@ -116,9 +116,8 @@ def add_Poisson_noise(
 
     # 5. Determine the contrast scale for each image based on its target SNR
     # Deal with zero variance corner cases
-    eps = torch.finfo(signal_var.dtype).eps
     contrast_scale = torch.where(
-          signal_var > eps,
+          signal_var > 0,
           torch.sqrt(target_snr / (mean_electron_dose * qe * signal_var)),
           torch.zeros_like(signal_var)
     )

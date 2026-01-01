@@ -392,8 +392,8 @@ def get_image_priors(
 
     # Index prior
     index_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([-0.4999], dtype=torch.float32, device=device),
-        upper=torch.tensor([max_index+0.4999], dtype=torch.float32, device=device),
+        lower=torch.tensor([-0.499], dtype=torch.float32, device=device),
+        upper=torch.tensor([max_index+0.499], dtype=torch.float32, device=device),
     )
     
     # Quaternion prior
@@ -412,6 +412,70 @@ def get_image_priors(
     # Default to random quaternions
     else:
         quaternion_prior = QuaternionPrior(device)
+
+    # Log prior configuration
+    print("\nImage Priors Configuration:")
+    
+    # Model Index
+    print(f"  Model index prior:")
+    print(f"    Type: Uniform")
+    print(f"    Range: [0, {max_index}]")
+
+    # Orientations
+    print(f"  Orientation prior:")
+    if isinstance(quaternion_prior, PreferredOrientationPrior):
+        print(f"    Type: Preferred Orientation")
+        print(f"    Wobble angle: {quaternion_prior.wobble_angle:.1f}°")
+    elif isinstance(quaternion_prior, QuaternionTestPrior):
+        quat_str = f"[{', '.join(f'{q:.3f}' for q in quaternion_prior.quat)}]"
+        print(f"    Type: Fixed (for testing)")
+        print(f"    Quaternion [w,x,y,z]: {quat_str}")
+    else:
+        print(f"    Type: Uniform Random (SO(3))")
+
+    # Shifts
+    print(f"  Shift prior (pixels):")
+    if isinstance(shift_prior, zuko.distributions.Truncated):
+        print(f"    Type: Truncated Gaussian (μ=0.0, σ={shift_gauss:.2f})")
+    else:
+        print(f"    Type: Uniform")
+    print(f"    Range: [{-shift:.2f}, {+shift:.2f}]")
+
+    # Defocus
+    print(f"  Defocus prior (μm):")
+    if isinstance(defocus_prior, DefocusPrior):
+        print(f"    Type: Empirical (from STAR file)")
+    else: # BoxUniform or Truncated
+        if isinstance(defocus_prior, zuko.distributions.Truncated):
+            loc, scale = image_config.get("DEFOCUS_GAUSS")
+            print(f"    Type: Truncated Gaussian (μ={loc:.2f}, σ={scale:.2f})")
+        else:
+            print(f"    Type: Uniform")
+        lower, upper = image_config["DEFOCUS"]
+        print(f"    Range: [{lower:.2f}, {upper:.2f}]")
+
+    # B-factor
+    print(f"  B-factor prior (Å²):")
+    if isinstance(b_factor_prior, zuko.distributions.TransformedUniform):
+        print(f"    Type: Log-Uniform (Jeffreys)")
+    else:
+        print(f"    Type: Uniform")
+    lower, upper = image_config["B_FACTOR"]
+    print(f"    Range: [{lower:.1f}, {upper:.1f}]")
+
+    # SNR
+    print(f"  Signal-to-Noise Ratio (SNR) prior:")
+    if isinstance(snr_prior, zuko.distributions.TransformedUniform):
+        print(f"    Type: Log-Uniform (Jeffreys)")
+    else:
+        print(f"    Type: Uniform")
+    lower, upper = image_config["SNR"]
+    print(f"    Range: [{lower:.3f}, {upper:.3f}]")
+
+    # Amplitude Contrast
+    print(f"  Amplitude contrast:")
+    print(f"    Value: {image_config['AMP']:.3f} (fixed)")
+
 
     return ImagePrior(
         index_prior,

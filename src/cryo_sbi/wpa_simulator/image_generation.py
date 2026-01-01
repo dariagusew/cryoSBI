@@ -42,7 +42,8 @@ def gen_rot_matrix(quats: torch.Tensor) -> torch.Tensor:
 
 
 def project_density(
-    coords: torch.Tensor,
+    models: torch.Tensor,
+    index: torch.Tensor,
     quats: torch.Tensor,
     sigma: torch.Tensor,
     shift: torch.Tensor,
@@ -58,7 +59,8 @@ def project_density(
     is represented as a Gaussian. The projection is computed on a regular grid.
 
     Args:
-        coords (torch.Tensor): Coordinates of shape (num_batch, 3, num_atoms)
+        models (torch.Tensor): Models
+        index (torch.Tensor): Index of selected models
         quats (torch.Tensor): Quaternions of shape (num_batch, 4) defining rotations
         sigma (torch.Tensor): Parameters of Gaussian kernel of shape (2, num_atoms)
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
@@ -70,6 +72,9 @@ def project_density(
     Returns:
         image (torch.Tensor): Projected images of shape (num_batch, num_pixels, num_pixels)
     """
+    # Get coordinates of selected models
+    coords = models[index.round().long().flatten()]
+
     num_batch, _, num_atoms = coords.shape
     device, dtype = coords.device, coords.dtype
 

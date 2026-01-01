@@ -121,7 +121,13 @@ def add_Poisson_noise(
     mean_counts_per_pixel = qe * mean_electron_dose * (1.0 + contrast_scale * image)
 
     # 7. Generate Poisson shot noise
-    # First, clamp mean_counts_per_pixel to be non-negative
+    # First, sanitize and clamp mean_counts_per_pixel to be non-negative
+    mean_counts_per_pixel = torch.nan_to_num(
+        mean_counts_per_pixel,
+        nan=0.0,
+        posinf=torch.finfo(mean_counts_per_pixel.dtype).max,
+        neginf=0.0
+    )
     mean_counts_per_pixel = torch.clamp(mean_counts_per_pixel, min=0)
     image_noise = torch.poisson(mean_counts_per_pixel)
 

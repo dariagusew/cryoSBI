@@ -122,10 +122,10 @@ def cryo_em_simulator(
         torch.Tensor: A tensor of the simulated (noisy) cryo-EM image.
         torch.Tensor: A tensor of the simulated (clean) cryo-EM image.
     """
-    models_selected = models[index.round().long().flatten()]
     # 1. Project density on 2D plane
     image = project_density(
-        models_selected,
+        models,
+        index,
         quaternion,
         simulation_param["sigma"],
         shift,

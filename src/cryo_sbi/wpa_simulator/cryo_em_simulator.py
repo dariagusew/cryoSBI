@@ -1,4 +1,3 @@
-from typing import Union, Callable
 import json
 import numpy as np
 import torch

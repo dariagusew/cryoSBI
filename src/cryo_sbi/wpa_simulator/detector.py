@@ -1,5 +1,5 @@
 import torch
-from typing import Union, Tuple
+from typing import Tuple
 from cryo_sbi.wpa_simulator.image_tools import make_fft_k2_grid
 import math
 

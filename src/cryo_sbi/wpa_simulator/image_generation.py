@@ -50,7 +50,7 @@ def project_density(
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
     add_garbage: bool = False,
-    atom_batch_size: int = 2048,
+    atom_batch_size: int = 1024,
 ) -> torch.Tensor:
     """
     Generate 2D projections from a set of 3D coordinates using atom-batching

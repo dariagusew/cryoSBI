@@ -19,8 +19,7 @@ def check_train_params(config: dict) -> None:
         "LEARNING_RATE",
         "CLIP_GRADIENT",
         "BATCH_SIZE",
-        "THETA_SHIFT",
-        "THETA_SCALE"
+        "NUM_MODELS"
     ]
 
     for key in needed_keys:

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import zuko
 from lampe.inference import NPE, NRE
+import math
 
 
 class Standardize(nn.Module):
@@ -162,8 +163,7 @@ class NLEWithEmbedding(nn.Module):
         num_hidden_flow: int = 2,
         hidden_flow_dim: int = 128,
         flow: nn.Module = zuko.flows.MAF,
-        theta_shift: float = 0.0,
-        theta_scale: float = 1.0,
+        num_models: int = 1,
         **kwargs,
     ) -> None:
         """
@@ -176,8 +176,7 @@ class NLEWithEmbedding(nn.Module):
             num_hidden_flow (int, optional): number of hidden layers in flow. Defaults to 2.
             hidden_flow_dim (int, optional): hidden dimension in flow. Defaults to 128.
             flow (nn.Module, optional): flow. Defaults to zuko.flows.MAF.
-            theta_shift (float, optional): Shift of the theta for standardization. Defaults to 0.0.
-            theta_scale (float, optional): Scale of the theta for standardization. Defaults to 1.0.
+            num_models (int): Number of models.
             kwargs: additional arguments for the flow
 
         Returns:
@@ -195,8 +194,17 @@ class NLEWithEmbedding(nn.Module):
             **kwargs,
         )
 
-        self.embedding    = embedding_net()
-        self.standardize  = Standardize(theta_shift, theta_scale)
+        # set image embedding
+        self.embedding = embedding_net()
+
+        # set standardization
+        # calculate mean and standard deviation
+        mean = (num_models - 1.0) / 2.0
+        std = num_models / math.sqrt(12.0)
+
+        # Mean/Std standardization
+        self.standardize = Standardize(mean, std)
+
 
     def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """

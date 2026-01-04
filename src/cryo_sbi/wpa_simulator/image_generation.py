@@ -104,15 +104,6 @@ def project_density(
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
 
-    # Create the mask based on the condition
-    if add_garbage:
-       mask = (index != max_num_model).to(torch.float32)
-    else:
-       mask = torch.ones_like(index)
-
-    # Get ready for broadcast 
-    mask = mask.view(-1, 1, 1) 
-
     # Loop over atoms in batches
     for i in range(0, num_atoms, atom_batch_size):
         # Define the slice for the current atom batch
@@ -136,7 +127,16 @@ def project_density(
         # Matrix multiplication to get 2D projection for this batch
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
         
-        # Accumulate the result, with optional mask for the garbage collector
-        final_image += mask * image_batch
+        # Accumulate the result
+        final_image += image_batch
+
+    # Define mask for garbage collector model
+    if add_garbage:
+       mask = (index != max_num_model).to(torch.float32)
+    else:
+       mask = torch.ones_like(index)
+
+    # Apply (reshaped) mask 
+    final_image = mask.view(-1, 1, 1) * final_image
 
     return final_image

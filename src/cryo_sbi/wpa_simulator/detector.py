@@ -5,31 +5,31 @@ import math
 
 
 def get_mtf_nps_grids(
-    image: torch.Tensor,
     simulation_param: dict
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Pre-calculate MTF/NPS grids using Gaussian fits of MTF and DQE.
 
     Args:
-        image: The image, shape [..., H, W].
         simulation_param: Dictionary of simulation parameters 
     
     Returns:
         MTF/NPS grids and scaling factor for target SNR calculation.
     
     """
-    device = image.device
-    num_batch, num_pixels, _ = image.shape
-
-    # Extract Python numbers from scalar tensors if necessary.
+    # 0. Extract Python numbers from scalar tensors if necessary
     if isinstance(simulation_param["pixel_size"], torch.Tensor):
         pixel_size = simulation_param["pixel_size"].item()
     else:
         pixel_size = simulation_param["pixel_size"]
 
+    if isinstance(simulation_param["num_pixels"], torch.Tensor):
+        num_pixels = int(simulation_param["num_pixels"].item())
+    else:
+        num_pixels = int(simulation_param["num_pixels"])
+
     # 1. Create k2 grid for the radially symmetric Gaussian function
-    k2 = make_fft_k2_grid(num_pixels, pixel_size, device)
+    k2 = make_fft_k2_grid(num_pixels, pixel_size, device=simulation_param["device"])
     # Compute Nyquist frequency in Å⁻¹
     k_nyquist = 0.5 / pixel_size
     
@@ -52,6 +52,6 @@ def get_mtf_nps_grids(
     nps = Deff * mtf * mtf * ( 1.0 / dqe_safe - 1.0 )
 
     # 5. Calculate SNR scaling factor
-    scaling_factor = torch.mean(mtf**2 / dqe_safe).expand(num_batch, 1, 1)
+    scaling_factor = torch.mean(mtf**2 / dqe_safe)
 
     return mtf, nps, scaling_factor

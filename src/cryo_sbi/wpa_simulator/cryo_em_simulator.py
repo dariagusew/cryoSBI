@@ -1,21 +1,29 @@
 import json
 import numpy as np
 import torch
+import mrcfile
+import numpy as np
 
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
+from cryo_sbi.wpa_simulator.noise import add_noise_from_nps
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
+from cryo_sbi.wpa_simulator.image_tools import circular_mask
 from cryo_sbi.inference.priors import get_image_priors
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
 
 
 # initialize all tensors/parameters for image simulation
+# and pre-calculate useful stuff
 def create_simulation_param(image_config: dict, models: torch.Tensor, device: str = "cuda"):
     # initialize dictionary
     simulation_param = {}
     
+    # store device
+    simulation_param["device"] = device
+
     # number of atoms
     natoms = models.shape[2]
  
@@ -51,7 +59,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["voltage"] = image_config.get("VOLTAGE", 300.0)
     simulation_param["cs"] = image_config.get("SPHERICAL_ABERRATION", 0.0)
     simulation_param["dose"] = image_config.get("DOSE", 0.0)
-    # detector stuff
+    # detector stuff - default for K2 Summit
     simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.8)
     simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.2)
     simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.4)
@@ -60,17 +68,50 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # noise model
     simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
 
+    # check if noise model is supported
+    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical"]:
+       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical")
+
     # check parameters for Poisson noise
     if simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
        # Dose must be positive
        if (simulation_param["dose"] <= 0):
           raise ValueError("With Poisson noise model DOSE must be specified and positive")
 
+    # prepare Poisson-MTF noise
+    if simulation_param["noise"] == "Poisson-MTF":
+        # Pre-compute useful stuff
+        mtf, nps, sf = get_mtf_nps_grids(simulation_param)
+        # Update the dictionary with the new values.
+        simulation_param["mtf"] = mtf
+        simulation_param["nps"] = nps
+        simulation_param["sf"] = sf
+
+    # check parameters for Empirical noise
+    if simulation_param["noise"] == "empirical":
+       # get path to mrc file
+       mrc_file = image_config.get("NOISE_MRC", None)
+       # check that noise_mrc is not None 
+       if mrc_file == None:
+          raise ValueError("With empirical noise model you must specify NOISE_MRC")
+       # precalculate NPS
+       with mrcfile.open(mrc_file) as mrc:
+            nps_grid = mrc.data.astype(np.float32)
+       # convert to torch
+       nps_torch = torch.from_numpy(nps_grid).to(device)     
+       # We need the amplitude spectrum to color the noise: sqrt(Power)
+       # Clamp at zero to handle potential floating point inaccuracies.
+       simulation_param["nps"] = torch.sqrt(torch.clamp(nps_torch, min=0))
+
+    # precalculate signal mask (for all noise models)
+    num_pixels = int(simulation_param["num_pixels"].item())
+    simulation_param["mask"] = circular_mask(num_pixels, device=device)
+
     # add garbage model
     simulation_param["add_garbage_model"] = image_config.get("ADD_GARBAGE_MODEL", False)
     # check noise model
     if simulation_param["add_garbage_model"] and simulation_param["noise"]=="Gaussian":
-       raise ValueError("Garbage collector model only compatible with Poisson noise models")
+       raise ValueError("Garbage collector supported only with Poisson and empirical noise models")
 
     # Log configuration
     print("\nImage simulation parameters:")
@@ -91,7 +132,9 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        if simulation_param["noise"]=="Poisson-MTF":
           print(f"  QDE(Nyq): {simulation_param['qe_n']:.3f}")
           print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
-    print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+       print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
+    if simulation_param["noise"] == "empirical":
+       print(f"  NPS noise file: {mrc_file}")
     if simulation_param["add_garbage_model"]:
        print(f"  Adding garbage collector model")
  
@@ -147,24 +190,29 @@ def cryo_em_simulator(
     image = apply_ctf(image, defocus, b_factor, amp, simulation_param["pixel_size"], simulation_param["voltage"], simulation_param["cs"])
 
     # 3. Add noise
-    if simulation_param["noise"]=="Gaussian":
-       image = add_Gaussian_noise(image, snr)
+    if simulation_param["noise"] == "Gaussian":
+       image = add_Gaussian_noise(image, snr, simulation_param["mask"])
 
-    else:
+    elif simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
        # Prepare useful tensors
        mtf = None # MTF grid
        nps = None # NPS grid
-       scaling_factor = torch.ones_like(snr) # scaling factor target SNR
+       sf = torch.ones_like(snr) # scaling factor target SNR
 
-       # Initialize tensors based on noise model
-       if simulation_param["noise"]=="Poisson-MTF":
-          mtf, nps, scaling_factor = get_mtf_nps_grids(image, simulation_param)
+       # Get pre-calculated values for noise model Poisson-MTF 
+       if simulation_param["noise"] == "Poisson-MTF":
+          mtf = simulation_param["mtf"]
+          nps = simulation_param["nps"]
+          sf = simulation_param["sf"].expand(snr.shape[0], 1, 1)
 
        # Define target snr to account for MTF/NPS:
-       target_snr = scaling_factor * snr
+       target_snr = sf * snr
 
        # Add Poisson + (optional MTF/DQE) + detector noise
        image = add_Poisson_noise(image, target_snr, simulation_param, mtf, nps)
+
+    else:
+       image = add_noise_from_nps(image, snr, simulation_param["nps"], simulation_param["mask"])
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)

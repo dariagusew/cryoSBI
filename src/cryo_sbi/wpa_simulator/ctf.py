@@ -1,15 +1,12 @@
 import torch
-from cryo_sbi.wpa_simulator.image_tools import make_fft_k2_grid
 
 
 def apply_ctf(
-    image: torch.Tensor, 
+    image: torch.Tensor,
     defocus: torch.Tensor,  # Defocus in µm (positive = underfocus)
     b_factor: torch.Tensor,  # in Å²
     amp: torch.Tensor,  # amplitude contrast (0.07-0.1 typical)
-    pixel_size: torch.Tensor,  # in Å
-    voltage: float = 300.0,  # in kV
-    cs: float = 0.0  # spherical aberration in mm
+    simulation_param: dict # simulation parameters
 ) -> torch.Tensor:
     """
     Applies the CTF to the image in Fourier space.
@@ -21,25 +18,33 @@ def apply_ctf(
                  in the format [defocus, defocus_astig, defocus_astig_angle].
         b_factor: B-factor
         amp: Amplitude contrast ratio (typically 0.07-0.1)
-        pixel_size: Pixel size in Ångströms
-        voltage: Electron voltage in kV
-        cs: Spherical aberration in mm
+        simulation_param: Simulation parameters
     
     Returns:
         Image with CTF applied
     """
 
-    num_batch, num_pixels, _ = image.shape
-    device = image.device
+    # Get parameters
+    device = simulation_param["device"]
+
+    if isinstance(simulation_param["num_pixels"], torch.Tensor):
+        num_pixels = int(simulation_param["num_pixels"].item())
+    else:
+        num_pixels = int(simulation_param["num_pixels"])
+
+    if isinstance(simulation_param["pixel_size"], torch.Tensor):
+        pixel_size = simulation_param["pixel_size"].item()
+    else:
+        pixel_size = simulation_param["pixel_size"]
    
     # Electron wavelength (in Angstroms)
-    voltage_tensor = torch.tensor(voltage, dtype=torch.float32, device=device)
+    voltage_tensor = torch.tensor(simulation_param["voltage"], dtype=torch.float32, device=device)
     wavelength = 12.2643247 / torch.sqrt(
         voltage_tensor * 1000 + 0.978466 * voltage_tensor**2
     )
    
-    # Create frequency grid (in 1/Å)
-    k2 = make_fft_k2_grid(num_pixels, pixel_size, device) 
+    # Get frequency grid
+    k2 = simulation_param["k2"]
 
     # Handle different defocus input formats
     if defocus.ndim == 2 and defocus.shape[1] == 3:
@@ -49,7 +54,7 @@ def apply_ctf(
         angle_astig_rad = torch.deg2rad(defocus[:, 2]).view(-1, 1, 1)
         
         # We need the angle (phi) for each point in the Fourier grid
-        freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size.item(), device=device)
+        freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size, device=device)
         kx, ky = torch.meshgrid(freq_pix_1d, freq_pix_1d, indexing="ij")
         phi = torch.atan2(ky, kx).unsqueeze(0)
     
@@ -63,7 +68,7 @@ def apply_ctf(
         defocus_map_angstrom = defocus.view(-1, 1, 1) * 1e4
 
     # Convert units and reshape for broadcasting
-    cs_angstrom = cs * 1e7  # scalar
+    cs_angstrom = simulation_param["cs"] * 1e7  # scalar
     amp_reshaped = amp.view(-1, 1, 1)  # [num_batch, 1, 1]
     b_factor_reshaped = b_factor.view(-1, 1, 1)  # [num_batch, 1, 1]
 

@@ -10,7 +10,7 @@ from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
 from cryo_sbi.wpa_simulator.noise import add_noise_from_nps
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
-from cryo_sbi.wpa_simulator.image_tools import circular_mask
+from cryo_sbi.wpa_simulator.image_tools import circular_mask, make_fft_k2_grid
 from cryo_sbi.inference.priors import get_image_priors
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
 
@@ -106,6 +106,9 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # precalculate signal mask (for all noise models)
     num_pixels = int(simulation_param["num_pixels"].item())
     simulation_param["mask"] = circular_mask(num_pixels, device=device)
+    # and k2 grid for CTF estimation
+    pixel_size = simulation_param["pixel_size"].item()
+    simulation_param["k2"] = make_fft_k2_grid(num_pixels, pixel_size, device) 
 
     # add garbage model
     simulation_param["add_garbage_model"] = image_config.get("ADD_GARBAGE_MODEL", False)
@@ -187,7 +190,7 @@ def cryo_em_simulator(
     image_clean = image.detach().clone()
 
     # 2. Add CTF
-    image = apply_ctf(image, defocus, b_factor, amp, simulation_param["pixel_size"], simulation_param["voltage"], simulation_param["cs"])
+    image = apply_ctf(image, defocus, b_factor, amp, simulation_param)
 
     # 3. Add noise
     if simulation_param["noise"] == "Gaussian":

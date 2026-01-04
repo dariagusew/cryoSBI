@@ -1,20 +1,23 @@
 import torch
-from typing import Union
+from typing import Union, Optional
 import torchvision.transforms as transforms
 
 
-def circular_mask(n_pixels: int, radius: float, device: str = "cpu") -> torch.Tensor:
+def circular_mask(n_pixels: int, radius: Optional[float] = None, device: str = "cpu") -> torch.Tensor:
     """
     Creates a circular mask of radius centered in the image.
     
     Args:
         n_pixels: Number of pixels along image side
-        radius: Radius of the mask in pixels
-        device: Device to create mask on
+        radius (optional): Radius of the mask in pixels
+        device (optional): Device to create mask on
         
     Returns:
         Boolean mask of shape (n_pixels, n_pixels)
     """
+    if radius is None:
+       radius = 0.5 * n_pixels
+
     grid = torch.linspace(
         -0.5 * (n_pixels - 1), 0.5 * (n_pixels - 1), n_pixels, device=device
     )
@@ -40,13 +43,16 @@ def make_fft_k2_grid(
     Returns:
         A torch.Tensor of shape (1, size, size) representing frequency magnitudes.
     """
-    # Extract Python numbers from scalar tensors if necessary.
-    if isinstance(num_pixels, torch.Tensor):
-        num_pixels = int(num_pixels.item())
+    # Extract Python numbers from scalar tensors if necessary
     if isinstance(pixel_size, torch.Tensor):
         pixel_size = pixel_size.item()
 
-    # Create 1D frequency grid (in 1/Å) ---
+    if isinstance(num_pixels, torch.Tensor):
+        num_pixels = int(num_pixels.item())
+    else:
+        num_pixels = int(num_pixels) 
+
+    # Create 1D frequency grid (in 1/Å)
     freq_pix_1d = torch.fft.fftfreq(num_pixels, d=pixel_size, device=device)
 
     # Create 2D frequency space

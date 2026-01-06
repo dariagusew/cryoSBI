@@ -2,7 +2,7 @@
     "N_PIXELS": 128,
     "PIXEL_SIZE": 1.5,
     "SIGMA": [2.0, 2.0],
-    "MODEL_FILE": "/projects/dynaplix/people/zvh378/cryoSBI/tutorials/HSP90_hparams/models.pt",
+    "MODEL_FILE": "models_ensemble.pt",
     "SHIFT": 0.0,
     "DEFOCUS": [1.0, 3.0],
     "SNR": [0.01, 0.1],

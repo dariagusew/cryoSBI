@@ -1,3 +1,4 @@
+# "process_mrc_stack.py"
 # process_mrc_stack.py
 """
 Process MRC particle stacks: fix headers and downsample using GPU.
@@ -551,22 +552,25 @@ def process_mrc_stack(
                             batch_indices = particle_indices[i:end_idx]
                             batch = data[batch_indices].astype(np.float32)  # Load batch
                             
-                            # Convert to torch tensor and move to device
-                            batch_tensor = torch.from_numpy(batch).to(device)
-                            
-                            # Downsample if needed
-                            if ny != target_size or nx != target_size:
-                               batch_tensor = downsample_gpu(batch_tensor, target_size)
-                            
-                            # Normalize
-                            batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
-                                                              global_stats=global_stats)
-                            
-                            # Write directly to mrc.data (no intermediate array)
-                            mrc.data[i:end_idx] = batch_tensor.cpu().numpy()
-                            
+                            with torch.no_grad():
+                                # Convert to torch tensor and move to device
+                                batch_tensor = torch.from_numpy(batch).to(device)
+
+                                # Downsample if needed
+                                if ny != target_size or nx != target_size:
+                                   batch_tensor = downsample_gpu(batch_tensor, target_size)
+
+                                # Normalize
+                                batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
+                                                                  global_stats=global_stats)
+
+                                # Write directly to mrc.data (no intermediate array)
+                                mrc.data[i:end_idx] = batch_tensor.cpu().numpy()
+
                             # Clean up
-                            del batch, batch_tensor
+                            del batch
+                            if 'batch_tensor' in locals():
+                                del batch_tensor
                             
                             pbar.update(end_idx - i)
                             

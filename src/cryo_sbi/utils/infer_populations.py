@@ -40,7 +40,7 @@ def center_models(models):
     
     return centered_models
 
-def create_weighted_ensemble(models, w, precision=0.01, max_models=1000, verbose=True):
+def create_weighted_ensemble(models, w, precision=0.1, max_models=10000, verbose=True):
     """
     Create an ensemble of models by repeating them according to weights.
     Automatically calculates minimum number of repetitions to match weights within specified precision.
@@ -468,7 +468,7 @@ def rmse(x_opt, w_actual):
 
 
 class PopulationOptimizer:
-    def __init__(self, models, estimator, device, population_steps, num_sim):
+    def __init__(self, models, estimator, device, population_steps, num_sim, use_random = False):
         """
         models: PyTorch tensor of models (n_models, 3, n_atoms)
         estimator: trained Cryo-EM estimator
@@ -484,11 +484,14 @@ class PopulationOptimizer:
         self.num_sim = num_sim
         
         # Generate population weights
-        self.weights, self.pop_fractions, self.state_pairs = generate_population_weights(
-            n_states=self.n_models,
-            population_steps=self.population_steps
-        )
-        
+        if use_random == True:
+            self.weights = np.random.dirichlet(np.ones(self.n_models), size=1000)
+        else:
+            self.weights, self.pop_fractions, self.state_pairs = generate_population_weights(
+                n_states=self.n_models,
+                population_steps=self.population_steps
+            )
+
         # Storage
         self.rmse_values = []
         self.actual_weights = []

@@ -342,15 +342,128 @@ def cl_pretrain_image_embed():
         l2_weight=args.l2_weight,
         mix_ratio=args.mix_ratio
     )
-        
-    print(f"\n✅ Unsupervised pre-training complete!")
+    
+    print(f"\n✅ Pre-training complete!")
     print(f"   Architecture: {args.embedding}")
     print(f"   Training mode: {args.training_mode}")
     print(f"   Final loss: {final_loss:.6f}")
     print(f"   Encoder weights saved to: {args.output}")
-    
 
-def cli_pinfer_populations():
+def cl_pretrain_image_embed_v1():
+    parser = argparse.ArgumentParser(
+        description='Pre-training for image encoder'
+    )
+    
+    # Required arguments
+    parser.add_argument('--image_config', type=str, required=True,
+                       help='Path to image config JSON')
+    
+    # Training mode
+    parser.add_argument('--training_mode', type=str, default='synthetic',
+                       choices=['synthetic', 'real', 'mixed'],
+                       help='Training mode: synthetic, real, or mixed (default: synthetic)')
+    
+    # Real images (required for 'real' and 'mixed' modes)
+    parser.add_argument('--real_images', type=str, default=None,
+                       help='Path to real images MRC file (required for real/mixed modes)')
+    
+    # Resume from checkpoint
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to full model checkpoint to resume training from')
+    
+    # Embedding architecture
+    parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO_FFT_FILTER',
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       help='Embedding architecture')
+    
+    # Training arguments
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Number of training epochs (default: 100)')
+    parser.add_argument('--batch_size', type=int, default=512,
+                       help='Training batch size (default: 512)')
+    parser.add_argument('--lr', type=float, default=2e-4,
+                       help='Learning rate (default: 0.0002)')
+    parser.add_argument('--embedding_dim', type=int, default=256,
+                       help='Embedding dimension (default: 256)')
+    parser.add_argument('--l2_weight', type=float, default=0.0,
+                       help='L2 regularization weight on embeddings (default: 0.0)')
+    parser.add_argument('--mix_ratio', type=float, default=0.5,
+                       help='Mixing ratio for mixed mode: 0.0=all real, 1.0=all synthetic (default: 0.5)')
+    
+    # Output arguments
+    parser.add_argument('--output', type=str, default='pretrained_image_embed.pt',
+                       help='Output path for pretrained encoder weights')
+    
+    # Device
+    parser.add_argument('--device', type=str, default='cuda',
+                       help='Device: "cpu", "cuda", "cuda:0", "cuda:1", etc.')
+    
+    # Other
+    parser.add_argument('--simulation_batch_size', type=int, default=1024,
+                       help='Simulation batch size (default: 1024)')
+    parser.add_argument('--batches_per_epoch', type=int, default=100,
+                       help='Number of simulation batches per epoch (default: 100)')
+    parser.add_argument('--check_frequency', type=int, default=5,
+                       help='Print detailed stats every N epochs (default: 5)')
+    
+    args = parser.parse_args()
+    
+    # Validate device
+    if args.device.startswith('cuda'):
+        if not torch.cuda.is_available():
+            print(f"❌ CUDA not available! Falling back to CPU")
+            args.device = 'cpu'
+        else:
+            if ':' in args.device:
+                gpu_id = int(args.device.split(':')[1])
+                if gpu_id >= torch.cuda.device_count():
+                    print(f"❌ GPU {gpu_id} not available!")
+                    print(f"   Available GPUs: 0-{torch.cuda.device_count()-1}")
+                    print(f"   Falling back to cuda:0")
+                    args.device = 'cuda:0'
+            
+            print(f"✅ Using device: {args.device}")
+            if torch.cuda.is_available():
+                print(f"   GPU: {torch.cuda.get_device_name(args.device)}")
+    
+    # Validate training mode requirements
+    if args.training_mode in ['real', 'mixed'] and args.real_images is None:
+        print(f"❌ ERROR: --training_mode={args.training_mode} requires --real_images")
+        return 1
+    
+    if args.real_images is not None and not MRCFILE_AVAILABLE:
+        print(f"❌ ERROR: --real_images provided but mrcfile not installed!")
+        print(f"   Install with: pip install mrcfile")
+        return 1
+    
+    # Run pretraining
+    model, final_loss = pretrain_image_embed(
+        image_config_path=args.image_config,
+        training_mode=args.training_mode,
+        real_images_path=args.real_images,
+        resume_from=args.resume_from,
+        embedding_name=args.embedding,
+        device=args.device,
+        embedding_dim=args.embedding_dim,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        simulation_batch_size=args.simulation_batch_size,
+        save_path=args.output,
+        n_batches_per_epoch=args.batches_per_epoch,
+        check_frequency=args.check_frequency,
+        l2_weight=args.l2_weight,
+        mix_ratio=args.mix_ratio
+    )
+    
+    print(f"\n✅ Pre-training complete!")
+    print(f"   Architecture: {args.embedding}")
+    print(f"   Training mode: {args.training_mode}")
+    print(f"   Final loss: {final_loss:.6f}")
+    print(f"   Encoder weights saved to: {args.output}")
+
+def cl_pinfer_populations():
+
     parser = argparse.ArgumentParser(
         description="CLI for running PopulationOptimizer for Cryo-EM ensembles."
     )
@@ -388,6 +501,9 @@ def cli_pinfer_populations():
     parser.add_argument("--verbose", action="store_true", help="Print detailed progress messages")
 
     parser.add_argument("--batch_size",type=int, default=10000, help="Batching for simulatin cryo images")
+    
+    parser.add_argument("--use_random",action="store_true",help="Use random population weights")
+
 
 
 
@@ -409,7 +525,8 @@ def cli_pinfer_populations():
         estimator = estimator,
         device=device,
         population_steps=args.population_steps,
-        num_sim=args.num_sim
+        num_sim=args.num_sim,
+        use_random=args.use_random
     )
 
     rmse_vals, actual_weights, opt_weights, pop_fracs = optimizer.run_for_all_populations(

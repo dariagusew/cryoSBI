@@ -1,4 +1,5 @@
 # "estimate_param_simulation_from_mrc.py"
+# "estimate_param_simulation_from_mrc.py"
 """
 Comprehensive Cryo-EM Particle Stack Analyzer for Simulation Parameter Estimation
 
@@ -113,13 +114,16 @@ class GPUIcePowerSpectrumAnalyzer:
         print(f"Analyzing ice spectrum for {n_particles} particles on GPU (batch_size={batch_size})...")
         all_power_spectra = []
         n_batches = (n_particles + batch_size - 1) // batch_size
-        for i in tqdm(range(n_batches), desc="Computing Power Spectra"):
-            start_idx, end_idx = i * batch_size, min((i + 1) * batch_size, n_particles)
-            batch_tensor = torch.from_numpy(particles[start_idx:end_idx]).float().to(self.device)
-            freq, power_batch = self.compute_radial_power_spectrum_gpu(batch_tensor, background_mask)
-            all_power_spectra.append(power_batch.cpu().numpy())
-            del batch_tensor, power_batch
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        with torch.no_grad():
+            for i in tqdm(range(n_batches), desc="Computing Power Spectra"):
+                start_idx, end_idx = i * batch_size, min((i + 1) * batch_size, n_particles)
+                batch_tensor = torch.from_numpy(particles[start_idx:end_idx]).float().to(self.device)
+                freq, power_batch = self.compute_radial_power_spectrum_gpu(batch_tensor, background_mask)
+                all_power_spectra.append(power_batch.cpu().numpy())
+                del batch_tensor, power_batch
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+
         all_power_spectra = np.vstack(all_power_spectra)
         return freq, np.mean(all_power_spectra, axis=0), np.std(all_power_spectra, axis=0), all_power_spectra
 
@@ -189,16 +193,19 @@ class GPUSNRAnalyzer:
         print(f"Analyzing SNR for {n_particles} particles on GPU (batch_size={batch_size})...")
         results = {'snr': [], 'signal_std': [], 'background_std': [], 'protein_std': []}
         n_batches = (n_particles + batch_size - 1) // batch_size
-        for i in tqdm(range(n_batches), desc="Computing SNR"):
-            start_idx, end_idx = i * batch_size, min((i + 1) * batch_size, n_particles)
-            batch_tensor = torch.from_numpy(particles[start_idx:end_idx]).float().to(self.device)
-            snr, sig_std, bg_std, prot_std = self.compute_snr_batch(batch_tensor, signal_mask, background_mask)
-            results['snr'].append(snr.cpu().numpy())
-            results['signal_std'].append(sig_std.cpu().numpy())
-            results['background_std'].append(bg_std.cpu().numpy())
-            results['protein_std'].append(prot_std.cpu().numpy())
-            del batch_tensor
-            if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+        with torch.no_grad():
+            for i in tqdm(range(n_batches), desc="Computing SNR"):
+                start_idx, end_idx = i * batch_size, min((i + 1) * batch_size, n_particles)
+                batch_tensor = torch.from_numpy(particles[start_idx:end_idx]).float().to(self.device)
+                snr, sig_std, bg_std, prot_std = self.compute_snr_batch(batch_tensor, signal_mask, background_mask)
+                results['snr'].append(snr.cpu().numpy())
+                results['signal_std'].append(sig_std.cpu().numpy())
+                results['background_std'].append(bg_std.cpu().numpy())
+                results['protein_std'].append(prot_std.cpu().numpy())
+                del batch_tensor
+                if torch.cuda.is_available(): torch.cuda.empty_cache()
+
         for key in results: results[key] = np.concatenate(results[key])
         results.update({'n_particles': n_particles, 'image_size': particles.shape[1]})
         return results
@@ -237,17 +244,20 @@ def estimate_physical_parameters(image_stack, signal_mask, background_mask, lowp
     print("\nEstimating physical parameters from real data...")
     dev = torch.device(device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f"Physical Param Estimator using device: {dev}")
-    stack_tensor = torch.from_numpy(image_stack).float().to(dev)
-    signal_mask_dev, background_mask_dev = signal_mask.to(dev), background_mask.to(dev)
-    ice_pixels = stack_tensor[:, background_mask_dev]
-    estimated_ice_mean = ice_pixels.mean().item()
-    filtered_stack_np = ndimage.gaussian_filter(image_stack, sigma=(0, lowpass_filter_sigma, lowpass_filter_sigma))
-    filtered_stack = torch.from_numpy(filtered_stack_np).to(dev)
-    estimated_ice_std = filtered_stack[:, background_mask_dev].std().item()
-    var_measured_protein_region = torch.var(stack_tensor[:, signal_mask_dev])
-    var_measured_ice_region = torch.var(ice_pixels)
-    var_protein_estimated = var_measured_protein_region - var_measured_ice_region
-    estimated_protein_std = torch.sqrt(var_protein_estimated).item() if var_protein_estimated > 0 else 0.0
+
+    with torch.no_grad():
+        stack_tensor = torch.from_numpy(image_stack).float().to(dev)
+        signal_mask_dev, background_mask_dev = signal_mask.to(dev), background_mask.to(dev)
+        ice_pixels = stack_tensor[:, background_mask_dev]
+        estimated_ice_mean = ice_pixels.mean().item()
+        filtered_stack_np = ndimage.gaussian_filter(image_stack, sigma=(0, lowpass_filter_sigma, lowpass_filter_sigma))
+        filtered_stack = torch.from_numpy(filtered_stack_np).to(dev)
+        estimated_ice_std = filtered_stack[:, background_mask_dev].std().item()
+        var_measured_protein_region = torch.var(stack_tensor[:, signal_mask_dev])
+        var_measured_ice_region = torch.var(ice_pixels)
+        var_protein_estimated = var_measured_protein_region - var_measured_ice_region
+        estimated_protein_std = torch.sqrt(var_protein_estimated).item() if var_protein_estimated > 0 else 0.0
+
     return {"ice_mean": estimated_ice_mean, "ice_std": estimated_ice_std, "protein_std": estimated_protein_std}
 
 # ============================================================================

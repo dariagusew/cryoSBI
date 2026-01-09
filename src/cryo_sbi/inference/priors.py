@@ -344,6 +344,9 @@ def get_image_priors(
             raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
         # Uniform prior
         defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # Raise error if astigmatism is on
+        if image_config.get("ASTIGMATISM", False):
+           ValueError("With ASTIGMATISM you need to specify a star file for DEFOCUS")
 
     # B-factor prior
     b_factor = image_config["B_FACTOR"]

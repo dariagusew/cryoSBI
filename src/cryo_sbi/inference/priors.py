@@ -331,10 +331,10 @@ def get_image_priors(
     # Defocus prior
     defocus = image_config["DEFOCUS"]
     if isinstance(defocus, str):
-        # Astigmatism prior
+        # Prior from star file (with or without Astigmatism)
         defocus_prior = DefocusPrior(defocus, device=device)
 
-    # Uniform / Truncated Gaussian prior 
+    # Uniform prior 
     elif isinstance(defocus, list) and len(defocus) == 2:
         lower = torch.tensor([[ defocus[0] ]], dtype=torch.float32, device=device)
         upper = torch.tensor([[ defocus[1] ]], dtype=torch.float32, device=device) 
@@ -342,18 +342,8 @@ def get_image_priors(
             raise ValueError("DEFOCUS lower bound must be positive")
         if lower > upper:
             raise ValueError(f"DEFOCUS lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-
-        # check prior type
-        defocus_gauss = image_config.get("DEFOCUS_GAUSS", None)
-
-        if isinstance(defocus_gauss, list) and len(defocus_gauss) == 2: 
-           # Truncated Gaussian prior 
-           loc   = defocus_gauss[0]
-           scale = defocus_gauss[1] 
-           defocus_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
-           # Uniform prior
-        else:
-           defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # Uniform prior
+        defocus_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
     # B-factor prior
     b_factor = image_config["B_FACTOR"]
@@ -445,12 +435,10 @@ def get_image_priors(
     print(f"  Defocus prior (μm):")
     if isinstance(defocus_prior, DefocusPrior):
         print(f"    Type: Empirical (from STAR file)")
-    else: # BoxUniform or Truncated
-        if isinstance(defocus_prior, zuko.distributions.Truncated):
-            loc, scale = image_config.get("DEFOCUS_GAUSS")
-            print(f"    Type: Truncated Gaussian (μ={loc:.2f}, σ={scale:.2f})")
-        else:
-            print(f"    Type: Uniform")
+        if image_config.get("ASTIGMATISM", False):
+           print(f"    With astigmatism")
+    else: # BoxUniform
+        print(f"    Type: Uniform")
         lower, upper = image_config["DEFOCUS"]
         print(f"    Range: [{lower:.2f}, {upper:.2f}]")
 

@@ -55,6 +55,8 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["pixel_size"] = torch.tensor(
         image_config["PIXEL_SIZE"], dtype=torch.float32, device=device
     )
+    # astigmatism
+    simulation_param["astigmatism"] = image_config.get("ASTIGMATISM", False)
     # other microscope parameters (for CTF and noise)
     simulation_param["voltage"] = image_config.get("VOLTAGE", 300.0)
     simulation_param["cs"] = image_config.get("SPHERICAL_ABERRATION", 0.0)

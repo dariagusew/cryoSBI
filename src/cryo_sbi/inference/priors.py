@@ -123,73 +123,37 @@ class DefocusPrior:
 class SNRPrior:
     """
     Samples Signal-to-Noise Ratio (SNR) values from an empirical
-    distribution defined by a text file, with optional value filtering.
+    distribution defined by a text file.
     """
-    def __init__(
-        self,
-        file_path: str,
-        min_val: Optional[float] = 0.001,
-        max_val: Optional[float] = 0.5,
-        device: str = 'cpu'
-    ):
+    def __init__(self, file_path: str, device: str = 'cpu'):
         """
         Args:
             file_path: Path to the text file containing one SNR value per line.
-            min_val: The minimum acceptable SNR value. Values below this are discarded.
-                     Defaults to 0.001.
-            max_val: The maximum acceptable SNR value. Values above this are discarded.
-                     Defaults to 0.5.
             device: The torch device to store the parameters on.
         """
         self.device = device
-        self.snr_values = self._load_and_process_snr_file(file_path, min_val, max_val)
+        self.snr_values = self._load_and_process_snr_file(file_path)
 
-    def _load_and_process_snr_file(
-        self,
-        path: str,
-        min_val: float,
-        max_val: float
-    ) -> torch.Tensor:
-        """Reads, filters, and converts a single-column text file to a tensor."""
+    def _load_and_process_snr_file(self, path: str) -> torch.Tensor:
+        """Reads a single-column text file and converts it to a tensor."""
         print(f"Loading SNR values from: {path}")
         try:
+            # Use numpy.loadtxt for simple, efficient reading of numerical data
             values = np.loadtxt(path, dtype=np.float32)
         except Exception as e:
             raise IOError(f"Failed to read or parse SNR file '{path}'. Error: {e}")
 
-        if values.ndim == 0: # If file has only one number
-            values = np.array([values])
+        # Ensure the file was not empty and resulted in a 1D array
         if values.ndim != 1 or values.size == 0:
             raise ValueError(
                 f"File '{path}' should contain a single column of numbers. "
                 f"Loaded data has an unexpected shape: {values.shape}."
             )
-        
-        initial_count = len(values)
-        print(f"Loaded {initial_count} values from file.")
-
-        # Filter the values to be within the specified range [min_val, max_val]
-        mask = (values >= min_val) & (values <= max_val)
-        filtered_values = values[mask]
-        
-        final_count = len(filtered_values)
-        if final_count < initial_count:
-            print(
-                f"Filtered values outside the range [{min_val}, {max_val}]. "
-                f"Kept {final_count} out of {initial_count} values."
-            )
-
-        # Handle the edge case where no values remain after filtering
-        if final_count == 0:
-            raise ValueError(
-                f"No SNR values remained in '{path}' after filtering with the "
-                f"range [{min_val}, {max_val}]."
-            )
 
         # Convert to a PyTorch tensor and reshape to a column vector [N, 1]
-        snr_tensor = torch.from_numpy(filtered_values).to(self.device).unsqueeze(1)
+        snr_tensor = torch.from_numpy(values).to(self.device).unsqueeze(1)
         
-        print(f"Successfully stored {len(snr_tensor)} SNR values.")
+        print(f"Successfully loaded {len(snr_tensor)} SNR values.")
         return snr_tensor
 
     def sample(self, shape: Tuple[int]) -> torch.Tensor:
@@ -213,6 +177,7 @@ class SNRPrior:
 
         # Reshape to [batch_size, 1, 1] for broadcasting and return
         return sampled_values.view(batch_size, 1, 1)
+
 
 
 class PreferredOrientationPrior:

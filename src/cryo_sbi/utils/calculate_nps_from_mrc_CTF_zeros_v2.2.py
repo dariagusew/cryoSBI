@@ -150,47 +150,24 @@ def open_mrc_robust(filepath, max_size_gb=None):
 # ============================================================================
 # 3. PARAMETER EXTRACTION
 # ============================================================================
-def extract_pixel_and_image_info(star_file):
-    print("Extracting pixel size and image information from STAR file...")
+def extract_star_info(star_file):
+    """Reads STAR file and extracts dataframe and other info."""
+    print("Extracting CTF parameters from STAR file...")
     try:
         data = starfile.read(star_file)
-    except Exception as e: sys.exit(f"❌ Error reading STAR file: {e}")
-    
-    info = {'pixel_size': None, 'image_size': None, 'num_particles': 0, 'calculation_method': 'Unknown'}
-    particles = data.get('particles', data)
-    info['num_particles'] = len(particles)
-    print(f"✓ Found {info['num_particles']:,} particles in STAR file.")
-    
-    if 'rlnDetectorPixelSize' in particles.columns and 'rlnMagnification' in particles.columns:
-        detector_px = particles['rlnDetectorPixelSize'].values[0]
-        magnification = particles['rlnMagnification'].values[0]
-        info['pixel_size'] = float(detector_px * 10000.0 / magnification)
-        info['calculation_method'] = 'Calculated (particles table)'
-        print(f"✓ Pixel Size: {info['pixel_size']:.3f} Å/px (from STAR {info['calculation_method']})")
-    else:
-        print("⚠️ Could not calculate pixel size from STAR file. Will rely on MRC header or command-line.")
+    except Exception as e:
+        sys.exit(f"❌ Error reading STAR file: {e}")
 
+    particles = data.get('particles', data)
+    num_particles = len(particles)
+    print(f"✓ Found {num_particles:,} parameter sets in STAR file.")
+
+    # Extract image size from STAR for verification purposes only
+    star_image_size = None
     if 'rlnImageSize' in particles.columns:
-        box_size = int(particles['rlnImageSize'].values[0])
-        info['image_size'] = (box_size, box_size)
-        print(f"✓ Image Size: {box_size}x{box_size} pixels (from STAR rlnImageSize)")
-    elif 'rlnImageName' in particles.columns:
-        print("  -> Attempting to read MRC file to determine image size...")
-        first_image_path = particles['rlnImageName'].values[0].split('@')[1]
-        stack_path_obj = Path(first_image_path)
-        if not stack_path_obj.is_absolute():
-            stack_path_obj = Path(star_file).parent / first_image_path
-        
-        mrc_data, success, method = open_mrc_robust(stack_path_obj)
-        if success and mrc_data is not None:
-            shape = mrc_data.shape
-            info['image_size'] = (shape[-1], shape[-2])
-            print(f"✓ Image Size: {info['image_size'][0]}x{info['image_size'][1]} pixels (from MRC file via {method})")
-            del mrc_data # Clean up memmap object
-        else:
-             print(f"⚠️ Could not determine image size from STAR file or MRC ({method})")
-    
-    return info, particles
+        star_image_size = int(particles['rlnImageSize'].values[0])
+
+    return particles, star_image_size
 
 def extract_ctf_parameters(star_file):
     data = starfile.read(star_file)
@@ -272,52 +249,78 @@ def main():
     parser.add_argument('--in_star', required=True, help="Input STAR file with CTF parameters")
     parser.add_argument('--output_nps', '-o', required=True, help="Output path for the symmetric NPS grid (.mrc)")
     parser.add_argument('--pixel_size', type=float, default=None, help="Override pixel size (Å/px). Highest priority.")
-    parser.add_argument('--output_size', type=int, default=None, help="(Optional) Desired pixel dimension of the output NPS grid. Defaults to input particle size.")
     parser.add_argument('--zero_threshold', type=float, default=0.08, help="Threshold to define CTF zeros (default: 0.08)")
     parser.add_argument('--fit_window_fraction', type=float, default=0.05, help="Window size for running average pre-smoothing. Set to 0.0 to skip smoothing (default: 0.05).")
     parser.add_argument('--device', default=None, help="Computation device ('cuda' or 'cpu'). Defaults to auto-detect.")
-    parser.add_argument('--stride', type=int, default=1, help="Process every N-th particle from the stack (e.g., --stride 10).")
+    parser.add_argument('--stride', type=int, default=1, help="Sample the STAR file with a stride. For the i-th MRC particle, the (i * stride)-th STAR entry\nis used. The STAR file must be large enough to accommodate this. Default is 1 (one-to-one).")
     parser.add_argument('--plot', action='store_true', help="Generate a diagnostic plot of the 1D NPS profile.")
     args = parser.parse_args()
     
-    print("\n[1/5] Reading STAR file and extracting parameters...")
-    image_info, particles_df = extract_pixel_and_image_info(args.in_star)
+    # --- REVISED PARAMETER EXTRACTION LOGIC ---
+
+    print("\n[1/5] Reading files and extracting parameters...")
+    
+    # Step 1: Open MRC file first to get the definitive image size.
+    particles_data, success, method = open_mrc_robust(args.in_stack)
+    if not success: sys.exit(f"❌ Failed to read MRC file: {method}")
+    print(f"✓ Particle stack opened successfully ({method})")
+    input_size = particles_data.shape[-1]
+    print(f"✓ Image size from MRC data is the definitive source: {input_size}x{input_size} pixels")
+
+    # Step 2: Read STAR file for CTF parameters.
+    particles_df, star_image_size = extract_star_info(args.in_star)
     ctf_params = extract_ctf_parameters(args.in_star)
     amp_contrast = extract_amplitude_contrast(args.in_star)
     mic_params = { 'voltage': ctf_params['voltage'], 'cs': ctf_params['spherical_aberration'], 'amp_contrast': amp_contrast }
     print(f"✓ Using Microscope Parameters: Voltage={mic_params['voltage']}kV, Cs={mic_params['cs']}mm, AmpContrast={mic_params['amp_contrast']:.2f}")
 
-    print("\n[2/5] Reading particle stack using memory-mapped I/O...")
-    particles_data, success, method = open_mrc_robust(args.in_stack)
-    if not success: sys.exit(f"❌ Failed to read MRC file: {method}")
-    print(f"✓ Particle stack opened successfully ({method})")
-    
-    if args.pixel_size is not None: apix = args.pixel_size; print(f"✓ Using user-provided pixel size: {apix:.3f} Å/px")
-    elif image_info['pixel_size'] is not None: apix = image_info['pixel_size']
-    else:
-        with mrcfile.open(args.in_stack, permissive=True) as mrc: apix = mrc.voxel_size.x
-        print(f"✓ Pixel size from MRC header: {apix:.3f} Å/px")
+    # Step 3: Verify STAR image size against the definitive MRC size.
+    if star_image_size is not None and star_image_size != input_size:
+        print(f"⚠️ Warning: Image size in STAR file ({star_image_size}px) does not match "
+              f"image size in MRC stack ({input_size}px). Using the MRC size as the source of truth.")
 
-    if image_info['image_size'] is not None: input_size = image_info['image_size'][0]
+    # Step 4: Determine pixel size (apix).
+    if args.pixel_size is not None:
+        apix = args.pixel_size
+        print(f"✓ Using user-provided pixel size: {apix:.3f} Å/px")
     else:
-        input_size = particles_data.shape[-1]
-        print(f"✓ Image size from MRC data: {input_size}x{input_size} pixels")
-        
-    if apix is None or input_size is None or apix < 0.1: sys.exit("❌ Could not determine valid pixel size and/or image size.")
+        with mrcfile.open(args.in_stack, permissive=True) as mrc:
+            apix = float(mrc.voxel_size.x)
+        print(f"✓ Pixel size from MRC header: {apix:.3f} Å/px")
+    
+    if apix is None or apix < 0.1: sys.exit("❌ Could not determine a valid pixel size.")
     print(f"✓ Using final image parameters: Box Size={input_size}px, Pixel Size={apix:.3f} Å/px")
 
-    print("\n[3/5] Setting up for processing...")
+    print("\n[2/5] Setting up for processing...")
     device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f"  - Using device: {device}")
     
-    total_particles = min(len(particles_df), len(particles_data))
-    indices_to_process = range(0, total_particles, args.stride)
-    num_particles_processed = len(indices_to_process)
-    if args.stride > 1: print(f"✓ Using stride: {args.stride}. Subsampling 1 of every {args.stride} particles.")
-    print(f"  -> Total particles in stack: {total_particles:,}")
+    num_mrc_particles = len(particles_data)
+    num_star_entries = len(particles_df)
+
+    if args.stride == 1:
+        if num_mrc_particles != num_star_entries:
+            sys.exit(f"❌ Particle count mismatch (stride=1).\n"
+                     f"   - MRC stack has {num_mrc_particles:,} particles.\n"
+                     f"   - STAR file has {num_star_entries:,} entries.\n"
+                     f"   - These must be equal when stride is 1.")
+    else: # args.stride > 1
+        print(f"✓ Using stride: {args.stride}. For MRC particle `i`, STAR entry `i * {args.stride}` will be used.")
+        last_required_star_index = (num_mrc_particles - 1) * args.stride
+        if num_star_entries < last_required_star_index + 1:
+            sys.exit(f"❌ STAR file is too small for the given stride.\n"
+                     f"   - MRC stack has {num_mrc_particles:,} particles.\n"
+                     f"   - To process the last particle (index {num_mrc_particles-1:,}) with stride={args.stride}, we need to access STAR entry at index {last_required_star_index:,}.\n"
+                     f"   - This requires the STAR file to have at least {last_required_star_index+1:,} entries.\n"
+                     f"   - However, the STAR file only has {num_star_entries:,} entries.")
+
+    indices_to_process = range(num_mrc_particles)
+    num_particles_processed = num_mrc_particles
+
+    print(f"  -> Total particles in stack: {num_mrc_particles:,}")
     print(f"  -> Particles to be processed: {num_particles_processed:,}")
 
-    print("  - Pre-calculating static frequency grids for GPU...")
+    print("\n[3/5] Pre-calculating static frequency grids for GPU...")
     freq_A = torch.fft.fftfreq(input_size, d=apix, device=device)
     fy_A, fx_A = torch.meshgrid(freq_A, freq_A, indexing='ij')
     freq_sq_grid = fx_A**2 + fy_A**2
@@ -338,13 +341,16 @@ def main():
         for i in tqdm(indices_to_process, desc="Processing particles"):
             # Slicing the memmap object efficiently loads only one particle into RAM
             particle_image = torch.from_numpy(particles_data[i].astype(np.float32)).to(device)
+            
+            star_idx = i * args.stride
+
             per_particle_params = mic_params.copy()
             per_particle_params.update({
-                'defocus_u': particles_df.loc[i, 'rlnDefocusU'], 'defocus_v': particles_df.loc[i, 'rlnDefocusV'],
-                'defocus_angle': particles_df.loc[i, 'rlnDefocusAngle'],
+                'defocus_u': particles_df.loc[star_idx, 'rlnDefocusU'], 'defocus_v': particles_df.loc[star_idx, 'rlnDefocusV'],
+                'defocus_angle': particles_df.loc[star_idx, 'rlnDefocusAngle'],
             })
             if 'rlnPhaseShift' in particles_df.columns:
-                per_particle_params['phase_shift'] = particles_df.loc[i, 'rlnPhaseShift']
+                per_particle_params['phase_shift'] = particles_df.loc[star_idx, 'rlnPhaseShift']
 
             power_2d = torch.abs(torch.fft.fft2(particle_image))**2
             ctf_2d = calculate_ctf_2d_torch(per_particle_params, freq_sq_grid, angle_grid, device)
@@ -381,7 +387,7 @@ def main():
         print("  - Skipping running average pre-smoothing as requested (--fit_window_fraction is 0.0)")
         anchor_points_y = nps_profile_1d_valid
 
-    output_size = args.output_size if args.output_size is not None else input_size
+    output_size = input_size
     final_radii = np.arange(int(np.ceil(output_size * np.sqrt(2))) + 1)
     
     plateau_low = anchor_points_y[0]

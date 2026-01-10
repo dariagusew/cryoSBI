@@ -1,4 +1,3 @@
-# "calculate_nps_from_mrc_CTF_zeros_v2.2.py"
 #!/usr/bin/env python3
 """
 calculate_nps_ctf_zeros.py (v2.2)
@@ -18,6 +17,9 @@ Version 2.2 Changes:
   incremental binning strategy. The script now has a constant, low RAM
   footprint, preventing slowdowns and crashes from memory swapping on large
   datasets. This is achieved by using NumPy accumulators inside the main loop.
+
+MODIFIED: Integrated robust, memory-mapped MRC file handling to prevent
+loading the entire particle stack into RAM, enabling analysis of very large datasets.
 """
 
 # ============================================================================
@@ -46,27 +48,37 @@ except ImportError:
     PLOTTING_ENABLED = False
 
 # ============================================================================
-# 2. MRC FILE HANDLING
+# 2. MRC FILE HANDLING (UPGRADED FOR ROBUSTNESS AND MEMORY EFFICIENCY)
 # ============================================================================
-# ... (This section is identical to the previous version) ...
 def check_mrc_file_size(filepath):
+    """Check MRC file size in bytes and GB."""
     filepath = Path(filepath)
     file_size = filepath.stat().st_size
     return file_size, file_size / (1024**3)
 
 def validate_mrc_data(data):
-    if data is None: return False, "Data is None"
-    if data.size == 0: return False, "Data is empty"
-    if data.ndim not in [2, 3]: return False, f"Invalid dimensions: {data.ndim}D"
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
+    if data is None or data.size == 0 or data.ndim not in [2, 3]:
+        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
     try:
-        if np.all(data == 0): return False, "All data is zero"
-        if np.any(np.isnan(data)): return False, "Data contains NaN"
-        if np.any(np.isinf(data)): return False, "Data contains inf"
-        if np.std(data) == 0: return False, "Zero variance"
+        # For memmap, only check the first particle to avoid loading all data.
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
+        if np.all(test_data == 0): return False, "All data is zero"
+        if np.any(np.isnan(test_data)): return False, "Data contains NaN"
+        if np.any(np.isinf(test_data)): return False, "Data contains inf"
+        if np.std(test_data) == 0: return False, "Zero variance"
         return True, "Valid"
-    except Exception as e: return False, f"Error: {str(e)}"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
 
 def read_mrc_header_raw(filepath):
+    """Read MRC header manually if standard methods fail."""
     try:
         with open(filepath, 'rb') as f:
             header_bytes = f.read(1024)
@@ -75,48 +87,65 @@ def read_mrc_header_raw(filepath):
             nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
             mode = struct.unpack('i', header_bytes[12:16])[0]
             return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
-    except: return None
+    except:
+        return None
 
 def get_dtype_from_mode(mode):
+    """Convert MRC mode to numpy dtype."""
     dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
     return dtype_map.get(mode, np.float32)
 
 def validate_mrc_dimensions(nx, ny, nz):
+    """Check if dimensions are reasonable."""
     if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
     if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
     if nz > 50000000: return False, f"Stack too large: {nz}"
     return True, "Valid"
 
 def open_mrc_robust(filepath, max_size_gb=None):
+    """
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
+    """
     filepath = Path(filepath)
-    if not filepath.exists(): return None, False, "File not found"
+    if not filepath.exists():
+        return None, False, "File not found"
     
     file_size, file_size_gb = check_mrc_file_size(filepath)
     if max_size_gb is not None and file_size_gb > max_size_gb:
         return None, False, f"Too large: {file_size_gb:.2f} GB"
     
+    # Method 1: Standard mrcfile header to memmap
     try:
         with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-            if mrc.data is not None and mrc.data.size > 0:
-                is_valid, msg = validate_mrc_data(mrc.data)
-                if is_valid: return mrc.data, True, "Standard"
-    except: pass
+            nx, ny, nz = mrc.header.nx, mrc.header.ny, mrc.header.nz
+            dtype = mrc.data.dtype
+        data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
+        is_valid, msg = validate_mrc_data(data)
+        if is_valid:
+            return data, True, "Memmap via mrcfile header"
+    except Exception:
+        pass # Fallback to manual reading
     
+    # Method 2: Manual header read to memmap
     try:
         header_info = read_mrc_header_raw(filepath)
         if header_info is not None:
             nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
             is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
-            if not is_valid: return None, False, msg
+            if not is_valid:
+                return None, False, msg
             
             dtype = get_dtype_from_mode(mode)
             data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
             
-            is_valid, msg = validate_mrc_data(data[0])
-            if is_valid: return data, True, "Force-read memmap"
-    except Exception as e: return None, False, f"Failed: {str(e)[:100]}"
+            is_valid, msg = validate_mrc_data(data)
+            if is_valid:
+                return data, True, f"Memmap via manual header read"
+    except Exception as e:
+        return None, False, f"Failed: {str(e)[:100]}"
     
-    return None, False, "All methods failed"
+    return None, False, "All MRC opening methods failed"
 
 # ============================================================================
 # 3. PARAMETER EXTRACTION
@@ -157,7 +186,7 @@ def extract_pixel_and_image_info(star_file):
             shape = mrc_data.shape
             info['image_size'] = (shape[-1], shape[-2])
             print(f"✓ Image Size: {info['image_size'][0]}x{info['image_size'][1]} pixels (from MRC file via {method})")
-            del mrc_data
+            del mrc_data # Clean up memmap object
         else:
              print(f"⚠️ Could not determine image size from STAR file or MRC ({method})")
     
@@ -258,9 +287,10 @@ def main():
     mic_params = { 'voltage': ctf_params['voltage'], 'cs': ctf_params['spherical_aberration'], 'amp_contrast': amp_contrast }
     print(f"✓ Using Microscope Parameters: Voltage={mic_params['voltage']}kV, Cs={mic_params['cs']}mm, AmpContrast={mic_params['amp_contrast']:.2f}")
 
-    print("\n[2/5] Reading particle stack...")
+    print("\n[2/5] Reading particle stack using memory-mapped I/O...")
     particles_data, success, method = open_mrc_robust(args.in_stack)
     if not success: sys.exit(f"❌ Failed to read MRC file: {method}")
+    print(f"✓ Particle stack opened successfully ({method})")
     
     if args.pixel_size is not None: apix = args.pixel_size; print(f"✓ Using user-provided pixel size: {apix:.3f} Å/px")
     elif image_info['pixel_size'] is not None: apix = image_info['pixel_size']
@@ -298,8 +328,7 @@ def main():
     
     print("\n[4/5] Sampling power spectrum at CTF zeros...")
 
-    # Initialize fixed-size NumPy arrays for incremental binning ---
-    # This avoids creating huge Python lists that exhaust system RAM.
+    # Initialize fixed-size NumPy arrays for incremental binning
     max_radius = int(np.ceil(input_size * np.sqrt(2)))
     sum_power_accumulator = np.zeros(max_radius + 1, dtype=np.float64)
     counts_accumulator = np.zeros(max_radius + 1, dtype=np.int64)
@@ -307,6 +336,7 @@ def main():
 
     with torch.no_grad():
         for i in tqdm(indices_to_process, desc="Processing particles"):
+            # Slicing the memmap object efficiently loads only one particle into RAM
             particle_image = torch.from_numpy(particles_data[i].astype(np.float32)).to(device)
             per_particle_params = mic_params.copy()
             per_particle_params.update({
@@ -321,13 +351,10 @@ def main():
             zero_indices = torch.where(torch.abs(ctf_2d) < args.zero_threshold)
 
             if zero_indices[0].numel() > 0:
-                # Transfer small, per-particle data from GPU to CPU
                 sampled_power = power_2d[zero_indices].cpu().numpy()
                 sampled_radii = radial_freq_px_grid[zero_indices].cpu().numpy().astype(int)
                 total_samples_collected += len(sampled_power)
                 
-                # Bin directly into the accumulator arrays ---
-                # Use np.bincount for a highly efficient, vectorized update.
                 sum_power_accumulator += np.bincount(sampled_radii, weights=sampled_power, minlength=len(sum_power_accumulator))
                 counts_accumulator += np.bincount(sampled_radii, minlength=len(counts_accumulator))
 
@@ -336,7 +363,6 @@ def main():
     print("\n[5/5] Binning, fitting, and reconstructing NPS...")
     if total_samples_collected == 0: sys.exit("❌ No power samples collected. Try increasing --zero_threshold.")
 
-    # complex binning after the loop is now replaced by this simple section ---
     valid_bins = counts_accumulator > 0
     radii_bins = np.arange(len(counts_accumulator))
     radii_bins_valid = radii_bins[valid_bins]

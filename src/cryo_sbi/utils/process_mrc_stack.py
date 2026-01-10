@@ -1,4 +1,3 @@
-# "process_mrc_stack.py"
 # process_mrc_stack.py
 """
 Process MRC particle stacks: fix headers and downsample using GPU.
@@ -51,15 +50,15 @@ def estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride=1):
     gpu_overhead = 1.0  # GB for PyTorch overhead
     total_gpu = input_batch_gpu + output_batch_gpu + gpu_overhead
     
-    # Output array in RAM (full)
-    output_array_ram = n_particles * target_size * target_size * 4 / (1024**3)
+    # The on-disk size of the final output file
+    output_file_disk_size = n_particles * target_size * target_size * 4 / (1024**3)
     
-    # Peak RAM: output array + one batch
-    peak_ram = output_array_ram + input_batch_ram + 2.0  # +2GB safety margin
+    # Peak RAM: just one batch, since output is memory-mapped
+    peak_ram = input_batch_ram + 2.0  # +2GB safety margin
     
     return {
         'input_batch_ram': input_batch_ram,
-        'output_array_ram': output_array_ram,
+        'output_file_disk_size': output_file_disk_size,
         'peak_ram': peak_ram,
         'gpu_required': total_gpu,
         'n_output_particles': n_particles
@@ -466,9 +465,9 @@ def process_mrc_stack(
         # Estimate memory requirements
         print(f"\n💾 Memory estimation:")
         mem_est = estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride)
-        print(f"  Input batch RAM: {mem_est['input_batch_ram']:.2f} GB")
-        print(f"  Output array RAM: {mem_est['output_array_ram']:.2f} GB")
-        print(f"  Peak RAM needed: {mem_est['peak_ram']:.2f} GB")
+        print(f"  RAM for one batch: {mem_est['input_batch_ram']:.2f} GB")
+        print(f"  Estimated peak RAM usage: {mem_est['peak_ram']:.2f} GB")
+        print(f"  Output file disk size: {mem_est['output_file_disk_size']:.2f} GB")
         if device == 'cuda':
             print(f"  GPU memory needed: {mem_est['gpu_required']:.2f} GB")
         
@@ -527,18 +526,23 @@ def process_mrc_stack(
             print(f"  Method: None (original values preserved)")
         
         # Create output MRC file and process directly to it
-        print(f"\n⚙️  Creating output file ({mem_est['output_array_ram']:.2f} GB)...")
+        print(f"\n⚙️  Creating output file ({mem_est['output_file_disk_size']:.2f} GB)...")
         try:
-            with mrcfile.new(output_path, overwrite=True) as mrc:
-                # Create empty array in the file
-                mrc.set_data(np.zeros((n_output_particles, target_size, target_size), dtype=np.float32))
-           
-                # Set metadata immediately (before processing)
+            # Define the shape for the new memory-mapped file
+            output_shape = (n_output_particles, target_size, target_size)
+
+            # Use mrcfile.new_mmap for robust, memory-free file creation and allocation
+            with mrcfile.new_mmap(output_path, shape=output_shape, mrc_mode=2, overwrite=True) as mrc:
+                # Header dimensions (nx, ny, nz) and mode are set automatically by new_mmap.
+                # We only need to set the remaining metadata.
                 mrc.voxel_size = output_voxel_size
-                mrc.update_header_from_data()  # Sets dimensions, mode, etc.
-     
+                mrc.header.map = b'MAP '
+                mrc.header.cella.x = mrc.header.nx * mrc.voxel_size.x
+                mrc.header.cella.y = mrc.header.ny * mrc.voxel_size.y
+                mrc.header.cella.z = mrc.header.nz * mrc.voxel_size.z
+
                 print(f"✓ File created successfully")
-                
+
                 # Process in batches and write directly to mrc.data
                 print(f"\n🚀 Processing particles...")
                 n_batches = (n_output_particles + batch_size - 1) // batch_size
@@ -579,8 +583,9 @@ def process_mrc_stack(
                                 torch.cuda.empty_cache()
                     
                     print(f"✓ Processing complete")
+                    # Update final header stats after processing is done
+                    mrc.update_header_stats()
                     print(f"  Output shape: {mrc.data.shape}")
-                    print(f"  Output range: [{mrc.data.min():.3f}, {mrc.data.max():.3f}]")
                     
                 except KeyboardInterrupt:
                     print(f"\n\n⚠️  Processing interrupted by user")
@@ -607,7 +612,6 @@ def process_mrc_stack(
             print(f"✓ Output file is valid")
             print(f"  Shape: {mrc.data.shape}")
             print(f"  Voxel size: {mrc.voxel_size.x:.3f} Å")
-            print(f"  Data range: [{mrc.data.min():.3f}, {mrc.data.max():.3f}]")
     except Exception as e:
         print(f"⚠️  Warning: Could not verify output: {str(e)}")
     

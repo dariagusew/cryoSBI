@@ -1,0 +1,2 @@
+# Martinize2 command line
+martinize2 -f 6RAF_common.pdb -maxwarn 1 -merge all -x 6RAF_martini3.pdb -resid input

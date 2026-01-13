@@ -2,4 +2,4 @@
 lftp -c "open https://ftp.ebi.ac.uk/empiar/world_availability/10317/data/Particles/; mirror"
 
 2) Reduce size
-python process_mrc_stack.py 1p5mln-TmrAB-stack-EMPIAR.mrcs 1p5mln-TmrAB-stack-128-small.mrcs 128 --batch-size 512 --voxel-size 1.077 --stride 10
+process_mrc_stack 1p5mln-TmrAB-stack-EMPIAR.mrcs 1p5mln-TmrAB-stack-128-small.mrcs 128 --batch-size 512 --voxel-size 1.077 --stride 10

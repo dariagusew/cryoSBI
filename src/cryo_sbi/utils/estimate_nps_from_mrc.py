@@ -1,4 +1,4 @@
-estimate_nps_from_mrc.py#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 calculate_nps_from_mrc_background_mask_v4.py
 

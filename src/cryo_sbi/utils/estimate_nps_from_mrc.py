@@ -157,13 +157,12 @@ class ParticleStackReader:
 # ============================================================================
 # 3. ANALYSIS MASKING AND NPS UTILITIES
 # ============================================================================
-def create_masks_gpu(size, signal_radius_px, bg_inner_px, bg_outer_px, device):
-    """Creates hard-edged signal and background masks."""
+def create_mask_gpu(size, bg_inner_px, bg_outer_px, device):
+    """Creates hard-edged background mask."""
     grid = torch.linspace(-0.5 * (size - 1), 0.5 * (size - 1), size, device=device)
     r_squared = grid[None, :] ** 2 + grid[:, None] ** 2
-    signal_mask = (r_squared < signal_radius_px**2)
     background_mask = ((r_squared > bg_inner_px**2) & (r_squared < bg_outer_px**2))
-    return signal_mask, background_mask
+    return background_mask
 
 def get_radial_indices_gpu(size, device):
     """Pre-calculates a grid of integer radial distances for binning."""
@@ -222,7 +221,6 @@ def main():
     parser = argparse.ArgumentParser(description="Calculate NPS by masking the particle and analyzing the background.",
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--in_stack', required=True, help="Input particle stack (.mrc, .mrcs)")
-    parser.add_argument('--signal_radius', type=float, default=0.5, help="Radius of central signal mask as fraction of box size")
     parser.add_argument('--background_inner', type=float, default=0.6, help="Inner radius of background annulus as fraction of box size")
     parser.add_argument('--background_outer', type=float, default=0.9, help="Outer radius of background annulus as fraction of box size")
     parser.add_argument('--output_nps', '-o', required=True, help="Output path for the symmetric NPS grid (.mrc)")
@@ -253,13 +251,11 @@ def main():
     device = torch.device(args.device or ('cuda' if torch.cuda.is_available() else 'cpu'))
     print(f"  - Using device: {device}")
 
-    signal_radius_px = int(image_size * args.signal_radius)
     bg_inner_px = int(image_size * args.background_inner)
     bg_outer_px = int(image_size * args.background_outer)
-    print(f"  - Signal Radius (to exclude): {signal_radius_px} px")
     print(f"  - Background Annulus (to analyze): {bg_inner_px} px to {bg_outer_px} px")
     
-    _, nps_mask = create_masks_gpu(image_size, signal_radius_px, bg_inner_px, bg_outer_px, device)
+    nps_mask = create_mask_gpu(image_size, bg_inner_px, bg_outer_px, device)
     n_mask_pixels = nps_mask.sum().item()
     if n_mask_pixels == 0:
         sys.exit("❌ The specified background mask is empty! Check your radius fractions.")

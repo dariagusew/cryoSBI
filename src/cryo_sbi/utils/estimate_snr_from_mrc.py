@@ -268,7 +268,7 @@ def run_analysis(args):
     if args.output:
         fig_snr = plot_snr_analysis(snr_results, particles)
         fig_snr.savefig(args.output / 'snr_analysis.png', dpi=150)
-        pd.DataFrame({'snr': snr_results['snr']}).to_csv(args.output / 'snr_data.csv', index=False)
+        pd.DataFrame(snr_results).to_csv(args.output / 'snr_data_all.csv', index=False)
     print(f"  Analysis took {time.time() - start_time:.2f} seconds.")
 
     print_snr_summary(snr_results)

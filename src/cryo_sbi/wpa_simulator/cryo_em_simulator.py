@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import mrcfile
 import numpy as np
-
+import random
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
@@ -69,19 +69,24 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
 
     # noise model
     simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
+    # special case of mixed noise
+    if simulation_param["noise"] == "mixed":
+       simulation_param["mixed_noise"] = True
+    else:
+       simulation_param["mixed_noise"] = False
 
     # check if noise model is supported
-    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical"]:
-       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical")
+    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed"]:
+       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed")
 
     # check parameters for Poisson noise
-    if simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
+    if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
        # Dose must be positive
        if (simulation_param["dose"] <= 0):
-          raise ValueError("With Poisson noise model DOSE must be specified and positive")
+          raise ValueError("With Poisson and mixed noise models DOSE must be specified and positive")
 
     # prepare Poisson-MTF noise
-    if simulation_param["noise"] == "Poisson-MTF":
+    if simulation_param["noise"] in ["Poisson-MTF", "mixed"]:
         # Pre-compute useful stuff
         mtf, nps, sf = get_mtf_nps_grids(simulation_param)
         # Update the dictionary with the new values.
@@ -90,12 +95,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         simulation_param["sf"] = sf
 
     # check parameters for Empirical noise
-    if simulation_param["noise"] == "empirical":
+    if simulation_param["noise"] in ["empirical", "mixed"]:
        # get path to mrc file
        mrc_file = image_config.get("NOISE_MRC", None)
        # check that noise_mrc is not None 
        if mrc_file == None:
-          raise ValueError("With empirical noise model you must specify NOISE_MRC")
+          raise ValueError("With empirical and mixed noise models you must specify NOISE_MRC")
        # precalculate NPS
        with mrcfile.open(mrc_file) as mrc:
             nps_grid = mrc.data.astype(np.float32)
@@ -122,7 +127,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
     print(f"  Image size: {image_config['N_PIXELS']}×{image_config['N_PIXELS']} pixels")
-    print(f"  Pixel size: {image_config['PIXEL_SIZE']:.3f} Å")
+    print(f"  Pixel size: {image_config["PIXEL_SIZE"]:.3f} Å")
     print(f"  Voltage: {simulation_param['voltage']:.1f} kV")
     print(f"  Spherical aberration: {simulation_param['cs']:.2f} mm")
     if "TOPOLOGY" in image_config:
@@ -131,14 +136,14 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     else:
         print(f"  Sigma: fixed ({sigma_val:.1f} Å)")
     print(f"  Noise model: {simulation_param['noise']}")
-    if simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
+    if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
        print(f"  Dose: {simulation_param['dose']:.1f} e/Å²")
        print(f"  QDE(0): {simulation_param['qe']:.3f}")
-       if simulation_param["noise"]=="Poisson-MTF":
+       if simulation_param["noise"] in ["Poisson-MTF", "mixed"]:
           print(f"  QDE(Nyq): {simulation_param['qe_n']:.3f}")
           print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
-    if simulation_param["noise"] == "empirical":
+    if simulation_param["noise"] in ["empirical", "mixed"]:
        print(f"  NPS noise file: {mrc_file}")
     if simulation_param["add_garbage_model"]:
        print(f"  Adding garbage collector model")
@@ -193,6 +198,11 @@ def cryo_em_simulator(
 
     # 2. Add CTF
     image = apply_ctf(image, defocus, b_factor, amp, simulation_param)
+
+    # special case of mixed noise
+    if simulation_param["mixed_noise"]:
+       # random selection of noise model
+       simulation_param["noise"] = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "empirical"])
 
     # 3. Add noise
     if simulation_param["noise"] == "Gaussian":

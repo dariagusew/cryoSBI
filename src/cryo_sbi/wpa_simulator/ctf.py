@@ -47,7 +47,7 @@ def apply_ctf(
     k2 = simulation_param["k2"]
 
     # Handle different defocus input formats
-    if defocus.ndim == 2 and defocus.shape[1] == 3:
+    if simulation_param["astigmatism"]:
         # ASTIGMATIC CASE: Defocus map is azimuthally dependent
         defocus_angstrom = defocus[:, 0].view(-1, 1, 1) * 1e4
         defocus_astig_angstrom = defocus[:, 1].view(-1, 1, 1) * 1e4
@@ -63,8 +63,13 @@ def apply_ctf(
             defocus_angstrom +
             defocus_astig_angstrom * torch.cos(2 * (phi - angle_astig_rad))
         )
+
+    elif defocus.ndim == 2 and defocus.shape[1] == 3:
+        # NON-ASTIGMATIC CASE with defocus prior from star file
+        defocus_map_angstrom = defocus[:, 0].view(-1, 1, 1) * 1e4
+ 
     else:
-        # NON-ASTIGMATIC CASE: Defocus is radially symmetric. No need for phi.
+        # NON-ASTIGMATIC CASE with uniform defocus prior
         defocus_map_angstrom = defocus.view(-1, 1, 1) * 1e4
 
     # Convert units and reshape for broadcasting

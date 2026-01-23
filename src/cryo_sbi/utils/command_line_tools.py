@@ -6,6 +6,7 @@ import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
 from cryo_sbi.utils.generate_models import models_to_tensor_topology
 from cryo_sbi.utils.estimate_param_simulation_from_star import estimate_param_simulation_RELION 
+from cryo_sbi.utils.estimate_snr_from_mrc import run_analysis
 from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
 from cryo_sbi.utils.pretrain_image_embed_v1 import pretrain_image_embed
 from cryo_sbi.utils.infer_populations import PopulationOptimizer
@@ -227,6 +228,31 @@ def cl_estimate_param_simulation_from_star():
     print("╚" + "="*58 + "╝")
     print()
     
+
+def cl_estimate_snr_from_mrc():
+    parser = argparse.ArgumentParser(description='Cryo-EM Particle Stack SNR Analyzer.', formatter_class=argparse.RawTextHelpFormatter)
+    g_core = parser.add_argument_group('Core Parameters')
+    g_core.add_argument('--input', '-i', required=True, help='Particle stack path (.mrc, .mrcs)')
+    g_core.add_argument('--output', '-o', type=Path, default=Path("./snr_analysis_results"), help='Output directory for plots and data')
+    g_core.add_argument('--max_particles', '-n', type=int, default=None, help='Max number of particles to analyze from the stack')
+    g_core.add_argument('--device', '-d', type=str, default=None, help='Computation device: cuda or cpu (default: auto-detect)')
+    g_core.add_argument('--batch_size', '-b', type=int, default=128, help='GPU batch size for analysis')
+    
+    g_mask_frac = parser.add_argument_group('Masking (defined as a fraction of image size)')
+    g_mask_frac.add_argument('--signal_radius', type=float, default=0.5, help='Signal region radius as a fraction of image size. (Default: 0.5)')
+    g_mask_frac.add_argument('--background_inner', type=float, default=0.6, help='Background annulus inner radius as a fraction of image size. (Default: 0.6)')
+    g_mask_frac.add_argument('--background_outer', type=float, default=0.9, help='Background annulus outer radius as a fraction of image size. (Default: 0.9)')
+    
+    g_ctrl = parser.add_argument_group('Execution Control')
+    g_ctrl.add_argument('--show-plots', action='store_true', help="Display plots at the end (in addition to saving them).")
+    
+    args = parser.parse_args()
+    if args.output:
+        args.output.mkdir(exist_ok=True, parents=True)
+        print(f"Results will be saved to: {args.output.resolve()}")
+    run_analysis(args)
+    print("\n✓ Analysis complete!")
+
 
 def cl_pretrain_image_embed():
     try:

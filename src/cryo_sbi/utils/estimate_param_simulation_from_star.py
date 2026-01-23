@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore', message='.*errors.*', category=FutureWarning)
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='mrcfile')
 
 # ============================================================================
-# MRC FILE HANDLING
+# MRC FILE HANDLING (UPGRADED FOR ROBUSTNESS AND MEMORY EFFICIENCY)
 # ============================================================================
 
 def check_mrc_file_size(filepath):
@@ -39,21 +39,26 @@ def check_mrc_file_size(filepath):
 
 
 def validate_mrc_data(data):
-    """Validate MRC data after reading."""
-    if data is None:
-        return False, "Data is None"
-    if data.size == 0:
-        return False, "Data is empty"
-    if data.ndim not in [2, 3]:
-        return False, f"Invalid dimensions: {data.ndim}D"
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
+    if data is None or data.size == 0 or data.ndim not in [2, 3]:
+        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
     try:
-        if np.all(data == 0):
+        # For memmap, only check the first particle to avoid loading all data.
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
+            
+        if np.all(test_data == 0):
             return False, "All data is zero"
-        if np.any(np.isnan(data)):
+        if np.any(np.isnan(test_data)):
             return False, "Data contains NaN"
-        if np.any(np.isinf(data)):
+        if np.any(np.isinf(test_data)):
             return False, "Data contains inf"
-        if np.std(data) == 0:
+        if np.std(test_data) == 0:
             return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
@@ -61,7 +66,7 @@ def validate_mrc_data(data):
 
 
 def read_mrc_header_raw(filepath):
-    """Read MRC header manually."""
+    """Read MRC header manually if standard methods fail."""
     try:
         with open(filepath, 'rb') as f:
             header_bytes = f.read(1024)
@@ -70,7 +75,7 @@ def read_mrc_header_raw(filepath):
             import struct
             nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
             mode = struct.unpack('i', header_bytes[12:16])[0]
-            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode, 'header_size': 1024}
+            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
     except:
         return None
 
@@ -93,7 +98,10 @@ def validate_mrc_dimensions(nx, ny, nz):
 
 
 def open_mrc_robust(filepath, max_size_gb=None):
-    """Robustly open MRC file with fallback methods."""
+    """
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
+    """
     filepath = Path(filepath)
     
     if not filepath.exists():
@@ -103,18 +111,23 @@ def open_mrc_robust(filepath, max_size_gb=None):
     if max_size_gb is not None and file_size_gb > max_size_gb:
         return None, False, f"Too large: {file_size_gb:.2f} GB"
     
-    # Method 1: Standard
+    # Method 1: Standard mrcfile header to memmap
     try:
         with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-            if mrc.data is not None and mrc.data.size > 0:
-                is_valid, msg = validate_mrc_data(mrc.data)
-                if is_valid:
-                    data = np.array(mrc.data) if file_size_gb < 1.0 else mrc.data
-                    return data, True, "Standard"
-    except:
-        pass
+            # Get header info without accessing mrc.data
+            nx, ny, nz = mrc.header.nx, mrc.header.ny, mrc.header.nz
+            dtype = mrc.data.dtype
+        
+        # Create a memory-map object pointing to the data on disk
+        data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
+        
+        is_valid, msg = validate_mrc_data(data)
+        if is_valid:
+            return data, True, "Memmap via mrcfile header"
+    except Exception:
+        pass # If this fails, proceed to fallback
     
-    # Method 2: Force-read
+    # Method 2: Fallback to manual header read to memmap
     try:
         header_info = read_mrc_header_raw(filepath)
         if header_info is not None:
@@ -126,13 +139,13 @@ def open_mrc_robust(filepath, max_size_gb=None):
             dtype = get_dtype_from_mode(mode)
             data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
             
-            is_valid, msg = validate_mrc_data(data[0])
+            is_valid, msg = validate_mrc_data(data)
             if is_valid:
-                return data, True, f"Force-read memmap"
+                return data, True, f"Memmap via manual header read"
     except Exception as e:
         return None, False, f"Failed: {str(e)[:100]}"
     
-    return None, False, "All methods failed"
+    return None, False, "All MRC opening methods failed"
 
 
 def _analyze_and_plot_distribution(data: np.ndarray, name: str, unit: str, output_plot_path: Optional[str] = None) -> Dict:
@@ -576,7 +589,7 @@ def extract_pixel_and_image_info(star_file):
             if stack_path_obj.exists():
                 print(f"  Reading: {stack_path_obj}")
                 
-                # Use the robust MRC reading function
+                # Use the robust MRC reading function (now memory-mapped)
                 mrc_data, success, method = open_mrc_robust(stack_path_obj)
                 
                 if success and mrc_data is not None:
@@ -599,7 +612,7 @@ def extract_pixel_and_image_info(star_file):
                     else:
                         print(f"  ⚠️  Unexpected MRC dimensions: {mrc_data.ndim}D")
                     
-                    # Clean up memmap if needed
+                    # Clean up memmap object immediately after getting shape
                     if isinstance(mrc_data, np.memmap):
                         del mrc_data
                 else:

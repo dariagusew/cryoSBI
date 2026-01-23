@@ -572,7 +572,7 @@ def pretrain_image_embed(
             real_loader = create_real_image_loader(
                 real_images_path, 
                 batch_size=simulation_batch_size,
-                num_workers=4
+                num_workers=1
             )
             # create iterator
             real_iter = iter(real_loader)

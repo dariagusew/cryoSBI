@@ -118,7 +118,7 @@ def cl_nle_train_no_saving():
         action="store",
         type=bool,
         required=False,
-        default=True,
+        default=False,
     )
 
     cl_parser.add_argument(

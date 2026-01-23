@@ -263,11 +263,13 @@ def nle_train_no_saving(
                     images.split(train_config["BATCH_SIZE"]),
                 ):  
                     
+                    models_selected = models[_indices.round().long().flatten()]
+
                     losses.append(
                         step(
                             loss(
                                 _images.to(device, non_blocking=True),
-                               _indices.to(device, non_blocking=True)
+                               models_selected.to(device, non_blocking=True)
                             )
                         )
                     )

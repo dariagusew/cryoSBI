@@ -568,7 +568,7 @@ class ConvEncoder(nn.Module):
 @add_embedding("SPATIAL_CRYO")
 class SpatialCryoEncoder(nn.Module):
     """
-    Lightweight spatial encoder for cryo-EM images.
+    Lightweight spatial encoder for cryo-EM images with Dropout for regularization.
 
     Args:
         output_dimension (int): The dimensionality of the output latent embedding.
@@ -576,9 +576,8 @@ class SpatialCryoEncoder(nn.Module):
             Defaults to 128.
         gn_groups (int, optional): The number of groups to use for Group
             Normalization. Defaults to 8.
-        latent_noise_std (float, optional): Standard deviation of Gaussian noise
-            added to the latent code during training. If 0, no noise is added.
-            Defaults to 0.05.
+        dropout_p (float, optional): The probability for the Dropout2d layers.
+            Defaults to 0.2.
     """
 
     def __init__(
@@ -586,22 +585,18 @@ class SpatialCryoEncoder(nn.Module):
         output_dimension: int,
         D: int = 128,
         gn_groups: int = 8,
-        latent_noise_std: float = 0.05,
+        dropout_p: float = 0.2
     ):
         super().__init__()
 
         self.D = D
         self.output_dimension = output_dimension
-        self.latent_noise_std = latent_noise_std
-
-        # Add a manual switch to control noise injection
-        self.inject_noise_while_training = True
+        self.dropout_p = dropout_p
 
         # Base channel dimension (CryoDRGN-style)
         ndf = 16
 
         # Calculate downsampling stages: D -> 4
-        import math
         n_stages = int(math.log2(D)) - 2
         if n_stages < 1:
             raise ValueError(f"Image size D={D} too small. Minimum D=8.")
@@ -626,7 +621,8 @@ class SpatialCryoEncoder(nn.Module):
                     num_groups=min(gn_groups, out_channels),
                     num_channels=out_channels
                 ),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(p=self.dropout_p)
             ])
 
             in_channels = out_channels
@@ -670,10 +666,6 @@ class SpatialCryoEncoder(nn.Module):
         # Flatten
         x = x.view(x.size(0), -1)
 
-        # Latent noise injection (training only)
-        if self.training and self.inject_noise_while_training and self.latent_noise_std > 0: 
-            x = x + self.latent_noise_std * torch.randn_like(x)
-
         # Normalize for stable flow training
         x = self.output_norm(x)
 
@@ -683,215 +675,217 @@ class SpatialCryoEncoder(nn.Module):
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")
 class SpatialCryoFFTEncoder(nn.Module):
     """
-    Lightweight spatial encoder with FFT preprocessing for noisy cryo-EM images
-    Combines SPATIAL_CRYO's efficient architecture with FFT low-pass filtering
-    
-    Architecture:
-    - FFT low-pass filter preprocessing (removes high-frequency noise)
-    - All-convolutional design (no heavy FC layers)
-    - Progressive downsampling: D → D/2 → ... → 4 → 1
-    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
-    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
-    - LayerNorm output for stable flow training
-    
-    Parameters:
-    - D=128: ~1.75M params (default, optimized for 128x128 images)
-    - Cutoff=25: FFT filter cutoff frequency (same as RESNET18_FFT_FILTER)
+    Lightweight spatial encoder with FFT preprocessing 
+    for cryo-EM images with Dropout for regularization.
+
+    Args:
+        output_dimension (int): The dimensionality of the output latent embedding.
+        D (int, optional): The side length of the input square images.
+            Defaults to 128.
+        gn_groups (int, optional): The number of groups to use for Group
+            Normalization. Defaults to 8.
+        dropout_p (float, optional): The probability for the Dropout2d layers.
+            Defaults to 0.2.
     """
-    def __init__(self, output_dimension: int, D: int = 128):
-        super(SpatialCryoFFTEncoder, self).__init__()
-        
+
+    def __init__(
+        self,
+        output_dimension: int,
+        D: int = 128,
+        gn_groups: int = 8,
+        dropout_p: float = 0.2
+    ):
+        super().__init__()
+
         self.D = D
         self.output_dimension = output_dimension
-        
-        # FFT low-pass filter (matches RESNET18_FFT_FILTER for D=128)
+        self.dropout_p = dropout_p
+
+        # FFT low-pass filter
         self._fft_filter = LowPassFilter(D, 25)
-        
-        # Base channel dimension (CryoDRGN choice)
+
+        # Base channel dimension (CryoDRGN-style)
         ndf = 16
-        
-        # Calculate downsampling stages: D → 4
-        import math
+
+        # Calculate downsampling stages: D -> 4
         n_stages = int(math.log2(D)) - 2
-        
         if n_stages < 1:
             raise ValueError(f"Image size D={D} too small. Minimum D=8.")
-        
+
         layers = []
         in_channels = 1
-        
-        # Progressive downsampling with exponential channel growth
+
         for i in range(n_stages):
             out_channels = ndf * (2 ** i)
+
             layers.extend([
-                nn.Conv2d(in_channels, out_channels, 
-                         kernel_size=4, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=4,
+                    stride=2,
+                    padding=1,
+                    bias=False
+                ),
+                nn.GroupNorm(
+                    # Ensure num_groups <= num_channels
+                    num_groups=min(gn_groups, out_channels),
+                    num_channels=out_channels
+                ),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(p=self.dropout_p)
             ])
+
             in_channels = out_channels
-        
-        # Final convolutional layer: 4x4 → 1x1
+
+        # Final convolution: 4x4 -> 1x1
         layers.append(
-            nn.Conv2d(in_channels, output_dimension,
-                     kernel_size=4, stride=1, padding=0, bias=False)
+            nn.Conv2d(
+                in_channels,
+                output_dimension,
+                kernel_size=4,
+                stride=1,
+                padding=0,
+                bias=False
+            )
         )
-        
+
         self.conv_encoder = nn.Sequential(*layers)
-        
-        # Output normalization for stable flow training
+
+        # Output normalization (important for flow stability)
         self.output_norm = nn.LayerNorm(output_dimension)
-    
-    def forward(self, x):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        Encodes a batch of images into latent embeddings.
+
         Args:
-            x: [B, D, D] or [B, 1, D, D] images
-        
+            x (torch.Tensor): Input image tensor of shape `(B, D, D)` or
+                `(B, 1, D, D)`, where B is the batch size and D is the
+                image dimension.
+
         Returns:
-            embeddings: [B, output_dimension]
+            torch.Tensor: Output latent embeddings of shape `(B, output_dimension)`.
         """
-        # Apply FFT low-pass filter (removes high-frequency noise)
+        # Apply FFT low-pass filter
         x = self._fft_filter(x)
-        
-        # Ensure 4D input [B, 1, D, D]
-        if len(x.shape) == 3:
+
+        # Ensure [B, 1, D, D]
+        if x.dim() == 3:
             x = x.unsqueeze(1)
-        
+
         # Convolutional encoding
         x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
-        
-        # Flatten to [B, output_dim]
+
+        # Flatten
         x = x.view(x.size(0), -1)
-        
-        # Normalize for flow training
+
+        # Normalize for stable flow training
         x = self.output_norm(x)
-        
+
         return x
+
 
 @add_embedding("SPATIAL_CRYO_GAUSS_FFT_FILTER")
 class SpatialCryoGaussFFTEncoder(nn.Module):
     """
     Lightweight spatial encoder with a self-contained, learnable Gaussian FFT filter.
-    
-    This version encapsulates all filtering logic, removing the dependency on an
-    external filter class.
-    
-    Architecture:
-    - Internal Gaussian low-pass filter (sigma is learned during training)
-    - All-convolutional design (no heavy FC layers)
-    - Progressive downsampling: D → D/2 → ... → 4 → 1
-    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
-    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
-    - LayerNorm output for stable flow training
-    
-    Parameters:
-    - output_dimension (int): The dimension of the latent embedding.
-    - D (int): The side length of the input image (e.g., 128).
-    - initial_sigma (float): The starting value for the filter's sigma.
+
+    Args:
+        output_dimension (int): The dimensionality of the output latent embedding.
+        D (int, optional): The side length of the input square images.
+            Defaults to 128.
+        gn_groups (int, optional): The number of groups for GroupNorm. Defaults to 8.
+        initial_sigma (float, optional): The starting value for the filter's sigma.
+            Defaults to 25.0.
+        dropout_p (float, optional): The probability for the Dropout2d layers.
+            Defaults to 0.2.
     """
-    def __init__(self, output_dimension: int, D: int = 128, initial_sigma: float = 25.0):
-        super(SpatialCryoGaussFFTEncoder, self).__init__()
-        
+    def __init__(
+        self,
+        output_dimension: int,
+        D: int = 128,
+        gn_groups: int = 8,
+        initial_sigma: float = 25.0,
+        dropout_p: float = 0.2
+    ):
+        super().__init__()
+
         self.D = D
         self.output_dimension = output_dimension
-        
-        # 1. Create a learnable parameter for sigma.
-        # We learn log(sigma) to ensure sigma is always positive.
+        self.dropout_p = dropout_p
+
+        # --- Learnable Gaussian Filter Setup ---
         self.log_sigma = nn.Parameter(torch.tensor(math.log(initial_sigma)))
-        
-        # 2. Pre-calculate the grid of squared radii, which is constant.
-        # This grid is used to generate the Gaussian mask in the forward pass.
         grid = torch.linspace(-0.5 * (D - 1), 0.5 * (D - 1), D)
         r_2d = grid[None, :] ** 2 + grid[:, None] ** 2
-        
-        # 3. Register r_2d as a buffer. This makes it part of the model's state
-        # (e.g., moves to GPU with .to(device)) but not a learnable parameter.
         self.register_buffer('_r_2d', r_2d)
-        
-        # Base channel dimension (CryoDRGN choice)
+
+        # --- Convolutional Encoder (with Dropout) ---
         ndf = 16
-        
-        # Calculate downsampling stages: D → 4
         n_stages = int(math.log2(D)) - 2
-        
         if n_stages < 1:
             raise ValueError(f"Image size D={D} too small. Minimum D=8.")
-        
+
         layers = []
         in_channels = 1
-        
-        # Progressive downsampling with exponential channel growth
         for i in range(n_stages):
             out_channels = ndf * (2 ** i)
             layers.extend([
-                nn.Conv2d(in_channels, out_channels, 
-                         kernel_size=4, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.Conv2d(
+                    in_channels, out_channels,
+                    kernel_size=4, stride=2, padding=1, bias=False
+                ),
+                nn.GroupNorm(
+                    num_groups=min(gn_groups, out_channels),
+                    num_channels=out_channels
+                ),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(p=self.dropout_p)
             ])
             in_channels = out_channels
-        
-        # Final convolutional layer: 4x4 → 1x1
+
+        # Final convolution: 4x4 -> 1x1
         layers.append(
-            nn.Conv2d(in_channels, output_dimension,
-                     kernel_size=4, stride=1, padding=0, bias=False)
+            nn.Conv2d(
+                in_channels, output_dimension,
+                kernel_size=4, stride=1, padding=0, bias=False
+            )
         )
-        
         self.conv_encoder = nn.Sequential(*layers)
-        
-        # Output normalization for stable flow training
+
+        # Output normalization
         self.output_norm = nn.LayerNorm(output_dimension)
 
     def _apply_fft_filter(self, image: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        """
-        Internal method to apply the low-pass filter using the current sigma.
-        """
-        # Calculate the Gaussian mask dynamically using the current sigma
-        # Add a small epsilon for numerical stability if sigma is near zero
+        """Internal method to apply the low-pass filter using the current sigma."""
         mask = torch.exp(-self._r_2d / (2 * sigma**2 + 1e-8))
-
-        # Apply FFT. Use dim=(-2, -1) for robustness with different input shapes.
-        fft_image = torch.fft.fft2(image, dim=(-2, -1))
-        fft_image = torch.fft.fftshift(fft_image, dim=(-2, -1))
-
-        # Reshape the mask to broadcast correctly with the image tensor
-        # (e.g., from [H, W] to [1, 1, H, W] for a [B, C, H, W] image)
+        fft_image = torch.fft.fftshift(torch.fft.fft2(image, dim=(-2, -1)), dim=(-2, -1))
         broadcast_shape = [1] * (image.dim() - 2) + list(mask.shape)
         fft_image = fft_image * mask.view(*broadcast_shape)
-
-        # Invert FFT
-        fft_image = torch.fft.ifftshift(fft_image, dim=(-2, -1))
-        reconstructed = torch.fft.ifft2(fft_image, dim=(-2, -1)).real
+        reconstructed = torch.fft.ifft2(torch.fft.ifftshift(fft_image, dim=(-2, -1)), dim=(-2, -1)).real
         return reconstructed
 
-    def forward(self, x):
-        """
-        Args:
-            x: [B, D, D] or [B, 1, D, D] images
-        
-        Returns:
-            embeddings: [B, output_dimension]
-        """
-        # Get the positive sigma value from its learned logarithm
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Encodes a batch of images into latent embeddings."""
+        # 1. Learnable filtering
         sigma = torch.exp(self.log_sigma)
-        
-        # Apply the internal FFT low-pass filter with the learned sigma
         x = self._apply_fft_filter(x, sigma)
-        
-        # Ensure 4D input [B, 1, D, D] for the convolutional layers
+
+        # 2. Convolutional encoding
         if x.dim() == 3:
             x = x.unsqueeze(1)
-        
-        # Convolutional encoding
-        x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
-        
-        # Flatten to [B, output_dim]
+
+        # 3. Dropout is automatically applied during training within the sequential block
+        x = self.conv_encoder(x)
         x = x.view(x.size(0), -1)
-        
-        # Normalize for flow training
+
+
+        # 4. Final normalization
         x = self.output_norm(x)
-        
+
         return x
+
 
 if __name__ == "__main__":
     pass

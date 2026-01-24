@@ -193,11 +193,12 @@ def cryo_em_simulator(
         simulation_param["pixel_size"],
         simulation_param["add_garbage_model"]
     )
-    # detach and clone the clean image
-    image_clean = image.detach().clone()
 
     # 2. Add CTF
     image = apply_ctf(image, defocus, b_factor, amp, simulation_param)
+
+    # detach and clone the clean image
+    image_clean = image.detach().clone()
 
     # special case of mixed noise
     if simulation_param["mixed_noise"]:

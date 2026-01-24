@@ -568,84 +568,117 @@ class ConvEncoder(nn.Module):
 @add_embedding("SPATIAL_CRYO")
 class SpatialCryoEncoder(nn.Module):
     """
-    Lightweight spatial encoder for cryo-EM images
-    Inspired by CryoDRGN's ConvEncoder but flexible for any image size
-    
-    Architecture:
-    - All-convolutional design (no heavy FC layers)
-    - Progressive downsampling: D → D/2 → ... → 4 → 1
-    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
-    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
-    
-    Parameters:
-    - D=64:  ~300K  (CryoDRGN scale)
-    - D=128: ~1.75M (6x lighter than ResNet18)
-    - D=256: ~7M    (still lighter than ResNet18)
+    Lightweight spatial encoder for cryo-EM images.
+
+    Args:
+        output_dimension (int): The dimensionality of the output latent embedding.
+        D (int, optional): The side length of the input square images.
+            Defaults to 128.
+        gn_groups (int, optional): The number of groups to use for Group
+            Normalization. Defaults to 8.
+        latent_noise_std (float, optional): Standard deviation of Gaussian noise
+            added to the latent code during training. If 0, no noise is added.
+            Defaults to 0.05.
     """
-    def __init__(self, output_dimension: int, D: int = 128):
-        super(SpatialCryoEncoder, self).__init__()
-        
+
+    def __init__(
+        self,
+        output_dimension: int,
+        D: int = 128,
+        gn_groups: int = 8,
+        latent_noise_std: float = 0.05,
+    ):
+        super().__init__()
+
         self.D = D
         self.output_dimension = output_dimension
-        
-        # Base channel dimension (CryoDRGN choice)
+        self.latent_noise_std = latent_noise_std
+
+        # Add a manual switch to control noise injection
+        self.inject_noise_while_training = True
+
+        # Base channel dimension (CryoDRGN-style)
         ndf = 16
-        
-        # Calculate downsampling stages: D → 4
+
+        # Calculate downsampling stages: D -> 4
         import math
         n_stages = int(math.log2(D)) - 2
-        
         if n_stages < 1:
             raise ValueError(f"Image size D={D} too small. Minimum D=8.")
-        
+
         layers = []
         in_channels = 1
-        
-        # Progressive downsampling with exponential channel growth
+
         for i in range(n_stages):
             out_channels = ndf * (2 ** i)
+
             layers.extend([
-                nn.Conv2d(in_channels, out_channels, 
-                         kernel_size=4, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_channels),
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=4,
+                    stride=2,
+                    padding=1,
+                    bias=False
+                ),
+                nn.GroupNorm(
+                    # Ensure num_groups <= num_channels
+                    num_groups=min(gn_groups, out_channels),
+                    num_channels=out_channels
+                ),
                 nn.LeakyReLU(0.2, inplace=True)
             ])
+
             in_channels = out_channels
-        
-        # Final convolutional layer: 4x4 → 1x1
-        # This eliminates the need for large FC layers
+
+        # Final convolution: 4x4 -> 1x1
         layers.append(
-            nn.Conv2d(in_channels, output_dimension,
-                     kernel_size=4, stride=1, padding=0, bias=False)
+            nn.Conv2d(
+                in_channels,
+                output_dimension,
+                kernel_size=4,
+                stride=1,
+                padding=0,
+                bias=False
+            )
         )
-        
+
         self.conv_encoder = nn.Sequential(*layers)
-        
-        # Output normalization for stable flow training
+
+        # Output normalization (important for flow stability)
         self.output_norm = nn.LayerNorm(output_dimension)
-    
-    def forward(self, x):
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
+        Encodes a batch of images into latent embeddings.
+
         Args:
-            x: [B, D, D] or [B, 1, D, D] images
-        
+            x (torch.Tensor): Input image tensor of shape `(B, D, D)` or
+                `(B, 1, D, D)`, where B is the batch size and D is the
+                image dimension.
+
         Returns:
-            embeddings: [B, output_dimension]
+            torch.Tensor: Output latent embeddings of shape `(B, output_dimension)`.
         """
-        # Ensure 4D input [B, 1, D, D]
-        if len(x.shape) == 3:
+        # Ensure [B, 1, D, D]
+        if x.dim() == 3:
             x = x.unsqueeze(1)
-        
+
         # Convolutional encoding
         x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
-        
-        # Flatten to [B, output_dim]
+
+        # Flatten
         x = x.view(x.size(0), -1)
-        
-        # Normalize for flow training
+
+        # Latent noise injection (training only)
+        if self.training and self.inject_noise_while_training and self.latent_noise_std > 0: 
+            x = x + self.latent_noise_std * torch.randn_like(x)
+
+        # Normalize for stable flow training
         x = self.output_norm(x)
-        
+
         return x
+
 
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")
 class SpatialCryoFFTEncoder(nn.Module):

@@ -67,6 +67,9 @@ def load_model(
             for param in estimator.embedding.parameters():
                 param.requires_grad = False
 
+            print("Disabling latent noise injection for flow training.")
+            estimator.embedding.inject_noise_while_training = False
+
             frozen_count = sum(not p.requires_grad for p in estimator.embedding.parameters())
             total_count = len(list(estimator.embedding.parameters()))
             print(f"  Frozen: {frozen_count}/{total_count} parameters")

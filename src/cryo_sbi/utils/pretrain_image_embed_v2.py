@@ -1,44 +1,30 @@
+# "pretrain_image_embed_v2.py"
 """
-pretrain_image_embed_v1.py
+pretrain_image_embed_v2.py
 
-Simplified unsupervised pre-training of image encoder.
-Supports 3 training modes:
-- 'synthetic': Train on simulated images only
-- 'real': Train on real images only  
-- 'mixed': Train on both (50/50 mix)
+Simplified unsupervised pre-training of image encoder on synthetic data.
+Now includes an optional classifier head to enforce separation between
+different conformations in the latent space.
 
-Can resume from checkpoint for fine-tuning with different data mix.
+This version trains on SYNTHETIC data only.
 
-Usage (train on synthetic):
+Usage (with classification loss):
     python pretrain_image_embed.py \
         --image_config config.json \
-        --training_mode synthetic \
         --embedding SPATIAL_CRYO_FFT_FILTER \
         --embedding_dim 16 \
         --epochs 100 \
-        --batch_size 256
-
-Usage (fine-tune on real):
-    python pretrain_image_embed.py \
-        --image_config config.json \
-        --training_mode real \
-        --real_images real_data.mrc \
-        --resume_from pretrained_image_embed_full_model.pt \
-        --embedding SPATIAL_CRYO_FFT_FILTER \
-        --embedding_dim 16 \
-        --epochs 20 \
         --batch_size 256 \
-        --lr 2e-4
+        --classifier_weight 0.5
 
-Usage (train on mixed):
+Usage (reconstruction only):
     python pretrain_image_embed.py \
         --image_config config.json \
-        --training_mode mixed \
-        --real_images real_data.mrc \
         --embedding SPATIAL_CRYO_FFT_FILTER \
         --embedding_dim 16 \
         --epochs 100 \
-        --batch_size 256
+        --batch_size 256 \
+        --classifier_weight 0.0
 """
 
 import argparse
@@ -54,122 +40,6 @@ from pathlib import Path
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
-try:
-    import mrcfile
-    MRCFILE_AVAILABLE = True
-except ImportError:
-    MRCFILE_AVAILABLE = False
-    print("Warning: mrcfile not installed. Real image loading disabled.")
-    print("Install with: pip install mrcfile")
-
-
-# ============================================================================
-# MRC FILE HANDLING
-# ============================================================================
-
-def check_mrc_file_size(filepath):
-    """Check MRC file size in bytes and GB."""
-    filepath = Path(filepath)
-    file_size = filepath.stat().st_size
-    file_size_gb = file_size / (1024**3)
-    return file_size, file_size_gb
-
-
-def validate_mrc_data(data):
-    """Validate MRC data after reading."""
-    if data is None:
-        return False, "Data is None"
-    if data.size == 0:
-        return False, "Data is empty"
-    if data.ndim not in [2, 3]:
-        return False, f"Invalid dimensions: {data.ndim}D"
-    try:
-        if np.all(data == 0):
-            return False, "All data is zero"
-        if np.any(np.isnan(data)):
-            return False, "Data contains NaN"
-        if np.any(np.isinf(data)):
-            return False, "Data contains inf"
-        if np.std(data) == 0:
-            return False, "Zero variance"
-        return True, "Valid"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
-
-
-def read_mrc_header_raw(filepath):
-    """Read MRC header manually."""
-    try:
-        with open(filepath, 'rb') as f:
-            header_bytes = f.read(1024)
-            if len(header_bytes) < 1024:
-                return None
-            import struct
-            nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
-            mode = struct.unpack('i', header_bytes[12:16])[0]
-            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode, 'header_size': 1024}
-    except:
-        return None
-
-
-def get_dtype_from_mode(mode):
-    """Convert MRC mode to numpy dtype."""
-    dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
-    return dtype_map.get(mode, np.float32)
-
-
-def validate_mrc_dimensions(nx, ny, nz):
-    """Check if dimensions are reasonable."""
-    if nx <= 0 or ny <= 0 or nz <= 0:
-        return False, f"Non-positive: {nz}×{ny}×{nx}"
-    if nx > 8192 or ny > 8192:
-        return False, f"Too large: {ny}×{nx}"
-    if nz > 50000000:
-        return False, f"Stack too large: {nz}"
-    return True, "Valid"
-
-
-def open_mrc_robust(filepath, max_size_gb=None):
-    """Robustly open MRC file with fallback methods."""
-    filepath = Path(filepath)
-    
-    if not filepath.exists():
-        return None, False, "File not found"
-    
-    file_size, file_size_gb = check_mrc_file_size(filepath)
-    if max_size_gb is not None and file_size_gb > max_size_gb:
-        return None, False, f"Too large: {file_size_gb:.2f} GB"
-    
-    # Method 1: Standard
-    try:
-        with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-            if mrc.data is not None and mrc.data.size > 0:
-                is_valid, msg = validate_mrc_data(mrc.data)
-                if is_valid:
-                    data = np.array(mrc.data) if file_size_gb < 1.0 else mrc.data
-                    return data, True, "Standard"
-    except:
-        pass
-    
-    # Method 2: Force-read
-    try:
-        header_info = read_mrc_header_raw(filepath)
-        if header_info is not None:
-            nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
-            is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
-            if not is_valid:
-                return None, False, msg
-            
-            dtype = get_dtype_from_mode(mode)
-            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
-            
-            is_valid, msg = validate_mrc_data(data[0])
-            if is_valid:
-                return data, True, f"Force-read memmap"
-    except Exception as e:
-        return None, False, f"Failed: {str(e)[:100]}"
-    
-    return None, False, "All methods failed"
 
 
 # ============================================================================
@@ -227,29 +97,28 @@ class SpatialCryoDecoder(nn.Module):
     Lightweight decoder that perfectly mirrors SPATIAL_CRYO encoder
     All-convolutional design, truly symmetric architecture
     """
-    def __init__(self, embedding_dim, image_size):
+    def __init__(self, embedding_dim, image_size, gn_groups=8):
         super().__init__()
-        
+
         self.image_size = image_size
         self.embedding_dim = embedding_dim
-        
+
         # Calculate upsampling stages (must match encoder)
-        import math
         n_stages = int(math.log2(image_size)) - 2
-        
+
         # Initial channel count (mirror encoder's final channels before last conv)
         start_channels = 16 * (2 ** (n_stages - 1))
-        
+
         # Project directly to 4x4 spatial size (mirror encoder's final conv in reverse)
         # Encoder: [B, start_channels, 4, 4] → [B, output_dim, 1, 1]
         # Decoder: [B, output_dim] → [B, start_channels, 4, 4]
         self.fc = nn.Linear(embedding_dim, start_channels * 4 * 4)
         self.start_channels = start_channels
-        
+
         # Progressive upsampling (mirror encoder stages in reverse)
         layers = []
         in_channels = start_channels
-        
+
         # Perform n_stages upsampling operations
         for i in range(n_stages):
             # Last stage: force to 16 channels (mirror encoder's first conv output)
@@ -257,41 +126,41 @@ class SpatialCryoDecoder(nn.Module):
                 out_channels = 16
             else:
                 out_channels = in_channels // 2
-            
+
             layers.extend([
                 nn.ConvTranspose2d(in_channels, out_channels,
                                  kernel_size=4, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True)
+                nn.GroupNorm(min(gn_groups, out_channels), out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
             ])
             in_channels = out_channels
-        
+
         # Final conv to get single channel (mirror encoder's input)
         layers.append(
             nn.Conv2d(16, 1, kernel_size=3, stride=1, padding=1)
         )
-        
+
         self.decoder = nn.Sequential(*layers)
-    
+
     def forward(self, z):
         """
         Args:
             z: [B, embedding_dim] - Encoder embeddings (LayerNorm'd)
-        
+
         Returns:
             reconstruction: [B, 1, H, W] - Reconstructed images (in normalized space)
         """
         B = z.shape[0]
-        
+
         # Project to [B, start_channels * 4 * 4]
         x = self.fc(z)
-        
+
         # Reshape to [B, start_channels, 4, 4]
         x = x.view(B, self.start_channels, 4, 4)
-        
+
         # Upsample to full size
         x = self.decoder(x)
-        
+
         return x
 
 # ============================================================================
@@ -300,14 +169,15 @@ class SpatialCryoDecoder(nn.Module):
 
 class ImageEmbedPretrainModel(nn.Module):
     """
-    Image encoder + decoder for pretraining
+    Image encoder + decoder for pretraining, with an optional classifier head.
     """
-    def __init__(self, embedding_name, embedding_dim, image_size):
+    def __init__(self, embedding_name, embedding_dim, image_size, n_classes=None):
         super().__init__()
         
         self.embedding_name = embedding_name
         self.embedding_dim = embedding_dim
         self.image_size = image_size
+        self.n_classes = n_classes
         
         # Create encoder based on embedding_name
         self.encoder = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size)
@@ -320,6 +190,14 @@ class ImageEmbedPretrainModel(nn.Module):
         else:
            self.decoder = SimpleDecoder(embedding_dim, image_size)
            print(f"  Decoder: SimpleDecoder")
+
+        # Add Classifier Head
+        if n_classes is not None and n_classes > 0:
+            self.classifier = nn.Linear(embedding_dim, n_classes)
+            print(f"  Classifier Head: Enabled for {n_classes} classes")
+        else:
+            self.classifier = None
+            print(f"  Classifier Head: Disabled")
     
     def forward(self, x):
         """
@@ -328,107 +206,17 @@ class ImageEmbedPretrainModel(nn.Module):
         Returns:
             embeddings: [B, embedding_dim]
             reconstruction: [B, 1, H, W]
+            logits: [B, n_classes] or None
         """
         embeddings = self.encoder(x)
         reconstruction = self.decoder(embeddings)
-        return embeddings, reconstruction
-
-
-# ============================================================================
-# REAL IMAGE DATASET (MRC LOADER)
-# ============================================================================
-
-class RealImageMRCDataset(Dataset):
-    """
-    Dataset for loading real images from MRC stack
-    Efficient streaming without loading all into memory
-    """
-    def __init__(self, mrc_path, cache_size=10000):
-        """
-        Args:
-            mrc_path: Path to MRC file
-            cache_size: Number of images to keep in memory cache
-        """
-        if not MRCFILE_AVAILABLE:
-            raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
         
-        self.mrc_path = mrc_path
-        self.cache_size = cache_size
+        # Get classification logits
+        logits = None
+        if self.classifier is not None:
+            logits = self.classifier(embeddings)
         
-        # Open MRC file ONCE and keep persistent reference
-        print(f"  Opening MRC file: {mrc_path}")
-        self.mrc_data, success, method = open_mrc_robust(mrc_path)
-        
-        if not success:
-            raise RuntimeError(f"Failed to open MRC file: {method}")
-        
-        self.n_images = self.mrc_data.shape[0]
-        self.image_shape = self.mrc_data.shape[1:]
-        
-        print(f"  Loaded MRC: {self.n_images} images of shape {self.image_shape}")
-        print(f"  Loading method: {method}")
-        
-        # Cache for recently accessed images
-        self.cache = {}
-        self.cache_order = []
-    
-    def __len__(self):
-        return self.n_images
-    
-    def __getitem__(self, idx):
-        """Load a single image"""
-        # Check cache first
-        if idx in self.cache:
-            return self.cache[idx]
-        
-        # Load from persistent MRC reference (no file opening!)
-        img = self.mrc_data[idx].astype(np.float32)
-        
-        # Normalize (zero mean, unit std)
-        img = (img - img.mean()) / (img.std() + 1e-8)
-        
-        # Add to cache
-        if len(self.cache) >= self.cache_size:
-            # Remove oldest
-            oldest = self.cache_order.pop(0)
-            del self.cache[oldest]
-        
-        self.cache[idx] = torch.FloatTensor(img)
-        self.cache_order.append(idx)
-        
-        return self.cache[idx]
-    
-    def __del__(self):
-        """Clean up MRC file reference"""
-        if hasattr(self, 'mrc_data'):
-            if isinstance(self.mrc_data, np.memmap):
-                del self.mrc_data
-
-
-def create_real_image_loader(mrc_path, batch_size=1024, num_workers=4):
-    """
-    Create dataloader for real images
-    
-    Args:
-        mrc_path: Path to MRC stack
-        batch_size: Batch size
-        num_workers: Number of workers
-    
-    Returns:
-        DataLoader
-    """
-    dataset = RealImageMRCDataset(mrc_path, cache_size=10000)
-    
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True
-    )
-    
-    return dataloader
+        return embeddings, reconstruction, logits
 
 
 # ============================================================================
@@ -457,11 +245,16 @@ def count_parameters(model):
     encoder = sum(p.numel() for p in model.encoder.parameters())
     decoder = sum(p.numel() for p in model.decoder.parameters())
     
+    classifier = 0
+    if hasattr(model, 'classifier') and model.classifier is not None:
+        classifier = sum(p.numel() for p in model.classifier.parameters())
+
     return {
         'total': total,
         'trainable': trainable,
         'encoder': encoder,
-        'decoder': decoder
+        'decoder': decoder,
+        'classifier': classifier
     }
 
 
@@ -471,10 +264,8 @@ def count_parameters(model):
 
 def pretrain_image_embed(
     image_config_path: str,
-    training_mode: str = 'synthetic',  # 'synthetic', 'real', or 'mixed'
-    real_images_path: str = None,
     resume_from: str = None,
-    embedding_name: str = 'SPATIAL_CRYO_FFT_FILTER',
+    embedding_name: str = 'SPATIAL_CRYO',
     device: str = 'cuda',
     embedding_dim: int = 16,
     epochs: int = 100,
@@ -485,15 +276,14 @@ def pretrain_image_embed(
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
     l2_weight: float = 0.0,
-    mix_ratio: float = 0.5
+    classifier_weight: float = 0.0,
+    mse_loss: str = 'noisy'
 ):
     """
-    Unsupervised pre-training with flexible data sources
+    Unsupervised pre-training on synthetic data with optional classification loss.
     
     Args:
         image_config_path: Path to image config JSON
-        training_mode: 'synthetic', 'real', or 'mixed'
-        real_images_path: Path to real images MRC file (required if mode='real' or 'mixed')
         resume_from: Path to full model checkpoint to resume from (optional)
         embedding_name: Name of embedding architecture
         device: 'cuda', 'cuda:0', 'cuda:1', or 'cpu'
@@ -506,28 +296,17 @@ def pretrain_image_embed(
         check_frequency: How often to print detailed stats
         n_batches_per_epoch: Number of simulation batches per epoch
         l2_weight: Weight for L2 regularization on embeddings
-        mix_ratio: 0.0 = all real, 1.0 = all synthetic
-    
+        classifier_weight: Weight for classification loss on synthetic data (0 to disable)
+        mse_loss: Compare against noisy or clean images
+
     Returns:
         model: Trained model
         final_loss: Final total loss
     """
     
-    # Validate training mode
-    if training_mode not in ['synthetic', 'real', 'mixed']:
-        raise ValueError(f"training_mode must be 'synthetic', 'real', or 'mixed', got '{training_mode}'")
-    
-    if training_mode in ['real', 'mixed'] and real_images_path is None:
-        raise ValueError(f"training_mode='{training_mode}' requires --real_images")
-
-    # Only relevant for mixed mode
-    if training_mode == 'mixed':
-        if not 0.0 <= mix_ratio <= 1.0:
-           raise ValueError(f"mix_ratio must be between 0.0 and 1.0, got {mix_ratio}")
-    
     print("\n" + "="*70)
     print(f"PRETRAINING: {embedding_name}")
-    print(f"Training mode: {training_mode.upper()}")
+    print(f"Training mode: SYNTHETIC ONLY")
     if resume_from:
         print(f"Resuming from: {resume_from}")
     print("="*70)
@@ -536,57 +315,34 @@ def pretrain_image_embed(
     image_config = json.load(open(image_config_path))
     image_size = image_config["N_PIXELS"]
     
-    # Setup synthetic data if needed
-    synthetic_loader = None
-    synthetic_iter = None
-    models = None
+    # Setup synthetic data
+    print("\nLoading conformational models...")
+    if image_config["MODEL_FILE"].endswith("npy"):
+        models = torch.from_numpy(np.load(image_config["MODEL_FILE"])).to(device).float()
+    else:
+        models = torch.load(image_config["MODEL_FILE"]).to(device).float()
     
-    if training_mode in ['synthetic', 'mixed']:
-        print("\nLoading conformational models...")
-        if image_config["MODEL_FILE"].endswith("npy"):
-            models = torch.from_numpy(np.load(image_config["MODEL_FILE"])).to(device).float()
-        else:
-            models = torch.load(image_config["MODEL_FILE"]).to(device).float()
-        
-        n_conformations = len(models)
-        print(f"  Number of conformations: {n_conformations}")
-        print(f"  Image size: {image_size}x{image_size}")
-        
-        # Setup synthetic data generation
-        image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
-        synthetic_loader = PriorLoader(
-            image_prior, 
-            batch_size=simulation_batch_size, 
-            num_workers=4
-        )
-        # create iterator
-        synthetic_iter = iter(synthetic_loader)
+    n_conformations = len(models)
+    print(f"  Number of conformations: {n_conformations}")
+    print(f"  Image size: {image_size}x{image_size}")
+    
+    # Setup synthetic data generation
+    image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
+    synthetic_loader = PriorLoader(
+        image_prior, 
+        batch_size=simulation_batch_size, 
+        num_workers=4
+    )
+    synthetic_iter = iter(synthetic_loader)
  
-    # Setup real data if needed
-    real_loader = None
-    real_iter = None
-    
-    if training_mode in ['real', 'mixed']:
-        print("\nLoading real images...")
-        try:
-            real_loader = create_real_image_loader(
-                real_images_path, 
-                batch_size=simulation_batch_size,
-                num_workers=1
-            )
-            # create iterator
-            real_iter = iter(real_loader)
-        except Exception as e:
-            print(f"❌ Error loading real images: {e}")
-            return None, 0.0
-    
     # Build or load model
     print(f"\nBuilding model with {embedding_name}...")
     try:
         model = ImageEmbedPretrainModel(
             embedding_name, 
             embedding_dim, 
-            image_size
+            image_size,
+            n_classes=n_conformations if classifier_weight > 0 else None
         ).to(device)
     except ValueError as e:
         print(f"\n❌ Error: {e}")
@@ -613,28 +369,32 @@ def pretrain_image_embed(
     print(f"  Total parameters: {params['total']:,}")
     print(f"  Encoder parameters: {params['encoder']:,}")
     print(f"  Decoder parameters: {params['decoder']:,}")
+    if params['classifier'] > 0:
+        print(f"  Classifier parameters: {params['classifier']:,}")
     
     # Setup optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
-    # Setup simulation parameters if needed
-    if training_mode in ['synthetic', 'mixed']:
-       simulation_param = create_simulation_param(image_config, models, device=device)
+    # Setup loss for classifier
+    if classifier_weight > 0.0:
+        classifier_criterion = nn.CrossEntropyLoss()
+
+    # Setup simulation parameters
+    simulation_param = create_simulation_param(image_config, models, device=device)
 
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
-    print(f"  Training mode: {training_mode}")
-    if training_mode == 'mixed':
-        print(f"  Mix ratio: {mix_ratio:.2f} (synthetic:{mix_ratio:.0%}, real:{1-mix_ratio:.0%})")
+    print(f"  MSE loss type: {mse_loss}")
     print(f"  L2 regularization weight: {l2_weight}")
+    if classifier_weight > 0.0:
+        print(f"  Classification loss weight: {classifier_weight}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
-    if training_mode in ['synthetic', 'mixed']:
-        print(f"  Simulation batch size: {simulation_batch_size}")
-        print(f"  Batches per epoch: {n_batches_per_epoch}")
-        print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
+    print(f"  Simulation batch size: {simulation_batch_size}")
+    print(f"  Batches per epoch: {n_batches_per_epoch}")
+    print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
     print("="*70)
     
     # Training history
@@ -642,6 +402,8 @@ def pretrain_image_embed(
         'loss': [],
         'recon_loss': [],
         'l2_loss': [],
+        'class_loss': [],
+        'class_acc': [],
         'emb_std': [],
         'emb_dist': []
     }
@@ -657,84 +419,68 @@ def pretrain_image_embed(
             epoch_loss = 0
             epoch_recon_loss = 0
             epoch_l2_loss = 0
+            epoch_class_loss = 0
+            epoch_correct_preds = 0
+            epoch_total_preds = 0
             n_batches = 0
  
             for batch_idx in range(n_batches_per_epoch):
                 
-                # Get batch based on mode
-                if training_mode in ['synthetic', 'mixed']:
+                try:
+                    parameters = next(synthetic_iter)
+                except StopIteration:
+                    synthetic_iter = iter(synthetic_loader)
+                    parameters = next(synthetic_iter)
 
-                    try:
-                        parameters = next(synthetic_iter)
-                    except StopIteration:
-                        synthetic_iter = iter(synthetic_loader)
-                        parameters = next(synthetic_iter)
+                (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
+                labels = indices.round().long().squeeze(-1).to(device, non_blocking=True)
 
-                    (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-                    # get synthetic images
-                    syn_images, _ = cryo_em_simulator(
-                        models,
-                        indices.to(device, non_blocking=True),
-                        quaternions.to(device, non_blocking=True),
-                        shift.to(device, non_blocking=True),
-                        defocus.to(device, non_blocking=True),
-                        b_factor.to(device, non_blocking=True),
-                        amp.to(device, non_blocking=True),
-                        snr.to(device, non_blocking=True),
-                        simulation_param
-                    )
-                
-                if training_mode in ['real', 'mixed']:
-
-                    try:
-                        real_images = next(real_iter)
-                    except StopIteration:
-                        real_iter = iter(real_loader)
-                        real_images = next(real_iter)
-
-                    # put real images on device
-                    real_images = real_images.to(device, non_blocking=True)
-                
-                # Combine based on mode
-                if training_mode == 'synthetic':
-                    images = syn_images
-                elif training_mode == 'real':
-                    images = real_images
-                else:  # mixed mode
-                    # calculate number of images
-                    total_samples = min(len(syn_images), len(real_images))
-                    # Calculate samples based on mix_ratio
-                    # mix_ratio: 0.0 = all real, 1.0 = all synthetic, 0.5 = 50/50
-                    n_syn = int(total_samples * mix_ratio)
-                    n_real = total_samples - n_syn
-
-                    # Take samples
-                    combined = torch.cat([
-                        syn_images[:n_syn],
-                        real_images[:n_real]
-                    ], dim=0)
-
-                    # Shuffle to mix synthetic and real randomly
-                    perm = torch.randperm(len(combined), device=combined.device)
-                    images = combined[perm]
+                # get synthetic images
+                images, images_clean = cryo_em_simulator(
+                    models,
+                    indices.to(device, non_blocking=True),
+                    quaternions.to(device, non_blocking=True),
+                    shift.to(device, non_blocking=True),
+                    defocus.to(device, non_blocking=True),
+                    b_factor.to(device, non_blocking=True),
+                    amp.to(device, non_blocking=True),
+                    snr.to(device, non_blocking=True),
+                    simulation_param
+                )
 
                 # Train on mini-batches
-                for batch_images in images.split(batch_size):
+                for i in range(0, len(images), batch_size):
+                    batch_images = images[i:i+batch_size]
+                    batch_images_clean = images_clean[i:i+batch_size]
+                    batch_labels = labels[i:i+batch_size]
                     
                     optimizer.zero_grad()
                     
                     # Forward pass
-                    embeddings, reconstruction = model(batch_images)
+                    embeddings, reconstruction, logits = model(batch_images)
                     
                     # Reconstruction loss
-                    recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
+                    if mse_loss=='clean':
+                       recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images_clean) 
+                    else:
+                       recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
                     
                     # L2 regularization - per-sample norm
                     l2_loss = (torch.norm(embeddings, dim=1) ** 2).mean()
                     
+                    # Classification loss
+                    class_loss = torch.tensor(0.0, device=device)
+                    if classifier_weight > 0.0 and logits is not None:
+                        class_loss = classifier_criterion(logits, batch_labels)
+                        
+                        # Track accuracy
+                        with torch.no_grad():
+                            preds = torch.argmax(logits, dim=1)
+                            epoch_correct_preds += (preds == batch_labels).sum().item()
+                            epoch_total_preds += len(batch_labels)
+
                     # Total loss
-                    loss = recon_loss + l2_weight * l2_loss
+                    loss = recon_loss + l2_weight * l2_loss + classifier_weight * class_loss
                     
                     # Backward pass
                     loss.backward()
@@ -745,23 +491,32 @@ def pretrain_image_embed(
                     epoch_loss += loss.item()
                     epoch_recon_loss += recon_loss.item()
                     epoch_l2_loss += l2_loss.item()
+                    epoch_class_loss += class_loss.item()
                     n_batches += 1
             
             # Epoch statistics
             avg_loss = epoch_loss / n_batches
             avg_recon_loss = epoch_recon_loss / n_batches
             avg_l2_loss = epoch_l2_loss / n_batches
+            avg_class_loss = epoch_class_loss / n_batches
+            accuracy = (epoch_correct_preds / epoch_total_preds) if epoch_total_preds > 0 else 0.0
             
             history['loss'].append(avg_loss)
             history['recon_loss'].append(avg_recon_loss)
             history['l2_loss'].append(avg_l2_loss)
+            history['class_loss'].append(avg_class_loss)
+            history['class_acc'].append(accuracy)
             
             # Update progress bar
-            tq.set_postfix(
-                loss=f"{avg_loss:.6f}",
-                recon=f"{avg_recon_loss:.6f}",
-                l2=f"{avg_l2_loss:.4f}"
-            )
+            postfix_dict = {
+                "loss": f"{avg_loss:.4f}",
+                "recon": f"{avg_recon_loss:.4f}",
+                "l2": f"{avg_l2_loss:.4f}"
+            }
+            if classifier_weight > 0.0:
+                postfix_dict["class"] = f"{avg_class_loss:.4f}"
+                postfix_dict["acc"] = f"{accuracy:.2%}"
+            tq.set_postfix(postfix_dict)
             
             # Detailed check every N epochs
             if epoch % check_frequency == 0:
@@ -769,7 +524,7 @@ def pretrain_image_embed(
                 with torch.no_grad():
                     # Check on last batch
                     test_imgs = batch_images[:20]
-                    test_embs, test_recon = model(test_imgs)
+                    test_embs, test_recon, _ = model(test_imgs)
                     
                     emb_std, emb_dist = check_embedding_health(test_embs, device)
                     recon_error = F.mse_loss(test_recon.squeeze(1), test_imgs).item()
@@ -781,6 +536,9 @@ def pretrain_image_embed(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
+                if classifier_weight > 0.0:
+                    print(f"    Classification loss: {avg_class_loss:.4f}")
+                    print(f"    Classification accuracy: {accuracy:.2%}")
                 print(f"    Reconstruction error (test): {recon_error:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
@@ -793,7 +551,7 @@ def pretrain_image_embed(
     model.eval()
     with torch.no_grad():
         test_imgs = batch_images[:20]
-        final_embs, final_recon = model(test_imgs)
+        final_embs, final_recon, _ = model(test_imgs)
         final_emb_std, final_emb_dist = check_embedding_health(final_embs, device)
     
     # Update history with final values
@@ -813,9 +571,13 @@ def pretrain_image_embed(
     
     print(f"\nFinal metrics:")
     print(f"  Embedding: {embedding_name}")
-    print(f"  Training mode: {training_mode}")
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
+    if classifier_weight > 0.0:
+        final_class_loss = history['class_loss'][-1]
+        final_acc = history['class_acc'][-1]
+        print(f"  Classification loss: {final_class_loss:.6f}")
+        print(f"  Classification accuracy: {final_acc:.2%}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     
@@ -857,20 +619,20 @@ def pretrain_image_embed(
     torch.save(model.encoder.state_dict(), save_path)
     print(f"✅ Encoder weights: {save_path}")
     
-    # Save full model (encoder+decoder)
+    # Save full model (encoder+decoder+classifier)
     full_model_path = save_path.replace('.pt', '_full_model.pt')
     torch.save(model.state_dict(), full_model_path)
-    print(f"✅ Full model (encoder+decoder): {full_model_path}")
+    print(f"✅ Full model (for resuming): {full_model_path}")
     
     # Save training history
     history_path = save_path.replace('.pt', '_history.pt')
     history['embedding_name'] = embedding_name
     history['embedding_dim'] = embedding_dim
     history['image_size'] = image_size
-    history['training_mode'] = training_mode
     history['encoder_params'] = params['encoder']
     history['decoder_params'] = params['decoder']
     history['l2_weight'] = l2_weight
+    history['classifier_weight'] = classifier_weight
     history['resumed_from'] = resume_from
     torch.save(history, history_path)
     print(f"✅ Training history: {history_path}")
@@ -879,3 +641,102 @@ def pretrain_image_embed(
     
     return model, final_loss
 
+
+def main():
+    """
+    Parses command-line arguments and runs the pre-training script.
+    """
+    parser = argparse.ArgumentParser(
+        description='Pre-training for image encoder on synthetic data with optional classification loss.'
+    )
+
+    # --- Required Arguments ---
+    parser.add_argument('--image_config', type=str, required=True,
+                       help='Path to image config JSON')
+
+    # --- Model & Architecture ---
+    parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO',
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       help='Embedding network architecture to use')
+    parser.add_argument('--embedding_dim', type=int, default=16,
+                       help='Output dimension of the embedding network (default: 16)')
+
+    # MSE loss type
+    parser.add_argument('--mse_loss', type=str, default='noisy',
+                       choices=['clean', 'noisy'],
+                       help='Images to use for MSE loss (default: noisy)')
+
+    # --- Training Hyperparameters ---
+    parser.add_argument('--epochs', type=int, default=100,
+                       help='Number of training epochs (default: 100)')
+    parser.add_argument('--batch_size', type=int, default=256,
+                       help='Training batch size for the optimizer step (default: 256)')
+    parser.add_argument('--lr', type=float, default=2e-4,
+                       help='Learning rate for the AdamW optimizer (default: 2e-4)')
+    parser.add_argument('--l2_weight', type=float, default=0.0,
+                       help='Weight for L2 regularization on embeddings (default: 0.0)')
+    parser.add_argument('--classifier_weight', type=float, default=0.0,
+                       help='Weight for the classification loss. Set > 0 to enable. A good starting '
+                            'point for noisy images is ~0.4 (default: 0.0)')
+
+    # --- I/O and Checkpoints ---
+    parser.add_argument('--save_path', type=str, default='pretrained_image_embed.pt',
+                       help='Output path for the saved encoder weights')
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to a full model checkpoint to resume training from')
+
+    # --- Execution & Other ---
+    parser.add_argument('--device', type=str, default='cuda',
+                       help='Device to use for training: "cpu", "cuda", "cuda:0", etc. (default: "cuda")')
+    parser.add_argument('--simulation_batch_size', type=int, default=1024,
+                       help='Number of images to simulate at once (default: 1024)')
+    parser.add_argument('--n_batches_per_epoch', type=int, default=100,
+                       help='Number of simulation batches to generate per epoch (default: 100)')
+    parser.add_argument('--check_frequency', type=int, default=5,
+                       help='How often to print detailed stats, in epochs (default: 5)')
+
+    args = parser.parse_args()
+
+    # --- Validate Device ---
+    if args.device.startswith('cuda'):
+        if not torch.cuda.is_available():
+            print(f"❌ CUDA not available! Falling back to CPU")
+            args.device = 'cpu'
+        else:
+            if ':' in args.device:
+                try:
+                    gpu_id = int(args.device.split(':')[1])
+                    if gpu_id >= torch.cuda.device_count():
+                        print(f"❌ GPU {gpu_id} not available! Available GPUs: 0-{torch.cuda.device_count()-1}")
+                        print(f"   Falling back to cuda:0")
+                        args.device = 'cuda:0'
+                except ValueError:
+                    print(f"❌ Invalid CUDA device format: {args.device}. Using default cuda:0.")
+                    args.device = 'cuda:0'
+
+            print(f"✅ Using device: {args.device}")
+            if torch.cuda.is_available():
+                print(f"   GPU: {torch.cuda.get_device_name(args.device)}")
+
+    # --- Run Training ---
+    pretrain_image_embed(
+        image_config_path=args.image_config,
+        resume_from=args.resume_from,
+        embedding_name=args.embedding,
+        device=args.device,
+        embedding_dim=args.embedding_dim,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        simulation_batch_size=args.simulation_batch_size,
+        save_path=args.save_path,
+        check_frequency=args.check_frequency,
+        n_batches_per_epoch=args.n_batches_per_epoch,
+        l2_weight=args.l2_weight,
+        classifier_weight=args.classifier_weight,
+        mse_loss=args.mse_loss
+    )
+
+
+if __name__ == '__main__':
+    main()

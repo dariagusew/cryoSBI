@@ -388,8 +388,7 @@ def pretrain_image_embed(
     print(f"  Embedding dimension: {embedding_dim}")
     print(f"  MSE loss type: {mse_loss}")
     print(f"  L2 regularization weight: {l2_weight}")
-    if classifier_weight > 0.0:
-        print(f"  Classification loss weight: {classifier_weight}")
+    print(f"  Classification loss weight: {classifier_weight}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")

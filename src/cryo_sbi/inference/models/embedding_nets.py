@@ -616,13 +616,8 @@ class SpatialCryoEncoder(nn.Module):
                     padding=1,
                     bias=False
                 ),
-                nn.GroupNorm(
-                    # Ensure num_groups <= num_channels
-                    num_groups=min(gn_groups, out_channels),
-                    num_channels=out_channels
-                ),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Dropout2d(p=self.dropout_p)
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
             ])
 
             in_channels = out_channels
@@ -727,13 +722,8 @@ class SpatialCryoFFTEncoder(nn.Module):
                     padding=1,
                     bias=False
                 ),
-                nn.GroupNorm(
-                    # Ensure num_groups <= num_channels
-                    num_groups=min(gn_groups, out_channels),
-                    num_channels=out_channels
-                ),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Dropout2d(p=self.dropout_p)
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
             ])
 
             in_channels = out_channels
@@ -836,12 +826,8 @@ class SpatialCryoGaussFFTEncoder(nn.Module):
                     in_channels, out_channels,
                     kernel_size=4, stride=2, padding=1, bias=False
                 ),
-                nn.GroupNorm(
-                    num_groups=min(gn_groups, out_channels),
-                    num_channels=out_channels
-                ),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Dropout2d(p=self.dropout_p)
+                nn.BatchNorm2d(out_channels),
+                nn.LeakyReLU(0.2, inplace=True)
             ])
             in_channels = out_channels
 

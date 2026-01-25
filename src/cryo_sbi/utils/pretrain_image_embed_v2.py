@@ -131,7 +131,7 @@ class SpatialCryoDecoder(nn.Module):
             layers.extend([
                 nn.ConvTranspose2d(in_channels, out_channels,
                                  kernel_size=4, stride=2, padding=1, bias=False),
-                nn.GroupNorm(min(gn_groups, out_channels), out_channels),
+                nn.BatchNorm2d(out_channels),
                 nn.LeakyReLU(0.2, inplace=True)
             ])
             in_channels = out_channels

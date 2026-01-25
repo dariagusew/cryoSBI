@@ -574,24 +574,17 @@ class SpatialCryoEncoder(nn.Module):
         output_dimension (int): The dimensionality of the output latent embedding.
         D (int, optional): The side length of the input square images.
             Defaults to 128.
-        gn_groups (int, optional): The number of groups to use for Group
-            Normalization. Defaults to 8.
-        dropout_p (float, optional): The probability for the Dropout2d layers.
-            Defaults to 0.2.
     """
 
     def __init__(
         self,
         output_dimension: int,
-        D: int = 128,
-        gn_groups: int = 8,
-        dropout_p: float = 0.2
+        D: int = 128
     ):
         super().__init__()
 
         self.D = D
         self.output_dimension = output_dimension
-        self.dropout_p = dropout_p
 
         # Base channel dimension (CryoDRGN-style)
         ndf = 16
@@ -677,24 +670,17 @@ class SpatialCryoFFTEncoder(nn.Module):
         output_dimension (int): The dimensionality of the output latent embedding.
         D (int, optional): The side length of the input square images.
             Defaults to 128.
-        gn_groups (int, optional): The number of groups to use for Group
-            Normalization. Defaults to 8.
-        dropout_p (float, optional): The probability for the Dropout2d layers.
-            Defaults to 0.2.
     """
 
     def __init__(
         self,
         output_dimension: int,
-        D: int = 128,
-        gn_groups: int = 8,
-        dropout_p: float = 0.2
+        D: int = 128
     ):
         super().__init__()
 
         self.D = D
         self.output_dimension = output_dimension
-        self.dropout_p = dropout_p
 
         # FFT low-pass filter
         self._fft_filter = LowPassFilter(D, 25)
@@ -785,25 +771,19 @@ class SpatialCryoGaussFFTEncoder(nn.Module):
         output_dimension (int): The dimensionality of the output latent embedding.
         D (int, optional): The side length of the input square images.
             Defaults to 128.
-        gn_groups (int, optional): The number of groups for GroupNorm. Defaults to 8.
         initial_sigma (float, optional): The starting value for the filter's sigma.
             Defaults to 25.0.
-        dropout_p (float, optional): The probability for the Dropout2d layers.
-            Defaults to 0.2.
     """
     def __init__(
         self,
         output_dimension: int,
         D: int = 128,
-        gn_groups: int = 8,
-        initial_sigma: float = 25.0,
-        dropout_p: float = 0.2
+        initial_sigma: float = 25.0
     ):
         super().__init__()
 
         self.D = D
         self.output_dimension = output_dimension
-        self.dropout_p = dropout_p
 
         # --- Learnable Gaussian Filter Setup ---
         self.log_sigma = nn.Parameter(torch.tensor(math.log(initial_sigma)))

@@ -82,10 +82,10 @@ def build_nle_flow_model(config: dict, image_size: int, **embedding_kwargs) -> n
 
     try:
         embedding_x = partial(
-            EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM_X"], image_size, **embedding_kwargs
+            EMBEDDING_NETS[config["EMBEDDING_X"]], config["OUT_DIM_X"], image_size, **embedding_kwargs
         )
         embedding_theta = partial(
-            EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM_THETA"], image_size, **embedding_kwargs
+            EMBEDDING_NETS[config["EMBEDDING_THETA"]], config["OUT_DIM_THETA"], image_size, **embedding_kwargs
         )
     except KeyError:
         raise NotImplementedError(

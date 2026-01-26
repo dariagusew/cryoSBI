@@ -859,6 +859,16 @@ class SpatialCryoGaussFFTEncoder(nn.Module):
         x = self.output_norm(x)
         
         return x
+    
+@add_embedding("ESMFOLD")
+class ESMFOLD(nn.Module):
+
+
+
+
+    def forward():
+        
+        return x
 
 if __name__ == "__main__":
     pass

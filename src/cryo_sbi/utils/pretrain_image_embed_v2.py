@@ -3,8 +3,6 @@
 pretrain_image_embed_v2.py
 
 Simplified unsupervised pre-training of image encoder on synthetic data.
-Now includes an optional classifier head to enforce separation between
-different conformations in the latent space.
 
 This version trains on SYNTHETIC data only.
 
@@ -230,16 +228,11 @@ def count_parameters(model):
     encoder = sum(p.numel() for p in model.encoder.parameters())
     decoder = sum(p.numel() for p in model.decoder.parameters())
     
-    classifier = 0
-    if hasattr(model, 'classifier') and model.classifier is not None:
-        classifier = sum(p.numel() for p in model.classifier.parameters())
-
     return {
         'total': total,
         'trainable': trainable,
         'encoder': encoder,
-        'decoder': decoder,
-        'classifier': classifier
+        'decoder': decoder
     }
 
 
@@ -460,16 +453,12 @@ def pretrain_image_embed(
             }
             tq.set_postfix(postfix_dict)
             
-            # Detailed check every N epochs
+            # Check embeddings and detailed printout every N epochs
             if epoch % check_frequency == 0:
                 model.eval()
                 with torch.no_grad():
-                    # Check on last batch
-                    test_imgs = batch_images[:20]
-                    test_embs, test_recon = model(test_imgs)
-                    
-                    emb_std, emb_dist = check_embedding_health(test_embs, device)
-                    recon_error = F.mse_loss(test_recon.squeeze(1), test_imgs).item()
+                    # check embedding health
+                    emb_std, emb_dist = check_embedding_health(embeddings, device)
                 
                 history['emb_std'].append(emb_std)
                 history['emb_dist'].append(emb_dist)
@@ -478,7 +467,6 @@ def pretrain_image_embed(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
-                print(f"    Reconstruction error (test): {recon_error:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
                 
@@ -489,12 +477,11 @@ def pretrain_image_embed(
     print("\nComputing final embedding statistics...")
     model.eval()
     with torch.no_grad():
-        test_imgs = batch_images[:20]
-        final_embs, final_recon, _ = model(test_imgs)
+        final_embs, final_recon = model(batch_images)
         final_emb_std, final_emb_dist = check_embedding_health(final_embs, device)
     
     # Update history with final values
-    if not history['emb_std'] or (epochs - 1) % check_frequency != 0:
+    if (epochs - 1) % check_frequency != 0:
         history['emb_std'].append(final_emb_std)
         history['emb_dist'].append(final_emb_dist)
     
@@ -505,13 +492,15 @@ def pretrain_image_embed(
     
     final_loss = history['loss'][-1]
     final_recon = history['recon_loss'][-1]
-    final_std = history['emb_std'][-1] if history['emb_std'] else final_emb_std
-    final_dist = history['emb_dist'][-1] if history['emb_dist'] else final_emb_dist
+    final_l2 = history['l2_loss'][-1]
+    final_std = history['emb_std'][-1]
+    final_dist = history['emb_dist'][-1]
     
     print(f"\nFinal metrics:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
+    print(f"  L2 loss: {final_l2:.6f}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     

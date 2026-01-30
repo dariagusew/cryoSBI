@@ -162,7 +162,8 @@ def cryo_em_simulator(
     b_factor,
     amp,
     snr,
-    simulation_param
+    simulation_param,
+    noise_type
 ):
     """
     Simulates a batch of cryo-electron microscopy (cryo-EM) images of a set of given coarse-grained models.
@@ -177,6 +178,7 @@ def cryo_em_simulator(
         amp (torch.Tensor): The amplitude contrast of the CTF.
         snr (torch.Tensor): The signal-to-noise ratio of the simulated image.
         simulation_param  (dict): Dictionary of simulation parameters.
+        noise_type (str): noise type
 
     Returns:
         torch.Tensor: A tensor of the simulated (noisy) cryo-EM image.
@@ -203,20 +205,20 @@ def cryo_em_simulator(
     # special case of mixed noise
     if simulation_param["mixed_noise"]:
        # random selection of noise model
-       simulation_param["noise"] = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "empirical"])
+       noise_type = random.choice(["Poisson", "Poisson-MTF", "empirical"])
 
     # 3. Add noise
-    if simulation_param["noise"] == "Gaussian":
+    if noise_type == "Gaussian":
        image = add_Gaussian_noise(image, snr, simulation_param["mask"])
 
-    elif simulation_param["noise"] in ["Poisson", "Poisson-MTF"]:
+    elif noise_type in ["Poisson", "Poisson-MTF"]:
        # Prepare useful tensors
        mtf = None # MTF grid
        nps = None # NPS grid
        sf = torch.ones_like(snr) # scaling factor target SNR
 
        # Get pre-calculated values for noise model Poisson-MTF 
-       if simulation_param["noise"] == "Poisson-MTF":
+       if noise_type == "Poisson-MTF":
           mtf = simulation_param["mtf"]
           nps = simulation_param["nps"]
           sf = simulation_param["sf"].expand(snr.shape[0], 1, 1)
@@ -351,7 +353,8 @@ class CryoEmSimulator:
                 self._models,
                 batch_indices,
                 *batch_parameters,
-                self._simulation_param
+                self._simulation_param,
+                self._simulation_param["noise"]
             )
             images.append(batch_images.cpu())
 

@@ -255,7 +255,8 @@ def nle_train_no_saving(
                     b_factor.to(device, non_blocking=True),
                     amp.to(device, non_blocking=True),
                     snr.to(device, non_blocking=True),
-                    simulation_param 
+                    simulation_param,
+                    simulation_param["noise"]
                 )
                 
                 for _indices, _images in zip(

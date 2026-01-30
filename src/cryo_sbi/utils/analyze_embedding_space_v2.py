@@ -101,7 +101,8 @@ def generate_embeddings(encoder, image_config_path, num_images, batch_size, devi
                 b_factor.to(device, non_blocking=True),
                 amp.to(device, non_blocking=True),
                 snr.to(device, non_blocking=True),
-                simulation_param
+                simulation_param,
+                simulation_param["noise"]
             )
 
             embeddings = encoder(images)

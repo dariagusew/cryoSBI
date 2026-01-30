@@ -110,7 +110,8 @@ def generate_synthetic_images(image_config, models, n_images, device):
                 b_factor.to(device),
                 amp.to(device),
                 snr.to(device),
-                simulation_param 
+                simulation_param,
+                simulation_param["noise"]
             )
             
             all_images.append(images.cpu())

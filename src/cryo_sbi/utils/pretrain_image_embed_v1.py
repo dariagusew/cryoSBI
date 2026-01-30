@@ -682,7 +682,8 @@ def pretrain_image_embed(
                         b_factor.to(device, non_blocking=True),
                         amp.to(device, non_blocking=True),
                         snr.to(device, non_blocking=True),
-                        simulation_param
+                        simulation_param,
+                        simulation_param["noise"]
                     )
                 
                 if training_mode in ['real', 'mixed']:

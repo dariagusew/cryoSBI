@@ -274,11 +274,6 @@ def cl_pretrain_image_embed():
     parser.add_argument('--embedding_dim', type=int, default=16,
                        help='Output dimension of the embedding network (default: 16)')
 
-    # MSE loss type
-    parser.add_argument('--mse_loss', type=str, default='noisy',
-                       choices=['clean', 'noisy'],
-                       help='Images to use for MSE loss (default: noisy)')
-
     # --- Training Hyperparameters ---
     parser.add_argument('--epochs', type=int, default=100,
                        help='Number of training epochs (default: 100)')
@@ -288,9 +283,6 @@ def cl_pretrain_image_embed():
                        help='Learning rate for the AdamW optimizer (default: 2e-4)')
     parser.add_argument('--l2_weight', type=float, default=0.0,
                        help='Weight for L2 regularization on embeddings (default: 0.0)')
-    parser.add_argument('--classifier_weight', type=float, default=0.0,
-                       help='Weight for the classification loss. Set > 0 to enable. A good starting '
-                            'point for noisy images is ~0.4 (default: 0.0)')
 
     # --- I/O and Checkpoints ---
     parser.add_argument('--save_path', type=str, default='pretrained_image_embed.pt',
@@ -345,9 +337,7 @@ def cl_pretrain_image_embed():
         save_path=args.save_path,
         check_frequency=args.check_frequency,
         n_batches_per_epoch=args.n_batches_per_epoch,
-        l2_weight=args.l2_weight,
-        classifier_weight=args.classifier_weight,
-        mse_loss=args.mse_loss
+        l2_weight=args.l2_weight
     )
 
     print(f"\n✅ Pre-training complete!")

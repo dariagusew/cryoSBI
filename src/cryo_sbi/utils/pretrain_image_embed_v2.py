@@ -236,6 +236,52 @@ def count_parameters(model):
     }
 
 
+def generate_validation_set(prior_loader, models, simulation_param, val_size, device):
+    """
+    Generates a fixed set of validation images with a specific noise model.
+    """
+    print(f"\nGenerating {val_size} validation images with Gaussian noise...")
+    
+    val_images = []
+    generated_count = 0
+    val_iter = iter(prior_loader)
+
+    with tqdm(total=val_size, desc="  Generating val set") as pbar:
+        while generated_count < val_size:
+            try:
+                parameters = next(val_iter)
+            except StopIteration:
+                val_iter = iter(prior_loader) # Reset if we run out
+                parameters = next(val_iter)
+            
+            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
+            
+            images, _ = cryo_em_simulator(
+                models,
+                indices.to(device, non_blocking=True),
+                quaternions.to(device, non_blocking=True),
+                shift.to(device, non_blocking=True),
+                defocus.to(device, non_blocking=True),
+                b_factor.to(device, non_blocking=True),
+                amp.to(device, non_blocking=True),
+                snr.to(device, non_blocking=True),
+                simulation_param,
+                "Gaussian"
+            )
+            
+            val_images.append(images)
+            generated_count += len(images)
+            pbar.update(len(images))
+
+    # Concatenate all generated images
+    all_images = torch.cat(val_images, dim=0)
+    # Compute memory
+    val_mem_gb = all_images.nelement() * all_images.element_size() / 1024**3
+
+    print(f"✅ Validation set created with {len(all_images)} images, consuming {val_mem_gb:.2f} GB of VRAM.")
+    return all_images
+
+
 # ============================================================================
 # MAIN TRAINING FUNCTION
 # ============================================================================
@@ -308,7 +354,7 @@ def pretrain_image_embed(
         num_workers=4
     )
     synthetic_iter = iter(synthetic_loader)
- 
+
     # Build or load model
     print(f"\nBuilding model with {embedding_name}...")
     try:
@@ -349,6 +395,12 @@ def pretrain_image_embed(
     # Setup simulation parameters
     simulation_param = create_simulation_param(image_config, models, device=device)
 
+    # Generate a fixed validation set before training loop
+    n_val_images = 10 * simulation_batch_size
+    validation_images = generate_validation_set(
+        synthetic_loader, models, simulation_param, n_val_images, device
+    )
+
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
@@ -359,6 +411,7 @@ def pretrain_image_embed(
     print(f"  Simulation batch size: {simulation_batch_size}")
     print(f"  Batches per epoch: {n_batches_per_epoch}")
     print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
+    print(f"  Validation samples: {len(validation_images):,}")
     print("="*70)
     
     # Training history
@@ -366,6 +419,7 @@ def pretrain_image_embed(
         'loss': [],
         'recon_loss': [],
         'l2_loss': [],
+        'val_loss' : [],
         'emb_std': [],
         'emb_dist': []
     }
@@ -444,12 +498,25 @@ def pretrain_image_embed(
             history['loss'].append(avg_loss)
             history['recon_loss'].append(avg_recon_loss)
             history['l2_loss'].append(avg_l2_loss)
+
+            # Validation step at the end of each epoch
+            model.eval()
+            with torch.no_grad():
+                 val_embeddings, val_reconstruction = model(validation_images)
+                 val_loss = F.mse_loss(val_reconstruction.squeeze(1), validation_images)
+                 val_loss = val_loss.item()
+
+            # add to dictionary
+            history['val_loss'].append(val_loss)
+            # Set back to training mode
+            model.train()
             
             # Update progress bar
             postfix_dict = {
                 "loss": f"{avg_loss:.4f}",
                 "recon": f"{avg_recon_loss:.4f}",
-                "l2": f"{avg_l2_loss:.4f}"
+                "l2": f"{avg_l2_loss:.4f}",
+                "val_recon": f"{val_loss:.4f}"
             }
             tq.set_postfix(postfix_dict)
             
@@ -467,6 +534,7 @@ def pretrain_image_embed(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
+                print(f"    Validation reconstruction loss: {val_loss:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
                 
@@ -493,6 +561,7 @@ def pretrain_image_embed(
     final_loss = history['loss'][-1]
     final_recon = history['recon_loss'][-1]
     final_l2 = history['l2_loss'][-1]
+    final_valid = history['val_loss'][-1]
     final_std = history['emb_std'][-1]
     final_dist = history['emb_dist'][-1]
     
@@ -501,6 +570,7 @@ def pretrain_image_embed(
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
     print(f"  L2 loss: {final_l2:.6f}")
+    print(f"  Validation reconstruction loss: {final_valid:.6f}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     

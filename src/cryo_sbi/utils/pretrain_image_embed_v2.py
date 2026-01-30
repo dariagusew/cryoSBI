@@ -15,7 +15,6 @@ Usage (with classification loss):
         --embedding_dim 16 \
         --epochs 100 \
         --batch_size 256 \
-        --classifier_weight 0.5
 
 Usage (reconstruction only):
     python pretrain_image_embed.py \
@@ -24,7 +23,6 @@ Usage (reconstruction only):
         --embedding_dim 16 \
         --epochs 100 \
         --batch_size 256 \
-        --classifier_weight 0.0
 """
 
 import argparse
@@ -170,15 +168,14 @@ class SpatialCryoDecoder(nn.Module):
 
 class ImageEmbedPretrainModel(nn.Module):
     """
-    Image encoder + decoder for pretraining, with an optional classifier head.
+    Image encoder + decoder for pretraining
     """
-    def __init__(self, embedding_name, embedding_dim, image_size, n_classes=None):
+    def __init__(self, embedding_name, embedding_dim, image_size):
         super().__init__()
         
         self.embedding_name = embedding_name
         self.embedding_dim = embedding_dim
         self.image_size = image_size
-        self.n_classes = n_classes
         
         # Create encoder based on embedding_name
         self.encoder = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size)
@@ -192,13 +189,6 @@ class ImageEmbedPretrainModel(nn.Module):
            self.decoder = SimpleDecoder(embedding_dim, image_size)
            print(f"  Decoder: SimpleDecoder")
 
-        # Add Classifier Head
-        if n_classes is not None and n_classes > 0:
-            self.classifier = nn.Linear(embedding_dim, n_classes)
-            print(f"  Classifier Head: Enabled for {n_classes} classes")
-        else:
-            self.classifier = None
-            print(f"  Classifier Head: Disabled")
     
     def forward(self, x):
         """
@@ -207,17 +197,11 @@ class ImageEmbedPretrainModel(nn.Module):
         Returns:
             embeddings: [B, embedding_dim]
             reconstruction: [B, 1, H, W]
-            logits: [B, n_classes] or None
         """
         embeddings = self.encoder(x)
         reconstruction = self.decoder(embeddings)
         
-        # Get classification logits
-        logits = None
-        if self.classifier is not None:
-            logits = self.classifier(embeddings)
-        
-        return embeddings, reconstruction, logits
+        return embeddings, reconstruction
 
 
 # ============================================================================
@@ -276,12 +260,10 @@ def pretrain_image_embed(
     save_path: str = 'pretrained_image_embed.pt',
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
-    l2_weight: float = 0.0,
-    classifier_weight: float = 0.0,
-    mse_loss: str = 'noisy'
+    l2_weight: float = 0.0
 ):
     """
-    Unsupervised pre-training on synthetic data with optional classification loss.
+    Unsupervised pre-training on synthetic data
     
     Args:
         image_config_path: Path to image config JSON
@@ -297,8 +279,6 @@ def pretrain_image_embed(
         check_frequency: How often to print detailed stats
         n_batches_per_epoch: Number of simulation batches per epoch
         l2_weight: Weight for L2 regularization on embeddings
-        classifier_weight: Weight for classification loss on synthetic data (0 to disable)
-        mse_loss: Compare against noisy or clean images
 
     Returns:
         model: Trained model
@@ -342,8 +322,7 @@ def pretrain_image_embed(
         model = ImageEmbedPretrainModel(
             embedding_name, 
             embedding_dim, 
-            image_size,
-            n_classes=n_conformations if classifier_weight > 0 else None
+            image_size
         ).to(device)
     except ValueError as e:
         print(f"\n❌ Error: {e}")
@@ -370,25 +349,17 @@ def pretrain_image_embed(
     print(f"  Total parameters: {params['total']:,}")
     print(f"  Encoder parameters: {params['encoder']:,}")
     print(f"  Decoder parameters: {params['decoder']:,}")
-    if params['classifier'] > 0:
-        print(f"  Classifier parameters: {params['classifier']:,}")
     
     # Setup optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
-    # Setup loss for classifier
-    if classifier_weight > 0.0:
-        classifier_criterion = nn.CrossEntropyLoss()
-
     # Setup simulation parameters
     simulation_param = create_simulation_param(image_config, models, device=device)
 
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
-    print(f"  MSE loss type: {mse_loss}")
     print(f"  L2 regularization weight: {l2_weight}")
-    print(f"  Classification loss weight: {classifier_weight}")
     print(f"  Epochs: {epochs}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {lr}")
@@ -402,8 +373,6 @@ def pretrain_image_embed(
         'loss': [],
         'recon_loss': [],
         'l2_loss': [],
-        'class_loss': [],
-        'class_acc': [],
         'emb_std': [],
         'emb_dist': []
     }
@@ -419,9 +388,6 @@ def pretrain_image_embed(
             epoch_loss = 0
             epoch_recon_loss = 0
             epoch_l2_loss = 0
-            epoch_class_loss = 0
-            epoch_correct_preds = 0
-            epoch_total_preds = 0
             n_batches = 0
  
             for batch_idx in range(n_batches_per_epoch):
@@ -433,10 +399,9 @@ def pretrain_image_embed(
                     parameters = next(synthetic_iter)
 
                 (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-                labels = indices.round().long().squeeze(-1).to(device, non_blocking=True)
 
                 # get synthetic images
-                images, images_clean = cryo_em_simulator(
+                images, _ = cryo_em_simulator(
                     models,
                     indices.to(device, non_blocking=True),
                     quaternions.to(device, non_blocking=True),
@@ -445,42 +410,27 @@ def pretrain_image_embed(
                     b_factor.to(device, non_blocking=True),
                     amp.to(device, non_blocking=True),
                     snr.to(device, non_blocking=True),
-                    simulation_param
+                    simulation_param,
+                    simulation_param["noise"]
                 )
 
                 # Train on mini-batches
                 for i in range(0, len(images), batch_size):
                     batch_images = images[i:i+batch_size]
-                    batch_images_clean = images_clean[i:i+batch_size]
-                    batch_labels = labels[i:i+batch_size]
                     
                     optimizer.zero_grad()
                     
                     # Forward pass
-                    embeddings, reconstruction, logits = model(batch_images)
+                    embeddings, reconstruction = model(batch_images)
                     
                     # Reconstruction loss
-                    if mse_loss=='clean':
-                       recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images_clean) 
-                    else:
-                       recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
+                    recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
                     
                     # L2 regularization - per-sample norm
                     l2_loss = (torch.norm(embeddings, dim=1) ** 2).mean()
                     
-                    # Classification loss
-                    class_loss = torch.tensor(0.0, device=device)
-                    if classifier_weight > 0.0 and logits is not None:
-                        class_loss = classifier_criterion(logits, batch_labels)
-                        
-                        # Track accuracy
-                        with torch.no_grad():
-                            preds = torch.argmax(logits, dim=1)
-                            epoch_correct_preds += (preds == batch_labels).sum().item()
-                            epoch_total_preds += len(batch_labels)
-
                     # Total loss
-                    loss = recon_loss + l2_weight * l2_loss + classifier_weight * class_loss
+                    loss = recon_loss + l2_weight * l2_loss
                     
                     # Backward pass
                     loss.backward()
@@ -491,21 +441,16 @@ def pretrain_image_embed(
                     epoch_loss += loss.item()
                     epoch_recon_loss += recon_loss.item()
                     epoch_l2_loss += l2_loss.item()
-                    epoch_class_loss += class_loss.item()
                     n_batches += 1
             
             # Epoch statistics
             avg_loss = epoch_loss / n_batches
             avg_recon_loss = epoch_recon_loss / n_batches
             avg_l2_loss = epoch_l2_loss / n_batches
-            avg_class_loss = epoch_class_loss / n_batches
-            accuracy = (epoch_correct_preds / epoch_total_preds) if epoch_total_preds > 0 else 0.0
             
             history['loss'].append(avg_loss)
             history['recon_loss'].append(avg_recon_loss)
             history['l2_loss'].append(avg_l2_loss)
-            history['class_loss'].append(avg_class_loss)
-            history['class_acc'].append(accuracy)
             
             # Update progress bar
             postfix_dict = {
@@ -513,9 +458,6 @@ def pretrain_image_embed(
                 "recon": f"{avg_recon_loss:.4f}",
                 "l2": f"{avg_l2_loss:.4f}"
             }
-            if classifier_weight > 0.0:
-                postfix_dict["class"] = f"{avg_class_loss:.4f}"
-                postfix_dict["acc"] = f"{accuracy:.2%}"
             tq.set_postfix(postfix_dict)
             
             # Detailed check every N epochs
@@ -524,7 +466,7 @@ def pretrain_image_embed(
                 with torch.no_grad():
                     # Check on last batch
                     test_imgs = batch_images[:20]
-                    test_embs, test_recon, _ = model(test_imgs)
+                    test_embs, test_recon = model(test_imgs)
                     
                     emb_std, emb_dist = check_embedding_health(test_embs, device)
                     recon_error = F.mse_loss(test_recon.squeeze(1), test_imgs).item()
@@ -536,9 +478,6 @@ def pretrain_image_embed(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
-                if classifier_weight > 0.0:
-                    print(f"    Classification loss: {avg_class_loss:.4f}")
-                    print(f"    Classification accuracy: {accuracy:.2%}")
                 print(f"    Reconstruction error (test): {recon_error:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
@@ -573,11 +512,6 @@ def pretrain_image_embed(
     print(f"  Embedding: {embedding_name}")
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
-    if classifier_weight > 0.0:
-        final_class_loss = history['class_loss'][-1]
-        final_acc = history['class_acc'][-1]
-        print(f"  Classification loss: {final_class_loss:.6f}")
-        print(f"  Classification accuracy: {final_acc:.2%}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     
@@ -619,7 +553,7 @@ def pretrain_image_embed(
     torch.save(model.encoder.state_dict(), save_path)
     print(f"✅ Encoder weights: {save_path}")
     
-    # Save full model (encoder+decoder+classifier)
+    # Save full model (encoder+decoder)
     full_model_path = save_path.replace('.pt', '_full_model.pt')
     torch.save(model.state_dict(), full_model_path)
     print(f"✅ Full model (for resuming): {full_model_path}")
@@ -632,7 +566,6 @@ def pretrain_image_embed(
     history['encoder_params'] = params['encoder']
     history['decoder_params'] = params['decoder']
     history['l2_weight'] = l2_weight
-    history['classifier_weight'] = classifier_weight
     history['resumed_from'] = resume_from
     torch.save(history, history_path)
     print(f"✅ Training history: {history_path}")

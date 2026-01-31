@@ -96,7 +96,7 @@ def cl_nle_train_no_saving():
         "--train_device", action="store", type=str, required=False, default="cuda"
     )
     cl_parser.add_argument(
-        "--saving_freq", action="store", type=int, required=False, default=100
+        "--saving_freq", action="store", type=int, required=False, default=10
     )
     cl_parser.add_argument(
         "--simulation_batch_size",

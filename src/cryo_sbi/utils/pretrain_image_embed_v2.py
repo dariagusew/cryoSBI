@@ -255,7 +255,11 @@ def generate_validation_set(prior_loader, models, simulation_param, val_size, de
                 parameters = next(val_iter)
             
             (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-            
+
+            # change b_factors from 50.0 to 200.0
+            ndata = indices.shape[0]
+            b_factor = 50.0 + (200.0 - 50.0) * torch.rand(ndata, 1, 1, device=device)
+
             images, _ = cryo_em_simulator(
                 models,
                 indices.to(device, non_blocking=True),

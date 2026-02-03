@@ -226,6 +226,65 @@ def plot_snr_analysis(results, particles=None):
     return fig
 
 # ============================================================================
+# HIGH SNR IMAGES VIEWER
+# ============================================================================
+def plot_high_snr_grid(particles, snr_values, n_images=20, grid_shape=(4, 5)):
+    """
+    Create a grid visualization of the highest SNR images.
+    
+    Args:
+        particles: Array of particle images
+        snr_values: Array of SNR values corresponding to particles
+        n_images: Number of highest SNR images to display (default: 20)
+        grid_shape: Tuple (rows, cols) for the grid layout (default: 4x5)
+    
+    Returns:
+        matplotlib.figure.Figure: Figure containing the grid of images
+    """
+    # Get indices of particles with valid SNR values
+    valid_mask = np.isfinite(snr_values)
+    valid_indices = np.where(valid_mask)[0]
+    valid_snr = snr_values[valid_mask]
+    
+    # Get top n_images by SNR
+    top_indices = valid_indices[np.argsort(valid_snr)[-n_images:]][::-1]  # Sort descending
+    
+    rows, cols = grid_shape
+    fig = plt.figure(figsize=(16, 12))
+    
+    for i, particle_idx in enumerate(top_indices):
+        ax = fig.add_subplot(rows, cols, i + 1)
+        ax.imshow(particles[particle_idx], cmap='gray')
+        ax.set_title(f'SNR: {snr_values[particle_idx]:.4f}', fontsize=9)
+        ax.axis('off')
+    
+    plt.suptitle(f'Top {n_images} Particles by SNR', fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    
+    return fig
+
+
+def save_pdf_multi_page(output_path, figures, pdf_filename='snr_analysis.pdf'):
+    """
+    Save multiple matplotlib figures to a single PDF file with multiple pages.
+    
+    Args:
+        output_path: Path to output directory
+        figures: List of matplotlib figures
+        pdf_filename: Name of the output PDF file
+    """
+    from matplotlib.backends.backend_pdf import PdfPages
+    
+    pdf_path = output_path / pdf_filename
+    
+    with PdfPages(str(pdf_path)) as pdf:
+        for fig in figures:
+            pdf.savefig(fig, bbox_inches='tight')
+    
+    print(f"✓ Saved multi-page PDF to {pdf_path}")
+
+
+# ============================================================================
 # 6. MAIN ANALYSIS PIPELINE AND REPORTING
 # ============================================================================
 def print_snr_summary(snr_results: dict):
@@ -266,13 +325,23 @@ def run_analysis(args):
     snr_results = snr_analyzer.analyze_stack_gpu(particles, signal_mask, background_mask, batch_size=args.batch_size)
     
     if args.output:
+        # Generate first page: SNR analysis plots
         fig_snr = plot_snr_analysis(snr_results, particles)
-        fig_snr.savefig(args.output / 'snr_analysis.png', dpi=150)
+        
+        # Generate second page: Grid of top 20 SNR images
+        fig_grid = plot_high_snr_grid(particles, snr_results['snr'], n_images=20, grid_shape=(4, 5))
+        
+        # Save as multi-page PDF
+        save_pdf_multi_page(args.output, [fig_snr, fig_grid], 'snr_analysis.pdf')
+        
+        # Save data to CSV
         pd.DataFrame(snr_results).to_csv(args.output / 'snr_data_all.csv', index=False)
+        
+        plt.close('all')
+    
     print(f"  Analysis took {time.time() - start_time:.2f} seconds.")
 
     print_snr_summary(snr_results)
     
     del particles; gc.collect()
     if args.show_plots: print("Displaying plots..."); plt.show()
-

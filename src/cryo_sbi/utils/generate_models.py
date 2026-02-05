@@ -343,6 +343,118 @@ def get_martini_topology(resnames, beadnames):
 
     return topo
 
+def models_to_tensor_topology_inhomogeneous(
+        pdb_files,
+        output_models,
+        topo_type,
+        output_topology,
+        add_garbage_model
+    ):
+    """
+    Converts different model files in pdb format to a torch tensor and create topology,
+    handling PDB files with different numbers of atoms by padding with NaN values.
+    
+    Parameters
+    ----------
+    pdb_files : list
+        A list of PDB files to convert to a torch tensor.
+    output_models : str
+        The path to the output file for the models. Must be a .pt file.
+    topo_type : str
+        The type of topology ('allatom', 'oneatom', 'calvados3', 'martini3').
+    output_topology : str
+        The path to the output topology file. Must be a .pt file.
+    add_garbage_model : bool
+        Add a model to use as garbage collector
+    
+    Returns
+    -------
+    None
+    """
+    
+    # Initialize lists to store models data
+    pos_list = []
+    at_list = []
+    max_atoms = 0
+    
+    # First pass: find maximum number of atoms
+    for pdb in pdb_files:
+        u = mda.Universe(pdb)
+        atoms = u.select_atoms("not type H")
+        max_atoms = max(max_atoms, len(atoms))
+        at_list.append(atoms)
+    
+    # Second pass: extract positions and pad with NaN if necessary
+    for i, pdb in enumerate(pdb_files):
+        atoms = at_list[i]
+        
+        # Get positions
+        if topo_type in ["allatom", "calvados3", "martini3"]:
+            pos = atoms.positions
+        elif topo_type == "allatom_com":
+            pos = np.array([r.atoms.select_atoms("not type H").center_of_mass() for r in atoms.residues])
+        
+        # Pad with NaN if necessary
+        n_atoms = len(pos)
+        if n_atoms < max_atoms:
+            padding = np.full((max_atoms - n_atoms, 3), np.nan)
+            pos = np.vstack([pos, padding])
+        
+        pos_list.append(pos.T)
+    
+    # Convert list of numpy arrays to torch tensor [n_models, 3, n_atoms]
+    model = torch.tensor(np.array(pos_list), dtype=torch.float32)
+    
+    # Center models by subtracting the geometric center of each model
+    # Calculate center: mean along atoms dimension (dim=2), ignoring NaN values
+    with np.errstate(invalid='ignore'):
+        center = torch.nanmean(model, dim=2, keepdim=True)
+        model = model - center
+    
+    # Add model as garbage collector
+    if add_garbage_model:
+        model = torch.cat([model, model[-1].unsqueeze(0)], dim=0)
+    
+    # Save the tensor to the specified output file
+    torch.save(model, output_models)
+    print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
+    if add_garbage_model:
+        print(f"The last model is a garbage collector")
+    
+    # Prepare topology with per-model dimension
+    topo_list = []
+    
+    for i, atoms in enumerate(at_list):
+        if topo_type == "allatom":
+            atypes = [at.type for at in atoms]
+            topo = get_allatom_topology(atypes)
+        elif topo_type in ["allatom_com", "calvados3"]:
+            resnames = [r.resname for r in atoms.residues]
+            topo = get_calvados_topology(resnames)
+        elif topo_type == "martini3":
+            resnames = [at.residue.resname for at in atoms]
+            beadnames = [at.name for at in atoms]
+            topo = get_martini_topology(resnames, beadnames)
+        
+        # Pad topology with NaN if necessary
+        n_atoms = topo.shape[1]
+        if n_atoms < max_atoms:
+            padding = torch.full((2, max_atoms - n_atoms), np.nan, dtype=torch.float32)
+            topo = torch.cat([topo, padding], dim=1)
+        
+        topo_list.append(topo)
+    
+    # Stack topologies: [n_models, 2, n_atoms]
+    topo_stacked = torch.stack(topo_list, dim=0)
+    
+    # Add garbage model topology if needed
+    if add_garbage_model:
+        topo_stacked = torch.cat([topo_stacked, topo_stacked[-1].unsqueeze(0)], dim=0)
+    
+    # Save the tensor to the specified output file
+    torch.save(topo_stacked, output_topology)
+    print(f"Saved topology to {output_topology} in {topo_type.upper()} format with shape {topo_stacked.shape}")
+
 
 def models_to_tensor_topology(
         pdb_files,

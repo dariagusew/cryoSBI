@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from cryo_sbi.utils.generate_models import models_to_tensor
 from cryo_sbi.utils.generate_models import models_to_tensor_topology
+from cryo_sbi.utils.generate_models import models_to_tensor_topology_inhomogeneous
 from cryo_sbi.utils.estimate_param_simulation_from_star import estimate_param_simulation_RELION 
 from cryo_sbi.utils.estimate_snr_from_mrc import run_analysis
 from cryo_sbi.utils.process_mrc_stack import process_mrc_stack
@@ -95,7 +96,7 @@ def cl_models_to_tensor_topology():
     args = cl_parser.parse_args()
     
     # Call the main function
-    models_to_tensor_topology(
+    models_to_tensor_topology_inhomogeneous(
         pdb_files=args.pdb_files,
         output_models=args.output_models,
         topo_type=args.topo_type,

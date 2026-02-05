@@ -400,7 +400,7 @@ def pretrain_image_embed(
     simulation_param = create_simulation_param(image_config, models, device=device)
 
     # Generate a fixed validation set before training loop
-    n_val_images = 10 * simulation_batch_size
+    n_val_images = 2 * simulation_batch_size
     validation_images = generate_validation_set(
         synthetic_loader, models, simulation_param, n_val_images, device
     )
@@ -506,9 +506,14 @@ def pretrain_image_embed(
             # Validation step at the end of each epoch
             model.eval()
             with torch.no_grad():
-                 val_embeddings, val_reconstruction = model(validation_images)
-                 val_loss = F.mse_loss(val_reconstruction.squeeze(1), validation_images)
-                 val_loss = val_loss.item()
+                 val_loss = 0.0
+                 n_val_batches = 0
+                 for val_idx in range(0, len(validation_images), batch_size):
+                     val_batch = validation_images[val_idx:val_idx+batch_size]
+                     val_embeddings, val_reconstruction = model(val_batch)
+                     val_loss += F.mse_loss(val_reconstruction.squeeze(1), val_batch).item()
+                     n_val_batches += 1
+                 val_loss = val_loss / n_val_batches
 
             # add to dictionary
             history['val_loss'].append(val_loss)

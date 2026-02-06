@@ -83,12 +83,6 @@ def project_density(
     num_batch, _, num_atoms = coords.shape
     device, dtype = coords.device, coords.dtype
     max_num_model = models.shape[0]-1
-    
-    print(f"[DEBUG] models.shape: {models.shape}")
-    print(f"[DEBUG] sigma.shape: {sigma.shape}")
-    print(f"[DEBUG] sigmas.shape: {sigmas.shape}")
-    print(f"[DEBUG] coords.shape: {coords.shape}")
-    print(f"[DEBUG] num_batch: {num_batch}, num_atoms: {num_atoms}")
  
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
@@ -108,8 +102,6 @@ def project_density(
     # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
     
-    print(f"[DEBUG] coords_rot.shape: {coords_rot.shape}: {coords_rot}")
-    
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
 
@@ -122,9 +114,6 @@ def project_density(
         # Slice the rotated coordinates and sigma for the current batch
         coords_rot_batch = coords_rot[:, :, start_idx:end_idx]
         sigma_batch = sigmas[:, :, start_idx:end_idx]
-        
-        print(f"[DEBUG] Atom batch {i//atom_batch_size}: coords_rot_batch.shape: {coords_rot_batch.shape}")
-        print(f"[DEBUG] Atom batch {i//atom_batch_size}: sigma_batch.shape: {sigma_batch.shape}")
 
         dx_batch = grid.unsqueeze(0).unsqueeze(-1) - coords_rot_batch[:, 0, :].unsqueeze(1)
         amplitude_x = sigma_batch[:, 0, :].unsqueeze(1)  # Shape: (batch_size, 1, atom_batch_size)
@@ -140,10 +129,6 @@ def project_density(
 
         # Matrix multiplication to get 2D projection for this batch
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
-        
-        print(f"[DEBUG] Atom batch {i//atom_batch_size}: image_batch.shape: {image_batch.shape}")
-        print(f"[DEBUG] isnan in image {image_batch.isnan().sum()}")
-        
 
         # Accumulate the result
         final_image += torch.nan_to_num(image_batch, nan=0.0)
@@ -156,7 +141,5 @@ def project_density(
 
     # Apply (reshaped) mask 
     final_image = mask.view(-1, 1, 1) * final_image
-    
-    print(f"[DEBUG] final_image.shape: {final_image.shape}")
 
     return final_image

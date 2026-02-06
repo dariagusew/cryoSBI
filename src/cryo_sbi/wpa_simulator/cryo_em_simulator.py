@@ -1,3 +1,4 @@
+
 import json
 import numpy as np
 import torch
@@ -31,7 +32,14 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     if "TOPOLOGY" in image_config:
         # Load TOPOLOGY from file path
         topology_path = image_config["TOPOLOGY"]
-        simulation_param["sigma"] = torch.load(topology_path, map_location=device)
+        sigma_loaded = torch.load(topology_path, map_location=device)
+        # Ensure sigma has shape [num_models, 2, natoms]
+        if sigma_loaded.ndim == 2:
+            # Old format: [2, natoms] - expand to [num_models, 2, natoms]
+            simulation_param["sigma"] = sigma_loaded.unsqueeze(0).expand(models.shape[0], -1, -1)
+        else:
+            # New format: [num_models, 2, natoms]
+            simulation_param["sigma"] = sigma_loaded
 
     elif "SIGMA" in image_config:
         sigma_value = image_config["SIGMA"]
@@ -329,7 +337,9 @@ class CryoEmSimulator:
             and optionally the sampled parameters as a tuple of tensors.
         """
 
+        # sample parameters from priors (as many as the images to simulate)
         parameters = self._priors.sample((num_sim,))
+        
         indices = parameters[0] if indices is None else indices
         if indices is not None:
             assert isinstance(

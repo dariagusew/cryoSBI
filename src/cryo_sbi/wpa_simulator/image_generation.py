@@ -78,10 +78,17 @@ def project_density(
     index = index.round().long()
     # Get coordinates of selected models
     coords = models[index.flatten()]
+    sigmas = sigma[index.flatten()]
 
     num_batch, _, num_atoms = coords.shape
     device, dtype = coords.device, coords.dtype
     max_num_model = models.shape[0]-1
+    
+    print(f"[DEBUG] models.shape: {models.shape}")
+    print(f"[DEBUG] sigma.shape: {sigma.shape}")
+    print(f"[DEBUG] sigmas.shape: {sigmas.shape}")
+    print(f"[DEBUG] coords.shape: {coords.shape}")
+    print(f"[DEBUG] num_batch: {num_batch}, num_atoms: {num_atoms}")
  
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
@@ -100,7 +107,9 @@ def project_density(
     
     # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
-
+    
+    print(f"[DEBUG] coords_rot.shape: {coords_rot.shape}")
+    
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
 
@@ -112,20 +121,27 @@ def project_density(
         
         # Slice the rotated coordinates and sigma for the current batch
         coords_rot_batch = coords_rot[:, :, start_idx:end_idx]
-        sigma_batch = sigma[:, start_idx:end_idx]
+        sigma_batch = sigmas[:, :, start_idx:end_idx]
+        
+        print(f"[DEBUG] Atom batch {i//atom_batch_size}: coords_rot_batch.shape: {coords_rot_batch.shape}")
+        print(f"[DEBUG] Atom batch {i//atom_batch_size}: sigma_batch.shape: {sigma_batch.shape}")
 
-        # Compute Gaussian in x direction for the batch
-        # Shape: (num_batch, num_pixels, atom_batch_size)
         dx_batch = grid.unsqueeze(0).unsqueeze(-1) - coords_rot_batch[:, 0, :].unsqueeze(1)
-        gauss_x_batch = sigma_batch[0, :].view(1, 1, -1) * torch.exp(sigma_batch[1, :].view(1, 1, -1) * dx_batch ** 2)
+        amplitude_x = sigma_batch[:, 0, :].unsqueeze(1)  # Shape: (batch_size, 1, atom_batch_size)
+        width_x = sigma_batch[:, 1, :].unsqueeze(1)      # Shape: (batch_size, 1, atom_batch_size)
+        gauss_x_batch = amplitude_x * torch.exp(width_x * dx_batch ** 2)
 
         # Compute Gaussian in y direction for the batch
-        # Shape: (num_batch, atom_batch_size, num_pixels)
+        # Shape: (batch_size, atom_batch_size, num_pixels)
         dy_batch = grid.unsqueeze(0).unsqueeze(0) - coords_rot_batch[:, 1, :].unsqueeze(-1)
-        gauss_y_batch = sigma_batch[0, :].view(1, -1, 1) * torch.exp(sigma_batch[1, :].view(1, -1, 1) * dy_batch ** 2)
+        amplitude_y = sigma_batch[:, 0, :].unsqueeze(-1)  # Shape: (batch_size, atom_batch_size, 1)
+        width_y = sigma_batch[:, 1, :].unsqueeze(-1)      # Shape: (batch_size, atom_batch_size, 1)
+        gauss_y_batch = amplitude_y * torch.exp(width_y * dy_batch ** 2)
 
         # Matrix multiplication to get 2D projection for this batch
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
+        
+        print(f"[DEBUG] Atom batch {i//atom_batch_size}: image_batch.shape: {image_batch.shape}")
         
         # Accumulate the result
         final_image += image_batch
@@ -138,5 +154,7 @@ def project_density(
 
     # Apply (reshaped) mask 
     final_image = mask.view(-1, 1, 1) * final_image
+    
+    print(f"[DEBUG] final_image.shape: {final_image.shape}")
 
     return final_image

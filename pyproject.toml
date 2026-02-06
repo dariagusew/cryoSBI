@@ -35,6 +35,7 @@ estimate_snr_from_mrc = "cryo_sbi.utils.command_line_tools:cl_estimate_snr_from_
 pretrain_image_embed = "cryo_sbi.utils.command_line_tools:cl_pretrain_image_embed"
 train_npe_model = "cryo_sbi.inference.command_line_tools:cl_npe_train_no_saving"
 train_nle_model = "cryo_sbi.inference.command_line_tools:cl_nle_train_no_saving"
+train_nle_model_with_validation = "cryo_sbi.inference.command_line_tools:cl_nle_train_no_saving_with_validation"
 run_inference_real_data = "cryo_sbi.utils.command_line_tools:cl_run_inference_real_data"
 run_inference_real_data_bayes = "cryo_sbi.utils.command_line_tools:cl_run_inference_real_data_bayes"
 infer_populations = "cryo_sbi.utils.command_line_tools:cli_pinfer_populations"

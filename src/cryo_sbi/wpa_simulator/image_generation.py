@@ -108,7 +108,7 @@ def project_density(
     # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
     
-    print(f"[DEBUG] coords_rot.shape: {coords_rot.shape}")
+    print(f"[DEBUG] coords_rot.shape: {coords_rot.shape}: {coords_rot}")
     
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
@@ -142,9 +142,11 @@ def project_density(
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
         
         print(f"[DEBUG] Atom batch {i//atom_batch_size}: image_batch.shape: {image_batch.shape}")
+        print(f"[DEBUG] isnan in image {image_batch.isnan().sum()}")
         
+
         # Accumulate the result
-        final_image += image_batch
+        final_image += torch.nan_to_num(image_batch, nan=0.0)
 
     # Define mask for garbage collector model
     if add_garbage:

@@ -1,5 +1,5 @@
 # "train_nle_model_with_validation.py"
-from typing import Union, Optional
+from typing import Tuple, Dict, Union, Optional
 import json
 import torch
 import numpy as np
@@ -238,6 +238,104 @@ def generate_synthetic_validation_set(prior_loader, models, simulation_param, va
     return all_images
 
 
+# =======================================================================================
+# NEW VALIDATION METRIC CALCULATION
+# =======================================================================================
+
+@torch.no_grad()
+def get_predictions_and_likelihoods(
+    estimator: torch.nn.Module,
+    images: torch.Tensor,
+    n_models: int,
+    batch_size: int = 256
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Helper function to compute model predictions and max-log-likelihoods for a set of images.
+
+    Args:
+        estimator: The trained NLE model.
+        images: A tensor of images to evaluate.
+        batch_size: The batch size for processing to manage memory.
+
+    Returns:
+        A tuple containing:
+        - A tensor of predicted class indices for each image.
+        - A tensor of the corresponding max-log-likelihood values.
+    """
+    all_preds = []
+    all_mlls = []
+
+    for batch in images.split(batch_size):
+        all_log_probs_batch = []
+        for i in range(n_models):
+            indices_i = torch.full((batch.shape[0], 1), i, device=batch.device)
+            log_prob_i = estimator(batch, indices_i)
+            all_log_probs_batch.append(log_prob_i.unsqueeze(-1))
+
+        # likelihood_log_probs shape: (batch_size, n_models)
+        likelihood_log_probs = torch.cat(all_log_probs_batch, dim=-1)
+
+        mlls, preds = torch.max(likelihood_log_probs, dim=-1)
+
+        all_preds.append(preds.cpu())
+        all_mlls.append(mlls.cpu())
+
+    return torch.cat(all_preds), torch.cat(all_mlls)
+
+
+@torch.no_grad()
+def evaluate_class_conditional_gap(
+    estimator: torch.nn.Module,
+    real_images: torch.Tensor,
+    sim_images: torch.Tensor,
+    n_models: int,
+    batch_size: int = 256
+) -> Tuple[float, Dict[int, float]]:
+    """
+    Calculates a domain gap metric robust to different class priors.
+    It compares the mean log-likelihood of real vs. sim images, conditioned on
+    the model's own prediction for each image.
+
+    Args:
+        estimator: The trained NLE model.
+        real_images: A fixed tensor of real images for validation.
+        sim_images: A fixed tensor of synthetic images for validation.
+        batch_size: Batch size for internal processing to manage VRAM.
+
+    Returns:
+        A tuple containing:
+        - The final aggregated domain gap score (mean of per-class discrepancies).
+        - A dictionary with the per-class discrepancy values.
+    """
+    estimator.eval()
+
+    # 1. Get predictions and likelihoods for both sets
+    print("\n  Evaluating likelihoods on real validation images...")
+    real_preds, real_mlls = get_predictions_and_likelihoods(estimator, real_images, n_models, batch_size)
+    print("  Evaluating likelihoods on synthetic validation images...")
+    sim_preds, sim_mlls = get_predictions_and_likelihoods(estimator, sim_images, n_models, batch_size)
+
+    # 2. & 3. Group by class and calculate mean differences
+    per_class_discrepancy = {}
+    for i in range(n_models):
+        real_lls_for_class_i = real_mlls[real_preds == i]
+        sim_lls_for_class_i = sim_mlls[sim_preds == i]
+
+        if len(real_lls_for_class_i) > 5 and len(sim_lls_for_class_i) > 5:
+            mean_real_ll = real_lls_for_class_i.mean().item()
+            mean_sim_ll = sim_lls_for_class_i.mean().item()
+            discrepancy = abs(mean_real_ll - mean_sim_ll)
+            per_class_discrepancy[i] = discrepancy
+
+    # 4. Aggregate the metric
+    if not per_class_discrepancy:
+        print("Warning: No classes had sufficient predictions from both real and sim domains to compute gap.")
+        return float('inf'), {}
+
+    final_score = np.mean(list(per_class_discrepancy.values()))
+    return final_score, per_class_discrepancy
+
+
 def load_model(
     train_config: str,
     model_state_dict: str,
@@ -366,7 +464,10 @@ def nle_train_no_saving_with_validation(
     else:
         models = torch.load(image_config["MODEL_FILE"]).to(device).to(torch.float32)
 
-    image_prior = get_image_priors(len(models) - 1, image_config, models, device="cpu")
+    # number of models
+    n_models = len(models)
+
+    image_prior = get_image_priors(n_models - 1, image_config, models, device="cpu")
     prior_loader = PriorLoader(
         image_prior, batch_size=simulation_batch_size, num_workers=n_workers
     )
@@ -452,7 +553,8 @@ def nle_train_no_saving_with_validation(
 
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
-    # validation_losses = [] # Will be used later
+    domain_gap_scores = []
+ 
 
     print("Training neural network:")
     estimator.train()
@@ -466,7 +568,7 @@ def nle_train_no_saving_with_validation(
                     b_factor, amp, snr,
                 ) = parameters
                 
-                # BUGFIX: Pass full simulation_param dict, not just the "noise" key
+                # simulate images 
                 images, _ = cryo_em_simulator(
                     models,
                     indices.to(device, non_blocking=True),
@@ -497,11 +599,27 @@ def nle_train_no_saving_with_validation(
             mean_train_loss = losses.mean().item()
             mean_loss.append(mean_train_loss)
 
-            # TODO: Add validation step here using real_val_images and syn_val_images
-            # if validation_mrc_path:
-            #     ...
-            
-            tq.set_postfix(loss=mean_train_loss)
+            # VALIDATION
+            postfix_dict = {'loss': mean_train_loss}
+            if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
+                # Set model to eval mode for validation
+                estimator.eval()
+                
+                # Calculate the domain gap metric
+                gap_score, per_class_gaps = evaluate_class_conditional_gap(
+                    estimator,
+                    real_val_images,
+                    syn_val_images,
+                    n_models
+                )
+                domain_gap_scores.append(gap_score)
+                print(f"\nEpoch {epoch} | Domain Gap Score: {gap_score:.4f}")
+                
+                # Set model back to train mode
+                estimator.train()
+                postfix_dict['domain_gap'] = gap_score
+
+            tq.set_postfix(postfix_dict)
 
             if epoch > 0 and epoch % saving_frequency == 0:
                 torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
@@ -509,5 +627,6 @@ def nle_train_no_saving_with_validation(
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
 
-    # if validation_losses:
-    #    torch.save(torch.tensor(validation_losses), validation_loss_file)
+    # Save validation scores if they were calculated
+    if domain_gap_scores:
+        torch.save(torch.tensor(domain_gap_scores), domain_gap_log_file)

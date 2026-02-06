@@ -418,11 +418,11 @@ def nle_train_no_saving_with_validation(
     saving_frequency: int = 100,
     simulation_batch_size: int = 2048,
     pretrained_embedding_path: Optional[str] = None,
-    freeze_embedding: bool = False,
+    freeze_embedding: bool = True,
     use_differential_lr: bool = False,
     embedding_lr_factor: float = 0.01,
     validation_mrc_path: Optional[str] = None,
-    validation_loss_file: str = 'validation_loss.pt',
+    domain_gap_log_file: str = 'domain_gap_scores.pt',
     n_validation_images: int = 10240,
 ) -> None:
     """
@@ -483,20 +483,19 @@ def nle_train_no_saving_with_validation(
         freeze_embedding=freeze_embedding,
         image_size = image_config["N_PIXELS"]
     )
- 
+
+
+    # Setup validation sets
     if validation_mrc_path:
         print("\n--- Setting up validation ---")
         try:
+            # Re-using the functions from the previous step which are correct
             real_val_images = generate_real_validation_set(
-                validation_mrc_path,
-                n_validation_images,
-                n_workers,
-                device
+                validation_mrc_path, n_validation_images, n_workers, device
             )
             syn_val_images = generate_synthetic_validation_set(
                 prior_loader, models, simulation_param, n_validation_images, device
             )
-
         except Exception as e:
             print(f"Warning: Could not create validation set: {e}. Training without validation.")
             validation_mrc_path = None # Disable validation if setup fails
@@ -561,7 +560,6 @@ def nle_train_no_saving_with_validation(
     with tqdm(range(epochs), unit="epoch") as tq:
         for epoch in tq:
             losses = []
-            # islice(prior_loader, 100) sets 100 simulation batches per epoch
             for parameters in islice(prior_loader, 100):
                 (
                     indices, quaternions, shift, defocus,
@@ -627,6 +625,6 @@ def nle_train_no_saving_with_validation(
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
 
-    # Save validation scores if they were calculated
-    if domain_gap_scores:
+    # Save validation scores - in case
+    if validation_mrc_path:
         torch.save(torch.tensor(domain_gap_scores), domain_gap_log_file)

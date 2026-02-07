@@ -229,6 +229,9 @@ def nle_train_no_saving(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
+    # Simple cosine Annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
     print("Training neural network:")
     estimator.train()
     with tqdm(range(epochs), unit="epoch") as tq:
@@ -280,6 +283,9 @@ def nle_train_no_saving(
 
             # Update progress bar
             tq.set_postfix(loss=losses.mean().item())
+
+            # scheduler step
+            scheduler.step()
 
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)

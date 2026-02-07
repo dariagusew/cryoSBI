@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Tuple, Optional
 import torch
 
 def gen_rot_matrix(quats: torch.Tensor) -> torch.Tensor:
@@ -49,8 +50,9 @@ def project_density(
     shift: torch.Tensor,
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
+    fluctuations: Optional[torch.Tensor] = None,
     add_garbage: bool = False,
-    atom_batch_size: int = 1024,
+    atom_batch_size: int = 1024
 ) -> torch.Tensor:
     """
     Generate 2D projections from a set of 3D coordinates using atom-batching
@@ -100,6 +102,13 @@ def project_density(
     
     # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
+
+    # Add fluctuations
+    if fluctuations is not None:
+       # select models based on index and reshape to enable broadcast
+       f = fluctuations[index.flatten()].unsqueeze(1)
+       # add noise - f is already divided by sqrt(3) when rmsf tensor is loaded
+       coords_rot = coords_rot + f * torch.randn_like(coords_rot)
 
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)

@@ -123,6 +123,16 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     if simulation_param["add_garbage_model"] and simulation_param["noise"]=="Gaussian":
        raise ValueError("Garbage collector supported only with Poisson and empirical noise models")
 
+    # add fluctuations
+    fluct_file = image_config.get("ADD_FLUCTUATIONS", None)
+    if isinstance(fluct_file, str):
+       # load tensor on device
+       simulation_param["fluctuations"] = torch.load(fluct_file, map_location=device)
+       # divide by sqrt(3)
+       simulation_param["fluctuations"] = simulation_param["fluctuations"] / np.sqrt(3.0)
+    else:
+       simulation_param["fluctuations"] = None
+
     # Log configuration
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
@@ -147,7 +157,9 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        print(f"  NPS noise file: {mrc_file}")
     if simulation_param["add_garbage_model"]:
        print(f"  Adding garbage collector model")
- 
+    if isinstance(fluct_file, str):
+       print(f"  Adding fluctuations from file: {fluct_file}")
+
     print("="*70)
     
     return simulation_param
@@ -193,6 +205,7 @@ def cryo_em_simulator(
         shift,
         simulation_param["num_pixels"], 
         simulation_param["pixel_size"],
+        simulation_param["fluctuations"],
         simulation_param["add_garbage_model"]
     )
 

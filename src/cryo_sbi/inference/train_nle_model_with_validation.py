@@ -168,7 +168,7 @@ class RealImageMRCDataset(Dataset):
             self._mrc_context.__exit__(None, None, None)
 
 
-def generate_real_validation_set(mrc_path: str, val_size: int, num_workers: int, device):
+def generate_real_validation_set(mrc_path: str, val_size: int, device):
     """
     Extract a fixed set of real validation images.
     """
@@ -182,7 +182,7 @@ def generate_real_validation_set(mrc_path: str, val_size: int, num_workers: int,
 
     dataloader = DataLoader(
         dataset, batch_size=val_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, drop_last=True
+        num_workers=0, pin_memory=True, drop_last=True
     )
     print(f"  Extracting one batch of {val_size} real images for validation.")
  
@@ -494,7 +494,7 @@ def nle_train_no_saving_with_validation(
         try:
             # Re-using the functions from the previous step which are correct
             real_val_images = generate_real_validation_set(
-                validation_mrc_path, n_validation_images, n_workers, device
+                validation_mrc_path, n_validation_images, device
             )
             syn_val_images = generate_synthetic_validation_set(
                 prior_loader, models, simulation_param, n_validation_images, device

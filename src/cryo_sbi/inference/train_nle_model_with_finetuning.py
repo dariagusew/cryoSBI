@@ -571,6 +571,8 @@ def nle_train_no_saving_with_finetuning(
     real_train_loader = None
     if real_data_finetune_fraction > 0.0:
         print(f"\n--- Setting up real data loader for fine-tuning phase (starting epoch {split_epoch}) ---")
+        if sample_indices:
+          print(f"  With probabilitic model assignment")
         real_train_dataset = RealImageMRCDataset(validation_mrc_path)
         real_train_loader = DataLoader(
             real_train_dataset,
@@ -593,7 +595,7 @@ def nle_train_no_saving_with_finetuning(
                 # PHASE 2: Fine-tuning on real data with pseudo-labels
                 tq.set_description("Fine-tuning (Real Data)")
                 
-                for _ in range(100): # Use same number of steps per epoch as simulation phase
+                for _ in range(400): # faster - no image generation
                     try:
                         real_images_batch = next(real_train_iter)
                     except StopIteration:

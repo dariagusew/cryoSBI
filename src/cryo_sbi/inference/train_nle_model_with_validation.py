@@ -239,101 +239,104 @@ def generate_synthetic_validation_set(prior_loader, models, simulation_param, va
 
 
 # =======================================================================================
-# NEW VALIDATION METRIC CALCULATION
+# CLASS-CONDITIONAL VALIDATION METRICS
 # =======================================================================================
 
 @torch.no_grad()
-def get_predictions_and_likelihoods(
+def get_per_image_scores(
     estimator: torch.nn.Module,
     images: torch.Tensor,
     n_models: int,
     batch_size: int = 256
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Helper function to compute model predictions and max-log-likelihoods for a set of images.
-
-    Args:
-        estimator: The trained NLE model.
-        images: A tensor of images to evaluate.
-        batch_size: The batch size for processing to manage memory.
-
-    Returns:
-        A tuple containing:
-        - A tensor of predicted class indices for each image.
-        - A tensor of the corresponding max-log-likelihood values.
+    Helper function to get per-image predictions, APE, and NAMLL scores.
     """
-    all_preds = []
-    all_mlls = []
-
+    all_preds, all_apes, all_namlls = [], [], []
+    # batch images
     for batch in images.split(batch_size):
-        all_log_probs_batch = []
+        # Get log-likelihoods
+        log_probs = []
         for i in range(n_models):
             indices_i = torch.full((batch.shape[0], 1), i, device=batch.device)
-            log_prob_i = estimator(batch, indices_i)
-            all_log_probs_batch.append(log_prob_i.unsqueeze(-1))
+            log_probs.append(estimator(batch, indices_i).unsqueeze(-1))
+        log_probs = torch.cat(log_probs, dim=-1)
 
-        # likelihood_log_probs shape: (batch_size, n_models)
-        likelihood_log_probs = torch.cat(all_log_probs_batch, dim=-1)
-
-        mlls, preds = torch.max(likelihood_log_probs, dim=-1)
-
+        # Get predictions
+        preds = torch.argmax(log_probs, dim=-1)
         all_preds.append(preds.cpu())
-        all_mlls.append(mlls.cpu())
 
-    return torch.cat(all_preds), torch.cat(all_mlls)
+        # Calculate NAMLL per image
+        namlls = -torch.logsumexp(log_probs, dim=-1)
+        all_namlls.append(namlls.cpu())
+
+        # Calculate APE per image
+        log_posterior = torch.log_softmax(log_probs, dim=-1)
+        apes = -torch.sum(torch.exp(log_posterior) * log_posterior, dim=-1)
+        all_apes.append(apes.cpu())
+
+    return torch.cat(all_preds), torch.cat(all_apes), torch.cat(all_namlls)
 
 
 @torch.no_grad()
-def evaluate_class_conditional_gap(
+def calculate_class_conditional_raw_metrics(
     estimator: torch.nn.Module,
     real_images: torch.Tensor,
     sim_images: torch.Tensor,
     n_models: int,
     batch_size: int = 256
-) -> Tuple[float, Dict[int, float]]:
+) -> Dict[str, float]:
     """
-    Calculates a domain gap metric robust to different class priors.
-    It compares the mean log-likelihood of real vs. sim images, conditioned on
-    the model's own prediction for each image.
+    Calculates the raw APE and NAMLL scores for both real and synthetic domains,
+    using class-conditional averaging to ensure they are robust to different
+    class priors in the validation sets.
 
-    Args:
-        estimator: The trained NLE model.
-        real_images: A fixed tensor of real images for validation.
-        sim_images: A fixed tensor of synthetic images for validation.
-        batch_size: Batch size for internal processing to manage VRAM.
-
-    Returns:
-        A tuple containing:
-        - The final aggregated domain gap score (mean of per-class discrepancies).
-        - A dictionary with the per-class discrepancy values.
+    Returns a dictionary with four key metrics:
+    - cc_ape_real: Class-Conditional Average Posterior Entropy on Real data.
+    - cc_ape_sim: Class-Conditional Average Posterior Entropy on Synthetic data.
+    - cc_namll_real: Class-Conditional Negative AMLL on Real data.
+    - cc_namll_sim: Class-Conditional Negative AMLL on Synthetic data.
     """
-    estimator.eval()
 
-    # 1. Get predictions and likelihoods for both sets
-    print("\n  Evaluating likelihoods on real validation images...")
-    real_preds, real_mlls = get_predictions_and_likelihoods(estimator, real_images, n_models, batch_size)
-    print("  Evaluating likelihoods on synthetic validation images...")
-    sim_preds, sim_mlls = get_predictions_and_likelihoods(estimator, sim_images, n_models, batch_size)
+    print("\nCalculating robust class-conditional raw validation metrics...")
+    # --- Step 1: Get per-image scores for all images ---
+    print("  Processing real images...")
+    real_preds, real_apes, real_namlls = get_per_image_scores(estimator, real_images, n_models, batch_size)
+    print("  Processing synthetic images...")
+    sim_preds, sim_apes, sim_namlls = get_per_image_scores(estimator, sim_images, n_models, batch_size)
 
-    # 2. & 3. Group by class and calculate mean differences
-    per_class_discrepancy = {}
+    # --- Step 2: Calculate per-class average scores for each domain ---
+    per_class_ape_real, per_class_ape_sim = [], []
+    per_class_namll_real, per_class_namll_sim = [], []
+
     for i in range(n_models):
-        real_lls_for_class_i = real_mlls[real_preds == i]
-        sim_lls_for_class_i = sim_mlls[sim_preds == i]
+        # Filter scores for the current predicted class in the REAL domain
+        real_apes_i = real_apes[real_preds == i]
+        real_namlls_i = real_namlls[real_preds == i]
+        if len(real_apes_i) > 5:
+            per_class_ape_real.append(real_apes_i.mean().item())
+            per_class_namll_real.append(real_namlls_i.mean().item())
 
-        if len(real_lls_for_class_i) > 5 and len(sim_lls_for_class_i) > 5:
-            mean_real_ll = real_lls_for_class_i.mean().item()
-            mean_sim_ll = sim_lls_for_class_i.mean().item()
-            discrepancy = abs(mean_real_ll - mean_sim_ll)
-            per_class_discrepancy[i] = discrepancy
+        # Filter scores for the current predicted class in the SIM domain
+        sim_apes_i = sim_apes[sim_preds == i]
+        sim_namlls_i = sim_namlls[sim_preds == i]
+        if len(sim_apes_i) > 5:
+            per_class_ape_sim.append(sim_apes_i.mean().item())
+            per_class_namll_sim.append(sim_namlls_i.mean().item())
 
-    # 4. Aggregate the metric
-    if not per_class_discrepancy:
-        print("Warning: No classes had sufficient predictions from both real and sim domains to compute gap.")
-        return float('inf'), {}
+    # --- Step 3: Aggregate by averaging the per-class scores ---
+    final_cc_ape_real = np.mean(per_class_ape_real) if per_class_ape_real else float('nan')
+    final_cc_ape_sim = np.mean(per_class_ape_sim) if per_class_ape_sim else float('nan')
+    final_cc_namll_real = np.mean(per_class_namll_real) if per_class_namll_real else float('nan')
+    final_cc_namll_sim = np.mean(per_class_namll_sim) if per_class_namll_sim else float('nan')
 
-    final_score = np.mean(list(per_class_discrepancy.values()))
-    return final_score, per_class_discrepancy
+    metrics = {
+        'ape_R':  final_cc_ape_real,
+        'ape_S':  final_cc_ape_sim,
+        'amll_R': final_cc_namll_real,
+        'amll_S': final_cc_namll_sim
+    }
+    return metrics
 
 
 def load_model(
@@ -422,7 +425,7 @@ def nle_train_no_saving_with_validation(
     use_differential_lr: bool = False,
     embedding_lr_factor: float = 0.01,
     validation_mrc_path: Optional[str] = None,
-    domain_gap_log_file: str = 'domain_gap_scores.pt',
+    validation_log_file: str = 'validation_scores.pt',
     n_validation_images: int = 10240,
 ) -> None:
     """
@@ -443,7 +446,7 @@ def nle_train_no_saving_with_validation(
         use_differential_lr: If True, use lower LR for embedding
         embedding_lr_factor: LR multiplier for embedding (if not frozen)
         validation_mrc_path (str, optional): Path to .mrc file for validation.
-        validation_loss_file (str, optional): Path to save validation loss history.
+        validation_log_file (str, optional): Path to save validation loss history.
         n_validation_images (int, optional): Number of real images for validation loss.
     """
     train_config = json.load(open(train_config))
@@ -552,8 +555,12 @@ def nle_train_no_saving_with_validation(
 
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
-    domain_gap_scores = []
- 
+    # Store all validation metrics for later analysis
+    validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
+
+
+    # set up scheduler
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     print("Training neural network:")
     estimator.train()
@@ -596,35 +603,55 @@ def nle_train_no_saving_with_validation(
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
             mean_loss.append(mean_train_loss)
-
-            # VALIDATION
             postfix_dict = {'loss': mean_train_loss}
+ 
+            # Validation, using per class metrics to avoid the effect of different class priors
+            # between real and simulated images
             if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
                 # Set model to eval mode for validation
                 estimator.eval()
-                
-                # Calculate the domain gap metric
-                gap_score, per_class_gaps = evaluate_class_conditional_gap(
+
+                # Call the single function to get all validation metrics
+                metrics = calculate_class_conditional_raw_metrics(
                     estimator,
                     real_val_images,
                     syn_val_images,
                     n_models
                 )
-                domain_gap_scores.append(gap_score)
-                print(f"\nEpoch {epoch} | Domain Gap Score: {gap_score:.4f}")
+                # Append each metric to its corresponding list
+                for key, value in metrics.items():
+                    validation_scores[key].append(value)
+
+                # Define variables for easy printout
+                ape_R_score = metrics['ape_R']
+                ape_S_score = metrics['ape_S']
+                amll_R_score = metrics['amll_R']
+                amll_S_score = metrics['amll_S']
+
+                print(f"\nEpoch {epoch} | APE_R score: {ape_R_score:.4f} APE_S score: {ape_S_score:.4f} AMLL_R score: {amll_R_score:.4f} AMLL_S score: {amll_S_score:.4f}")
                 
                 # Set model back to train mode
                 estimator.train()
-                postfix_dict['domain_gap'] = gap_score
+
+                # define postfix_dict for this epoch
+                postfix_dict['ape_R'] = ape_R_score
+                postfix_dict['ape_S'] = ape_S_score
+                postfix_dict['amll_R'] = amll_R_score
+                postfix_dict['amll_S'] = amll_S_score
 
             tq.set_postfix(postfix_dict)
 
-            if epoch > 0 and epoch % saving_frequency == 0:
+            if epoch % saving_frequency == 0:
                 torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
+
+            # scheduler step
+            scheduler.step()
 
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
 
     # Save validation scores - in case
     if validation_mrc_path:
-        torch.save(torch.tensor(domain_gap_scores), domain_gap_log_file)
+        # Save the whole dictionary for detailed analysis
+        torch.save(validation_scores, validation_log_file)
+        print(f"\nValidation scores saved to {validation_log_file}")

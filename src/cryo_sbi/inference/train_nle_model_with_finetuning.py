@@ -660,11 +660,16 @@ def nle_train_no_saving_with_finetuning(
                         )
 
 
+            # calculate mean loss across mini-batches
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
+            # add to list
             mean_loss.append(mean_train_loss)
+            # add to postfix
             postfix_dict = {'loss': mean_train_loss}
- 
+            # add current learning rate
+            postfix_dict['lr'] = scheduler.get_last_lr()[0]
+
             # Validation, using per class metrics to avoid the effect of different class priors
             # between real and simulated images
             if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
@@ -699,18 +704,21 @@ def nle_train_no_saving_with_finetuning(
                 postfix_dict['amll_R'] = amll_R_score
                 postfix_dict['amll_S'] = amll_S_score
 
+            # set postfix
             tq.set_postfix(postfix_dict)
 
+            # save model checkpoint
             if epoch % saving_frequency == 0:
                 torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
 
             # scheduler step
             scheduler.step()
 
+    # save final stuff
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
 
-    # Save validation scores - in case
+    # save validation scores - in case
     if validation_mrc_path:
         # Save the whole dictionary for detailed analysis
         torch.save(validation_scores, validation_log_file)

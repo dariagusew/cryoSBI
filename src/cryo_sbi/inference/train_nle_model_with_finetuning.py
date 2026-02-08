@@ -428,6 +428,7 @@ def nle_train_no_saving_with_finetuning(
     validation_log_file: str = 'validation_scores.pt',
     n_validation_images: int = 10240,
     real_data_finetune_fraction: float = 0.0,
+    sample_indices: bool = False
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -612,9 +613,16 @@ def nle_train_no_saving_with_finetuning(
                             log_probs.append(estimator(real_images_batch, indices_i).unsqueeze(-1))
                         
                         log_probs_cat = torch.cat(log_probs, dim=-1)
-                        # The inferred indices become our pseudo-labels
-                        inferred_indices = torch.argmax(log_probs_cat, dim=-1).unsqueeze(-1)
-                    
+
+                        # random assignment
+                        if sample_indices:
+                           probs = torch.softmax(log_probs_cat, dim=-1)
+                           # Sample a class for each image based on the probability distribution
+                           inferred_indices = torch.multinomial(probs, num_samples=1)
+                        else:
+                           # The inferred indices become our pseudo-labels
+                           inferred_indices = torch.argmax(log_probs_cat, dim=-1).unsqueeze(-1)
+
                     # Set model back to train mode for the optimization step
                     estimator.train()
                     

@@ -253,6 +253,7 @@ def cl_nle_train_no_saving_with_finetuning():
 
     cl_parser.add_argument("--validation_mrc_path", action="store", type=str, required=False, default=None)
 
+    cl_parser.add_argument('--sample_indices', action='store_true')
 
     args = cl_parser.parse_args()
 
@@ -273,7 +274,8 @@ def cl_nle_train_no_saving_with_finetuning():
         use_differential_lr=args.use_differential_lr,
         embedding_lr_factor=args.embedding_lr_factor,
         validation_mrc_path=args.validation_mrc_path,
-        real_data_finetune_fraction=args.real_data_fraction
+        real_data_finetune_fraction=args.real_data_fraction,
+        sample_indices=args.sample_indices
     )
 
 

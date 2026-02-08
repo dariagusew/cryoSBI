@@ -558,7 +558,6 @@ def nle_train_no_saving_with_validation(
     # Store all validation metrics for later analysis
     validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
 
-
     # set up scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 

@@ -38,7 +38,6 @@ from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
 
-
 # ============================================================================
 # DECODERS
 # ============================================================================
@@ -399,12 +398,6 @@ def pretrain_image_embed(
     # Setup simulation parameters
     simulation_param = create_simulation_param(image_config, models, device=device)
 
-    # Generate a fixed validation set before training loop
-    n_val_images = 2 * simulation_batch_size
-    validation_images = generate_validation_set(
-        synthetic_loader, models, simulation_param, n_val_images, device
-    )
-
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
@@ -415,7 +408,6 @@ def pretrain_image_embed(
     print(f"  Simulation batch size: {simulation_batch_size}")
     print(f"  Batches per epoch: {n_batches_per_epoch}")
     print(f"  Samples per epoch: {n_batches_per_epoch * simulation_batch_size:,}")
-    print(f"  Validation samples: {len(validation_images):,}")
     print("="*70)
     
     # Training history
@@ -423,11 +415,13 @@ def pretrain_image_embed(
         'loss': [],
         'recon_loss': [],
         'l2_loss': [],
-        'val_loss' : [],
         'emb_std': [],
         'emb_dist': []
     }
-    
+
+    # Simple cosine Annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
     # Training loop
     print("\nStarting training...\n")
 
@@ -503,29 +497,11 @@ def pretrain_image_embed(
             history['recon_loss'].append(avg_recon_loss)
             history['l2_loss'].append(avg_l2_loss)
 
-            # Validation step at the end of each epoch
-            model.eval()
-            with torch.no_grad():
-                 val_loss = 0.0
-                 n_val_batches = 0
-                 for val_idx in range(0, len(validation_images), batch_size):
-                     val_batch = validation_images[val_idx:val_idx+batch_size]
-                     val_embeddings, val_reconstruction = model(val_batch)
-                     val_loss += F.mse_loss(val_reconstruction.squeeze(1), val_batch).item()
-                     n_val_batches += 1
-                 val_loss = val_loss / n_val_batches
-
-            # add to dictionary
-            history['val_loss'].append(val_loss)
-            # Set back to training mode
-            model.train()
-            
             # Update progress bar
             postfix_dict = {
                 "loss": f"{avg_loss:.4f}",
                 "recon": f"{avg_recon_loss:.4f}",
                 "l2": f"{avg_l2_loss:.4f}",
-                "val_recon": f"{val_loss:.4f}"
             }
             tq.set_postfix(postfix_dict)
             
@@ -543,12 +519,13 @@ def pretrain_image_embed(
                 print(f"    Total loss: {avg_loss:.6f}")
                 print(f"    Reconstruction loss: {avg_recon_loss:.6f}")
                 print(f"    L2 loss: {avg_l2_loss:.4f}")
-                print(f"    Validation reconstruction loss: {val_loss:.6f}")
                 print(f"    Embedding std: {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
                 
                 model.train()
 
+            # scheduler step
+            scheduler.step()
     
     # Final embedding health check
     print("\nComputing final embedding statistics...")
@@ -570,7 +547,6 @@ def pretrain_image_embed(
     final_loss = history['loss'][-1]
     final_recon = history['recon_loss'][-1]
     final_l2 = history['l2_loss'][-1]
-    final_valid = history['val_loss'][-1]
     final_std = history['emb_std'][-1]
     final_dist = history['emb_dist'][-1]
     
@@ -579,7 +555,6 @@ def pretrain_image_embed(
     print(f"  Total loss: {final_loss:.6f}")
     print(f"  Reconstruction loss: {final_recon:.6f}")
     print(f"  L2 loss: {final_l2:.6f}")
-    print(f"  Validation reconstruction loss: {final_valid:.6f}")
     print(f"  Embedding std: {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
     

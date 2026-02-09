@@ -408,7 +408,7 @@ def load_model(
     return estimator
 
 
-def nle_train_no_saving_with_validation(
+def nle_train_no_saving_with_finetuning(
     image_config: str,
     train_config: str,
     epochs: int,
@@ -427,6 +427,8 @@ def nle_train_no_saving_with_validation(
     validation_mrc_path: Optional[str] = None,
     validation_log_file: str = 'validation_scores.pt',
     n_validation_images: int = 10240,
+    real_data_finetune_fraction: float = 0.0,
+    sample_indices: bool = False
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -448,6 +450,7 @@ def nle_train_no_saving_with_validation(
         validation_mrc_path (str, optional): Path to .mrc file for validation.
         validation_log_file (str, optional): Path to save validation loss history.
         n_validation_images (int, optional): Number of real images for validation loss.
+        real_data_finetune_fraction (float, optional): Fraction of final epochs to fine-tune on real data. Defaults to 0.0 (disabled).
     """
     train_config = json.load(open(train_config))
     check_train_params(train_config)
@@ -455,6 +458,12 @@ def nle_train_no_saving_with_validation(
 
     assert simulation_batch_size >= train_config["BATCH_SIZE"]
     assert simulation_batch_size % train_config["BATCH_SIZE"] == 0
+
+    if real_data_finetune_fraction > 0 and not validation_mrc_path:
+        raise ValueError("A `validation_mrc_path` must be provided to use real data fine-tuning.")
+    
+    split_epoch = int(epochs * (1.0 - real_data_finetune_fraction))
+
 
     if image_config["MODEL_FILE"].endswith("npy"):
         models = (
@@ -467,7 +476,6 @@ def nle_train_no_saving_with_validation(
     else:
         models = torch.load(image_config["MODEL_FILE"]).to(device).to(torch.float32)
 
-    # number of models
     n_models = len(models)
 
     image_prior = get_image_priors(n_models - 1, image_config, models, device="cpu")
@@ -488,11 +496,9 @@ def nle_train_no_saving_with_validation(
     )
 
 
-    # Setup validation sets
     if validation_mrc_path:
         print("\n--- Setting up validation ---")
         try:
-            # Re-using the functions from the previous step which are correct
             real_val_images = generate_real_validation_set(
                 validation_mrc_path, n_validation_images, device
             )
@@ -501,7 +507,7 @@ def nle_train_no_saving_with_validation(
             )
         except Exception as e:
             print(f"Warning: Could not create validation set: {e}. Training without validation.")
-            validation_mrc_path = None # Disable validation if setup fails
+            validation_mrc_path = None
         print("---------------------------\n")
 
     loss = NPELoss(estimator)
@@ -561,49 +567,125 @@ def nle_train_no_saving_with_validation(
     # set up scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
+    # loader for real images
+    real_train_loader = None
+    if real_data_finetune_fraction > 0.0:
+        print(f"\n--- Setting up real data loader for fine-tuning phase (starting epoch {split_epoch}) ---")
+        if sample_indices:
+          print(f"  With probabilitic model assignment")
+        real_train_dataset = RealImageMRCDataset(validation_mrc_path)
+        real_train_loader = DataLoader(
+            real_train_dataset,
+            batch_size=train_config["BATCH_SIZE"],
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+            drop_last=True
+        )
+        real_train_iter = iter(real_train_loader)
+        print("------------------------------------------------------------------------------------\n")
+
     print("Training neural network:")
     estimator.train()
     with tqdm(range(epochs), unit="epoch") as tq:
         for epoch in tq:
             losses = []
-            for parameters in islice(prior_loader, 100):
-                (
-                    indices, quaternions, shift, defocus,
-                    b_factor, amp, snr,
-                ) = parameters
-                
-                # simulate images 
-                images, _ = cryo_em_simulator(
-                    models,
-                    indices.to(device, non_blocking=True),
-                    quaternions.to(device, non_blocking=True),
-                    shift.to(device, non_blocking=True),
-                    defocus.to(device, non_blocking=True),
-                    b_factor.to(device, non_blocking=True),
-                    amp.to(device, non_blocking=True),
-                    snr.to(device, non_blocking=True),
-                    simulation_param,
-                    simulation_param["noise"] 
-                )
-                
-                for _indices, _images in zip(
-                    indices.split(train_config["BATCH_SIZE"]),
-                    images.split(train_config["BATCH_SIZE"]),
-                ):  
+
+            if epoch >= split_epoch and real_data_finetune_fraction > 0.0:
+                # PHASE 2: Fine-tuning on real data with pseudo-labels
+                tq.set_description("Fine-tuning (Real Data)")
+
+                # Freeze conformational embedding
+                if epoch == split_epoch:
+                   print("\nFreezing conformational embedding parameters...") 
+                   for param in estimator.theta_embedding.parameters():
+                       param.requires_grad = False
+
+                for _ in range(400): # faster - no image generation
+                    try:
+                        real_images_batch = next(real_train_iter)
+                    except StopIteration:
+                        real_train_iter = iter(real_train_loader)
+                        real_images_batch = next(real_train_iter)
+                    
+                    real_images_batch = real_images_batch.to(device, non_blocking=True)
+
+                    # Set model to eval mode for stable pseudo-label prediction
+                    estimator.eval()
+
+                    # Find the class X that maximizes p(image | X)
+                    with torch.no_grad():
+                        log_probs = []
+                        for i in range(n_models):
+                            indices_i = torch.full((real_images_batch.shape[0], 1), float(i), device=device)
+                            log_probs.append(estimator(real_images_batch, indices_i).unsqueeze(-1))
+                        
+                        log_probs_cat = torch.cat(log_probs, dim=-1)
+
+                        # random assignment
+                        if sample_indices:
+                           probs = torch.softmax(log_probs_cat, dim=-1)
+                           # Sample a class for each image based on the probability distribution
+                           inferred_indices = torch.multinomial(probs, num_samples=1)
+                        else:
+                           # The inferred indices become our pseudo-labels
+                           inferred_indices = torch.argmax(log_probs_cat, dim=-1).unsqueeze(-1)
+
+                    # Set model back to train mode for the optimization step
+                    estimator.train()
+
+                    # Calculate loss using real images and their pseudo-labels
                     losses.append(
                         step(
-                            loss(
-                                _images.to(device, non_blocking=True),
-                               _indices.to(device, non_blocking=True)
-                            )
+                           loss(real_images_batch, inferred_indices)
                         )
                     )
-            
+            else:
+                # PHASE 1: Standard training on simulated data
+                tq.set_description("Training (Simulated Data)")
+                for parameters in islice(prior_loader, 100):
+                    (
+                        indices, quaternions, shift, defocus,
+                        b_factor, amp, snr,
+                    ) = parameters
+                    
+                    images, _ = cryo_em_simulator(
+                        models,
+                        indices.to(device, non_blocking=True),
+                        quaternions.to(device, non_blocking=True),
+                        shift.to(device, non_blocking=True),
+                        defocus.to(device, non_blocking=True),
+                        b_factor.to(device, non_blocking=True),
+                        amp.to(device, non_blocking=True),
+                        snr.to(device, non_blocking=True),
+                        simulation_param,
+                        simulation_param["noise"] 
+                    )
+                    
+                    for _indices, _images in zip(
+                        indices.split(train_config["BATCH_SIZE"]),
+                        images.split(train_config["BATCH_SIZE"]),
+                    ):  
+                        losses.append(
+                            step(
+                                loss(
+                                    _images.to(device, non_blocking=True),
+                                   _indices.to(device, non_blocking=True)
+                                )
+                            )
+                        )
+
+
+            # calculate mean loss across mini-batches
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
+            # add to list
             mean_loss.append(mean_train_loss)
+            # add to postfix
             postfix_dict = {'loss': mean_train_loss}
- 
+            # add current learning rate
+            postfix_dict['lr'] = scheduler.get_last_lr()[0]
+
             # Validation, using per class metrics to avoid the effect of different class priors
             # between real and simulated images
             if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
@@ -638,18 +720,21 @@ def nle_train_no_saving_with_validation(
                 postfix_dict['amll_R'] = amll_R_score
                 postfix_dict['amll_S'] = amll_S_score
 
+            # set postfix
             tq.set_postfix(postfix_dict)
 
+            # save model checkpoint
             if epoch % saving_frequency == 0:
                 torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
 
             # scheduler step
             scheduler.step()
 
+    # save final stuff
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
 
-    # Save validation scores - in case
+    # save validation scores - in case
     if validation_mrc_path:
         # Save the whole dictionary for detailed analysis
         torch.save(validation_scores, validation_log_file)

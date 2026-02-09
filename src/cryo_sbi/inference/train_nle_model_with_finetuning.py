@@ -578,7 +578,7 @@ def nle_train_no_saving_with_finetuning(
             real_train_dataset,
             batch_size=train_config["BATCH_SIZE"],
             shuffle=True,
-            num_workers=n_workers,
+            num_workers=0,
             pin_memory=True,
             drop_last=True
         )
@@ -627,11 +627,43 @@ def nle_train_no_saving_with_finetuning(
 
                     # Set model back to train mode for the optimization step
                     estimator.train()
+
+                    # Rebalancing
+                    inferred_indices_flat = inferred_indices.squeeze(-1)
+                    unique_labels, counts = torch.unique(inferred_indices_flat, return_counts=True)
+
+                    # Proceed only if there's more than one class in the batch to balance
+                    if len(unique_labels) > 1:
+                        min_count = counts.min().item()
+                        
+                        # Build a list of indices to keep, ensuring each class has min_count samples
+                        indices_to_keep = []
+                        for label in unique_labels:
+                            # Get all indices for the current label
+                            label_indices = (inferred_indices_flat == label).nonzero().squeeze(-1)
+                            # Randomly select min_count of them
+                            perm = torch.randperm(len(label_indices), device=device)
+                            indices_to_keep.append(label_indices[perm[:min_count]])
+                        
+                        # Concatenate the indices to form the final selection
+                        final_indices = torch.cat(indices_to_keep)
+                        
+                        # Create the balanced sub-batch
+                        balanced_images = real_images_batch[final_indices]
+                        balanced_indices = inferred_indices[final_indices]
+                    else:
+                        # If the batch has only one class, no balancing is needed. Use it as is.
+                        balanced_images = real_images_batch
+                        balanced_indices = inferred_indices
                     
+                    # Skip training step if the balanced batch is too small to be useful
+                    if len(balanced_images) < n_models: # Heuristic to avoid tiny batches
+                        continue
+
                     # Calculate loss using real images and their pseudo-labels
                     losses.append(
                         step(
-                            loss(real_images_batch, inferred_indices)
+                           loss(balanced_images, balanced_indices)
                         )
                     )
             else:

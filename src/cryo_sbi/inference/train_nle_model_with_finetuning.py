@@ -617,7 +617,7 @@ def nle_train_no_saving_with_finetuning(
                     with torch.no_grad():
                         log_probs = []
                         for i in range(n_models):
-                            indices_i = torch.full((real_images_batch.shape[0], 1), i, device=device)
+                            indices_i = torch.full((real_images_batch.shape[0], 1), float(i), device=device)
                             log_probs.append(estimator(real_images_batch, indices_i).unsqueeze(-1))
                         
                         log_probs_cat = torch.cat(log_probs, dim=-1)

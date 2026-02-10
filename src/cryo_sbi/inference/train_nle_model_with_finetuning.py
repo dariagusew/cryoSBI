@@ -514,16 +514,28 @@ def nle_train_no_saving_with_finetuning(
 
     if freeze_embedding:
         print("\n" + "="*70)
-        print("OPTIMIZER: TRAINING FLOW ONLY (EMBEDDING FROZEN)")
+        print("OPTIMIZER: TRAINING FLOW and THETA_EMBEDDING ONLY")
         print("="*70)
         print(f"Flow learning rate: {train_config['LEARNING_RATE']:.2e}")
+        print(f"Theta embedding learning rate: {train_config['LEARNING_RATE']:.2e}")
         print("="*70 + "\n")
 
-        optimizer = optim.AdamW(
-            estimator.nle.parameters(),
-            lr=train_config["LEARNING_RATE"],
-            weight_decay=0.001
-        )
+        optimizer = optim.AdamW([
+            {
+                'params': estimator.nle.parameters(),
+                'lr': train_config["LEARNING_RATE"],
+                'weight_decay': 0.001,
+                'name': 'flow'
+            },
+            {
+                'params': estimator.theta_embedding.parameters(),
+                'lr': train_config["LEARNING_RATE"],
+                'weight_decay': 0.001,
+                'name': 'theta_embedding'
+            }
+        ])
+
+
     elif use_differential_lr and pretrained_embedding_path is not None:
         flow_lr = train_config["LEARNING_RATE"]
         embedding_lr = flow_lr * embedding_lr_factor

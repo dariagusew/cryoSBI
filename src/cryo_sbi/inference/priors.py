@@ -447,10 +447,48 @@ def get_image_priors(
     )
 
     # Index prior
-    index_prior = zuko.distributions.BoxUniform(
-        lower=torch.tensor([-0.5], dtype=torch.float32, device=device),
-        upper=torch.tensor([max_index+0.5], dtype=torch.float32, device=device),
-    )
+    models_prior = image_config.get("MODELS_PRIOR", None)
+
+    # Load from file if string path provided
+    if isinstance(models_prior, str):
+        try:
+            with open(models_prior, 'r') as f:
+                content = f.read().strip()
+                # Try parsing as JSON first, then fall back to space/comma separated
+                try:
+                    import json
+                    models_prior = json.loads(content)
+                except json.JSONDecodeError:
+                    # Parse as whitespace or comma-separated numbers
+                    models_prior = [float(x) for x in content.replace(',', ' ').split()]
+        except FileNotFoundError:
+            raise FileNotFoundError(f"MODELS_PRIOR file not found: {models_prior}")
+        except ValueError as e:
+            raise ValueError(f"Could not parse MODELS_PRIOR file as list of numbers: {e}")
+
+    # Custom discrete prior from list
+    if isinstance(models_prior, list):
+        # Validate length
+        if len(models_prior) != max_index + 1:
+            raise ValueError(f"MODELS_PRIOR must have length {max_index + 1}, got {len(models_prior)}")
+        
+        # Check all positive numbers
+        if not all(isinstance(p, (float, int)) and p > 0 for p in models_prior):
+            raise ValueError("MODELS_PRIOR must contain only positive numbers")
+        
+        # Normalize to sum to 1
+        probs = torch.tensor(models_prior, dtype=torch.float32, device=device)
+        probs = probs / probs.sum()
+        
+        # Create categorical distribution
+        index_prior = torch.distributions.Categorical(probs=probs)
+
+    # Default uniform prior
+    else:
+        index_prior = zuko.distributions.BoxUniform(
+            lower=torch.tensor([-0.5], dtype=torch.float32, device=device),
+            upper=torch.tensor([max_index+0.5], dtype=torch.float32, device=device),
+        )
     
     # Quaternion prior
     # Check for preferred orientations
@@ -474,8 +512,16 @@ def get_image_priors(
     
     # Model Index
     print(f"  Model index prior:")
-    print(f"    Type: Uniform")
-    print(f"    Range: [0, {max_index}]")
+    
+    if isinstance(models_prior, str):
+        print(f"    Type: Custom from file '{models_prior}'")
+        print(f"    Probabilities: {probs.cpu().numpy()}")
+    elif isinstance(models_prior, list):
+        print(f"    Type: Custom from list")
+        print(f"    Probabilities: {models_prior}")
+    else:
+        print(f"    Type: Uniform")
+        print(f"    Range: [0, {max_index}]")
 
     # Orientations
     print(f"  Orientation prior:")

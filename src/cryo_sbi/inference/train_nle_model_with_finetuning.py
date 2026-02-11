@@ -15,7 +15,7 @@ from lampe.utils import GDStep
 from itertools import islice
 import gc
 from contextlib import contextmanager
-
+import copy
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.build_models import build_nle_flow_model
 from cryo_sbi.inference.validate_train_config import check_train_params
@@ -514,16 +514,28 @@ def nle_train_no_saving_with_finetuning(
 
     if freeze_embedding:
         print("\n" + "="*70)
-        print("OPTIMIZER: TRAINING FLOW ONLY (EMBEDDING FROZEN)")
+        print("OPTIMIZER: TRAINING FLOW and THETA_EMBEDDING ONLY")
         print("="*70)
         print(f"Flow learning rate: {train_config['LEARNING_RATE']:.2e}")
+        print(f"Theta embedding learning rate: {train_config['LEARNING_RATE']:.2e}")
         print("="*70 + "\n")
 
-        optimizer = optim.AdamW(
-            estimator.nle.parameters(),
-            lr=train_config["LEARNING_RATE"],
-            weight_decay=0.001
-        )
+        optimizer = optim.AdamW([
+            {
+                'params': estimator.nle.parameters(),
+                'lr': train_config["LEARNING_RATE"],
+                'weight_decay': 0.001,
+                'name': 'flow'
+            },
+            {
+                'params': estimator.theta_embedding.parameters(),
+                'lr': train_config["LEARNING_RATE"],
+                'weight_decay': 0.001,
+                'name': 'theta_embedding'
+            }
+        ])
+
+
     elif use_differential_lr and pretrained_embedding_path is not None:
         flow_lr = train_config["LEARNING_RATE"]
         embedding_lr = flow_lr * embedding_lr_factor
@@ -595,11 +607,19 @@ def nle_train_no_saving_with_finetuning(
                 # PHASE 2: Fine-tuning on real data with pseudo-labels
                 tq.set_description("Fine-tuning (Real Data)")
 
-                # Freeze conformational embedding
+                # Create a frozen teacher
                 if epoch == split_epoch:
-                   print("\nFreezing conformational embedding parameters...") 
-                   for param in estimator.theta_embedding.parameters():
+                   print("\nCreating and freezing a static Teacher model for pseudo-labeling")
+                   estimator_teacher = copy.deepcopy(estimator)
+                   # Teacher is always in eval mode
+                   estimator_teacher.eval()
+                   # Explicitly disable gradient tracking for all teacher parameters
+                   for param in estimator_teacher.parameters():
                        param.requires_grad = False
+                   # as well as for the theta embedding parameters
+                   print("\nFreezing conformational embedding parameters...")
+                   for param in estimator.theta_embedding.parameters():
+                        param.requires_grad = False
 
                 for _ in range(400): # faster - no image generation
                     try:
@@ -610,15 +630,12 @@ def nle_train_no_saving_with_finetuning(
                     
                     real_images_batch = real_images_batch.to(device, non_blocking=True)
 
-                    # Set model to eval mode for stable pseudo-label prediction
-                    estimator.eval()
-
                     # Find the class X that maximizes p(image | X)
                     with torch.no_grad():
                         log_probs = []
                         for i in range(n_models):
                             indices_i = torch.full((real_images_batch.shape[0], 1), float(i), device=device)
-                            log_probs.append(estimator(real_images_batch, indices_i).unsqueeze(-1))
+                            log_probs.append(estimator_teacher(real_images_batch, indices_i).unsqueeze(-1))
                         
                         log_probs_cat = torch.cat(log_probs, dim=-1)
 
@@ -630,9 +647,6 @@ def nle_train_no_saving_with_finetuning(
                         else:
                            # The inferred indices become our pseudo-labels
                            inferred_indices = torch.argmax(log_probs_cat, dim=-1).unsqueeze(-1)
-
-                    # Set model back to train mode for the optimization step
-                    estimator.train()
 
                     # Calculate loss using real images and their pseudo-labels
                     losses.append(

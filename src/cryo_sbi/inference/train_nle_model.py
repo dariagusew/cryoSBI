@@ -16,61 +16,8 @@ from cryo_sbi.inference.models.build_models import build_nle_flow_model
 from cryo_sbi.inference.validate_train_config import check_train_params
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
-from cryo_sbi.inference.validate_train_config import check_train_params
 import cryo_sbi.utils.image_utils as img_utils
 
-
-def generate_validation_set(prior_loader, models, simulation_param, val_size, device):
-    """
-    Generates a fixed set of validation images with a specific noise model.
-    """
-    print(f"\nGenerating {val_size} validation images with Gaussian noise...")
-    
-    val_images = []
-    val_indexes = []
-    generated_count = 0
-    val_iter = iter(prior_loader)
-
-    with tqdm(total=val_size, desc="  Generating val set") as pbar:
-        while generated_count < val_size:
-            try:
-                parameters = next(val_iter)
-            except StopIteration:
-                val_iter = iter(prior_loader) # Reset if we run out
-                parameters = next(val_iter)
-            
-            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-            # change b_factors from 50.0 to 200.0
-            ndata = indices.shape[0]
-            b_factor = 50.0 + (200.0 - 50.0) * torch.rand(ndata, 1, 1, device=device)
-
-            images, _ = cryo_em_simulator(
-                models,
-                indices.to(device, non_blocking=True),
-                quaternions.to(device, non_blocking=True),
-                shift.to(device, non_blocking=True),
-                defocus.to(device, non_blocking=True),
-                b_factor.to(device, non_blocking=True),
-                amp.to(device, non_blocking=True),
-                snr.to(device, non_blocking=True),
-                simulation_param,
-                "Gaussian"
-            )
-            
-            val_images.append(images)
-            val_indexes.append(indices.to(device))
-            generated_count += len(images)
-            pbar.update(len(images))
-
-    # Concatenate all generated images and indexes
-    all_images = torch.cat(val_images, dim=0)
-    all_indexes = torch.cat(val_indexes, dim=0)
-    # Compute memory
-    val_mem_gb = all_images.nelement() * all_images.element_size() / 1024**3
-
-    print(f"✅ Validation set created with {len(all_images)} images, consuming {val_mem_gb:.2f} GB of VRAM.")
-    return all_images, all_indexes
 
 def load_model(
     train_config: str,
@@ -213,12 +160,6 @@ def nle_train_no_saving(
     # load simulation parameters into dictionary
     simulation_param = create_simulation_param(image_config, models, device=device)
 
-    # Generate a fixed validation set before training loop
-    n_val_images = 5 * simulation_batch_size
-    validation_images, validation_indexes = generate_validation_set(
-        prior_loader, models, simulation_param, n_val_images, device
-    )
-
     # Load model with optional pretrained embedding
     estimator = load_model(
         train_config,
@@ -287,7 +228,9 @@ def nle_train_no_saving(
 
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
-    val_losses = []
+
+    # Simple cosine Annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     print("Training neural network:")
     estimator.train()
@@ -338,17 +281,11 @@ def nle_train_no_saving(
             if epoch % saving_frequency == 0:
                 torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
 
-            # Validation step at the end of each epoch 
-            estimator.eval()
-            with torch.no_grad():
-                 val_loss = loss(validation_images, validation_indexes)
-            val_losses.append(val_loss.item())
-            # Set back to training mode
-            estimator.train()
-
             # Update progress bar
-            tq.set_postfix(loss=losses.mean().item(), val_loss=val_loss.item())
+            tq.set_postfix(loss=losses.mean().item())
+
+            # scheduler step
+            scheduler.step()
 
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
-    torch.save(torch.tensor(val_losses), "val_"+loss_file)

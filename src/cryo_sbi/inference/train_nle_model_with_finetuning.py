@@ -239,7 +239,7 @@ def generate_synthetic_validation_set(prior_loader, models, simulation_param, va
 
 
 # =======================================================================================
-# CLASS-CONDITIONAL VALIDATION METRICS
+# VALIDATION METRICS
 # =======================================================================================
 
 @torch.no_grad()
@@ -262,24 +262,20 @@ def get_per_image_scores(
             log_probs.append(estimator(batch, indices_i).unsqueeze(-1))
         log_probs = torch.cat(log_probs, dim=-1)
 
-        # Get predictions
-        preds = torch.argmax(log_probs, dim=-1)
-        all_preds.append(preds.cpu())
-
         # Calculate NAMLL per image
         namlls = -torch.logsumexp(log_probs, dim=-1)
-        all_namlls.append(namlls.cpu())
+        all_namlls.append(namlls)
 
         # Calculate APE per image
         log_posterior = torch.log_softmax(log_probs, dim=-1)
         apes = -torch.sum(torch.exp(log_posterior) * log_posterior, dim=-1)
-        all_apes.append(apes.cpu())
+        all_apes.append(apes)
 
-    return torch.cat(all_preds), torch.cat(all_apes), torch.cat(all_namlls)
+    return torch.cat(all_apes), torch.cat(all_namlls)
 
 
 @torch.no_grad()
-def calculate_class_conditional_raw_metrics(
+def calculate_raw_metrics(
     estimator: torch.nn.Module,
     real_images: torch.Tensor,
     sim_images: torch.Tensor,
@@ -287,54 +283,33 @@ def calculate_class_conditional_raw_metrics(
     batch_size: int = 256
 ) -> Dict[str, float]:
     """
-    Calculates the raw APE and NAMLL scores for both real and synthetic domains,
-    using class-conditional averaging to ensure they are robust to different
-    class priors in the validation sets.
+    Calculates the raw APE and NAMLL scores for both real and synthetic domains.
 
     Returns a dictionary with four key metrics:
-    - cc_ape_real: Class-Conditional Average Posterior Entropy on Real data.
-    - cc_ape_sim: Class-Conditional Average Posterior Entropy on Synthetic data.
-    - cc_namll_real: Class-Conditional Negative AMLL on Real data.
-    - cc_namll_sim: Class-Conditional Negative AMLL on Synthetic data.
+    - ape_real: Average Posterior Entropy on Real data.
+    - ape_sim: Average Posterior Entropy on Synthetic data.
+    - namll_real: Negative AMLL on Real data.
+    - namll_sim: Negative AMLL on Synthetic data.
     """
 
-    print("\nCalculating robust class-conditional raw validation metrics...")
-    # --- Step 1: Get per-image scores for all images ---
+    print("\nCalculating raw validation metrics...")
+    # Step 1: Get per-image scores for all images
     print("  Processing real images...")
-    real_preds, real_apes, real_namlls = get_per_image_scores(estimator, real_images, n_models, batch_size)
+    real_apes, real_namlls = get_per_image_scores(estimator, real_images, n_models, batch_size)
     print("  Processing synthetic images...")
-    sim_preds, sim_apes, sim_namlls = get_per_image_scores(estimator, sim_images, n_models, batch_size)
+    sim_apes, sim_namlls = get_per_image_scores(estimator, sim_images, n_models, batch_size)
 
-    # --- Step 2: Calculate per-class average scores for each domain ---
-    per_class_ape_real, per_class_ape_sim = [], []
-    per_class_namll_real, per_class_namll_sim = [], []
-
-    for i in range(n_models):
-        # Filter scores for the current predicted class in the REAL domain
-        real_apes_i = real_apes[real_preds == i]
-        real_namlls_i = real_namlls[real_preds == i]
-        if len(real_apes_i) > 5:
-            per_class_ape_real.append(real_apes_i.mean().item())
-            per_class_namll_real.append(real_namlls_i.mean().item())
-
-        # Filter scores for the current predicted class in the SIM domain
-        sim_apes_i = sim_apes[sim_preds == i]
-        sim_namlls_i = sim_namlls[sim_preds == i]
-        if len(sim_apes_i) > 5:
-            per_class_ape_sim.append(sim_apes_i.mean().item())
-            per_class_namll_sim.append(sim_namlls_i.mean().item())
-
-    # --- Step 3: Aggregate by averaging the per-class scores ---
-    final_cc_ape_real = np.mean(per_class_ape_real) if per_class_ape_real else float('nan')
-    final_cc_ape_sim = np.mean(per_class_ape_sim) if per_class_ape_sim else float('nan')
-    final_cc_namll_real = np.mean(per_class_namll_real) if per_class_namll_real else float('nan')
-    final_cc_namll_sim = np.mean(per_class_namll_sim) if per_class_namll_sim else float('nan')
+    # Step 2: Calculate averages
+    ape_real   = torch.mean(real_apes).item()
+    ape_sim    = torch.mean(sim_apes).item()
+    namll_real = torch.mean(real_namlls).item()
+    namll_sim  = torch.mean(sim_namlls).item()
 
     metrics = {
-        'ape_R':  final_cc_ape_real,
-        'ape_S':  final_cc_ape_sim,
-        'amll_R': final_cc_namll_real,
-        'amll_S': final_cc_namll_sim
+        'ape_R':  ape_real,
+        'ape_S':  ape_sim,
+        'amll_R': namll_real,
+        'amll_S': namll_sim
     }
     return metrics
 
@@ -707,7 +682,7 @@ def nle_train_no_saving_with_finetuning(
                 estimator.eval()
 
                 # Call the single function to get all validation metrics
-                metrics = calculate_class_conditional_raw_metrics(
+                metrics = calculate_raw_metrics(
                     estimator,
                     real_val_images,
                     syn_val_images,

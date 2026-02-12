@@ -221,7 +221,7 @@ def plot_snr_analysis(results, particles=None):
     if particles is not None:
         indices = {'Low SNR': np.argmin(np.abs(snr - np.percentile(snr, 10))), 'Medium SNR': np.argmin(np.abs(snr - np.median(snr))), 'High SNR': np.argmin(np.abs(snr - np.percentile(snr, 90)))}
         for i, (label, idx) in enumerate(indices.items()):
-            ax = fig.add_subplot(gs[1, i]); ax.imshow(particles[idx], cmap='gray', vmin=4, vmax=4); ax.set_title(f'{label}\nSNR = {snr[idx]:.4f}'); ax.axis('off')
+            ax = fig.add_subplot(gs[1, i]); ax.imshow(particles[idx], cmap='gray', vmin=-4, vmax=4); ax.set_title(f'{label}\nSNR = {snr[idx]:.4f}'); ax.axis('off')
     plt.suptitle(f'SNR Analysis: {results["n_particles"]} Particles\nSNR = var(protein)/var(ice) where var(protein)=var(center)-var(ice)'); plt.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 

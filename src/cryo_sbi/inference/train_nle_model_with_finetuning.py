@@ -16,6 +16,7 @@ from itertools import islice
 import gc
 from contextlib import contextmanager
 import copy
+from torch.utils.data import Subset
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.build_models import build_nle_flow_model
 from cryo_sbi.inference.validate_train_config import check_train_params
@@ -313,6 +314,48 @@ def calculate_raw_metrics(
     }
     return metrics
 
+@torch.no_grad()
+def calculate_apes(
+    estimator: torch.nn.Module,
+    images: torch.Tensor,
+    n_models: int
+) -> torch.Tensor:
+    """
+    Efficiently calculates the Average Posterior Entropy (APE) for a batch of 2D images.
+
+    Args:
+        estimator (torch.nn.Module): The trained NLE model.
+        images (torch.Tensor): A batch of 2D images, of shape
+                               (batch_size, height, width).
+        n_models (int): The total number of conformational classes.
+
+    Returns:
+        torch.Tensor: A 1D tensor of APE scores of shape (batch_size,),
+                      moved to the CPU.
+    """
+    batch_size = images.shape[0]
+    device = images.device
+
+    # 1. Prepare inputs for a single, vectorized forward pass.
+    repeated_images = images.repeat_interleave(n_models, dim=0)
+
+    # Create a corresponding tensor of model indices.
+    repeated_indices = torch.arange(n_models, device=device).repeat(batch_size).unsqueeze(-1)
+
+    # 2. Perform a single forward pass to get log-likelihoods for all pairs.
+    # The output `log_probs_flat` will have shape (batch_size * n_models,).
+    log_probs_flat = estimator(repeated_images, repeated_indices)
+
+    # 3. Reshape the log-likelihoods to group them by the original image.
+    # Shape becomes: (batch_size, n_models)
+    log_probs = log_probs_flat.view(batch_size, n_models)
+
+    # 4. Calculate APE directly from the log-likelihoods.
+    log_posterior = torch.log_softmax(log_probs, dim=-1)
+    apes = -torch.sum(torch.exp(log_posterior) * log_posterior, dim=-1)
+
+    return apes
+
 
 def load_model(
     train_config: str,
@@ -439,7 +482,6 @@ def nle_train_no_saving_with_finetuning(
     
     split_epoch = int(epochs * (1.0 - real_data_finetune_fraction))
 
-
     if image_config["MODEL_FILE"].endswith("npy"):
         models = (
             torch.from_numpy(
@@ -548,8 +590,6 @@ def nle_train_no_saving_with_finetuning(
 
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
-    # Store all validation metrics for later analysis
-    validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
 
     # set up scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
@@ -560,17 +600,21 @@ def nle_train_no_saving_with_finetuning(
         print(f"\n--- Setting up real data loader for fine-tuning phase (starting epoch {split_epoch}) ---")
         if sample_indices:
           print(f"  With probabilitic model assignment")
+        # define dataset from MRC
         real_train_dataset = RealImageMRCDataset(validation_mrc_path)
+        # define loader
         real_train_loader = DataLoader(
             real_train_dataset,
             batch_size=train_config["BATCH_SIZE"],
-            shuffle=True,
+            shuffle=False,
             num_workers=0,
             pin_memory=True,
             drop_last=True
         )
-        real_train_iter = iter(real_train_loader)
         print("------------------------------------------------------------------------------------\n")
+        # Prepare validation metrics for later analysis
+        validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
+
 
     print("Training neural network:")
     estimator.train()
@@ -584,6 +628,10 @@ def nle_train_no_saving_with_finetuning(
 
                 # Create a frozen teacher
                 if epoch == split_epoch:
+                   print("\nFreezing conformational embedding parameters...")
+                   for param in estimator.theta_embedding.parameters():
+                        param.requires_grad = False
+
                    print("\nCreating and freezing a static Teacher model for pseudo-labeling")
                    estimator_teacher = copy.deepcopy(estimator)
                    # Teacher is always in eval mode
@@ -591,17 +639,50 @@ def nle_train_no_saving_with_finetuning(
                    # Explicitly disable gradient tracking for all teacher parameters
                    for param in estimator_teacher.parameters():
                        param.requires_grad = False
-                   # as well as for the theta embedding parameters
-                   print("\nFreezing conformational embedding parameters...")
-                   for param in estimator.theta_embedding.parameters():
-                        param.requires_grad = False
 
-                for _ in range(400): # faster - no image generation
+                # Selecting high-confidence images
+                print("\nSelecting high-confidence real images for fine-tuning...")
+                all_image_apes = []
+                with torch.no_grad():
+                    for real_images_batch in tqdm(real_train_loader, desc="  Calculating APE_R for all images"):
+                        batch_apes = calculate_apes(
+                           estimator_teacher,
+                           real_images_batch.to(device, non_blocking=True),
+                           n_models
+                        )
+                        all_image_apes.append(batch_apes)
+
+                all_image_apes = torch.cat(all_image_apes)
+
+                # Determine the number of images to select
+                N = 100*train_config["BATCH_SIZE"]
+                print(f"  Sorting images by APE_R and selecting the top {N} most confident examples.")
+
+                # Get the indices of the images with the lowest APE
+                sorted_indices = torch.argsort(all_image_apes)
+                top_N_indices = sorted_indices[:N]
+
+                # Create a Subset using these specific indices
+                finetune_dataset = Subset(real_train_dataset, top_N_indices.tolist())
+
+                # Create the final loader from this curated subset, with shuffling
+                fine_tune_loader = DataLoader(
+                    finetune_dataset,
+                    batch_size=train_config["BATCH_SIZE"],
+                    shuffle=True,
+                    num_workers=0,
+                    pin_memory=True,
+                    drop_last=True
+                )
+                fine_tune_iter = iter(fine_tune_loader)
+                print(f"✅ Created a new fine-tuning dataset with {len(finetune_dataset)} images.")
+
+                for _ in range(100):
                     try:
-                        real_images_batch = next(real_train_iter)
+                        real_images_batch = next(fine_tune_iter)
                     except StopIteration:
-                        real_train_iter = iter(real_train_loader)
-                        real_images_batch = next(real_train_iter)
+                        fine_tune_iter = iter(fine_tune_loader)
+                        real_images_batch = next(fine_tune_iter)
                     
                     real_images_batch = real_images_batch.to(device, non_blocking=True)
 
@@ -675,13 +756,12 @@ def nle_train_no_saving_with_finetuning(
             # add current learning rate
             postfix_dict['lr'] = scheduler.get_last_lr()[0]
 
-            # Validation, using per class metrics to avoid the effect of different class priors
-            # between real and simulated images
+            # Validation metrics
             if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
                 # Set model to eval mode for validation
                 estimator.eval()
 
-                # Call the single function to get all validation metrics
+                # Get all validation metrics
                 metrics = calculate_raw_metrics(
                     estimator,
                     real_val_images,

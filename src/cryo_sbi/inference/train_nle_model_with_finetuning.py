@@ -591,6 +591,9 @@ def nle_train_no_saving_with_finetuning(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
+    # Store all validation metrics for later analysis
+    validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
+
     # set up scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
@@ -612,9 +615,6 @@ def nle_train_no_saving_with_finetuning(
             drop_last=True
         )
         print("------------------------------------------------------------------------------------\n")
-        # Prepare validation metrics for later analysis
-        validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
-
 
     print("Training neural network:")
     estimator.train()
@@ -632,13 +632,13 @@ def nle_train_no_saving_with_finetuning(
                    for param in estimator.theta_embedding.parameters():
                         param.requires_grad = False
 
-                   print("\nCreating and freezing a static Teacher model for pseudo-labeling")
-                   estimator_teacher = copy.deepcopy(estimator)
-                   # Teacher is always in eval mode
-                   estimator_teacher.eval()
-                   # Explicitly disable gradient tracking for all teacher parameters
-                   for param in estimator_teacher.parameters():
-                       param.requires_grad = False
+                print("\nCreating and freezing a static Teacher model for pseudo-labeling")
+                estimator_teacher = copy.deepcopy(estimator)
+                # Teacher is always in eval mode
+                estimator_teacher.eval()
+                # Explicitly disable gradient tracking for all teacher parameters
+                for param in estimator_teacher.parameters():
+                    param.requires_grad = False
 
                 # Selecting high-confidence images
                 print("\nSelecting high-confidence real images for fine-tuning...")

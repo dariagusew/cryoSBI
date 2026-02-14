@@ -117,12 +117,6 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     pixel_size = simulation_param["pixel_size"].item()
     simulation_param["k2"] = make_fft_k2_grid(num_pixels, pixel_size, device) 
 
-    # add garbage model
-    simulation_param["add_garbage_model"] = image_config.get("ADD_GARBAGE_MODEL", False)
-    # check noise model
-    if simulation_param["add_garbage_model"] and simulation_param["noise"]=="Gaussian":
-       raise ValueError("Garbage collector supported only with Poisson and empirical noise models")
-
     # add fluctuations
     fluct_file = image_config.get("ADD_FLUCTUATIONS", None)
     if isinstance(fluct_file, str):
@@ -155,8 +149,6 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
     if simulation_param["noise"] in ["empirical", "mixed"]:
        print(f"  NPS noise file: {mrc_file}")
-    if simulation_param["add_garbage_model"]:
-       print(f"  Adding garbage collector model")
     if isinstance(fluct_file, str):
        print(f"  Adding fluctuations from file: {fluct_file}")
 
@@ -205,8 +197,7 @@ def cryo_em_simulator(
         shift,
         simulation_param["num_pixels"], 
         simulation_param["pixel_size"],
-        simulation_param["fluctuations"],
-        simulation_param["add_garbage_model"]
+        simulation_param["fluctuations"]
     )
 
     # 2. Add CTF

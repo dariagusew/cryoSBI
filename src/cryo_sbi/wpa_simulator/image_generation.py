@@ -51,7 +51,6 @@ def project_density(
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
     fluctuations: Optional[torch.Tensor] = None,
-    add_garbage: bool = False,
     atom_batch_size: int = 1024
 ) -> torch.Tensor:
     """
@@ -69,7 +68,6 @@ def project_density(
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
         num_pixels (torch.Tensor): Number of pixels along one image dimension
         pixel_size (torch.Tensor): Pixel size in Angstrom
-        add_garbage (bool): Add a garbage-collector model
         atom_batch_size (int): The number of atoms to process in each chunk to
                                save memory. Defaults to 2048.
 
@@ -138,14 +136,5 @@ def project_density(
         
         # Accumulate the result
         final_image += image_batch
-
-    # Define mask for garbage collector model
-    if add_garbage:
-       mask = (index != max_num_model).to(torch.float32)
-    else:
-       mask = torch.ones_like(index)
-
-    # Apply (reshaped) mask 
-    final_image = mask.view(-1, 1, 1) * final_image
 
     return final_image

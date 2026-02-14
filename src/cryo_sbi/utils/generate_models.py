@@ -348,8 +348,7 @@ def models_to_tensor_topology(
         pdb_files,
         output_models,
         topo_type,
-        output_topology,
-        add_garbage_model
+        output_topology
     ):
     """
     Converts different model files in pdb format to a torch tensor and create topology.
@@ -363,8 +362,6 @@ def models_to_tensor_topology(
         The type of topology ('allatom', 'oneatom', 'calvados3', 'martini3').
     output_topology : str
         The path to the output topology file. Must be a .pt file.
-    add_garbage_model : bool
-        Add a model to use as garbage collector
     Returns
     -------
     None
@@ -413,15 +410,9 @@ def models_to_tensor_topology(
     center = model.mean(dim=2, keepdim=True)  # Shape: [n_models, 3, 1]
     model = model - center  # Broadcast subtraction across all atoms
 
-    # Add model as garbage collector
-    if add_garbage_model:
-       model = torch.cat([model, model[-1].unsqueeze(0)], dim=0)
-
     # Save the tensor to the specified output file
     torch.save(model, output_models)
     print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
-    if add_garbage_model:
-       print(f"The last model is a garbage collector")
 
     # Prepare topology
     if(topo_type=="allatom"):

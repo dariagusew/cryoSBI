@@ -250,7 +250,7 @@ def main():
     parser.add_argument('--output_nps', '-o', required=True, help="Output path for the symmetric NPS grid (.mrc)")
     parser.add_argument('--pixel_size', type=float, default=None, help="Override pixel size (Å/px). Highest priority.")
     parser.add_argument('--zero_threshold', type=float, default=0.08, help="Threshold to define CTF zeros (default: 0.08)")
-    parser.add_argument('--fit_window_fraction', type=float, default=0.05, help="Window size for running average pre-smoothing. Set to 0.0 to skip smoothing (default: 0.05).")
+    parser.add_argument('--fit_window_fraction', type=float, default=0.02, help="Window size for running average pre-smoothing. Set to 0.0 to skip smoothing (default: 0.02).")
     parser.add_argument('--device', default=None, help="Computation device ('cuda' or 'cpu'). Defaults to auto-detect.")
     parser.add_argument('--stride', type=int, default=1, help="Sample the STAR file with a stride. For the i-th MRC particle, the (i * stride)-th STAR entry\nis used. The STAR file must be large enough to accommodate this. Default is 1 (one-to-one).")
     parser.add_argument('--plot', action='store_true', help="Generate a diagnostic plot of the 1D NPS profile.")

@@ -609,11 +609,13 @@ def nle_train_no_saving_with_finetuning(
         real_train_loader = DataLoader(
             real_train_dataset,
             batch_size=train_config["BATCH_SIZE"],
-            shuffle=False,
+            shuffle=True,
             num_workers=0,
             pin_memory=True,
             drop_last=True
         )
+        # initialize iter
+        real_train_iter = iter(real_train_loader)
         print("------------------------------------------------------------------------------------\n")
 
     print("Training neural network:")
@@ -626,63 +628,27 @@ def nle_train_no_saving_with_finetuning(
                 # PHASE 2: Fine-tuning on real data with pseudo-labels
                 tq.set_description("Fine-tuning (Real Data)")
 
-                # Create a frozen teacher
+                # First fine-tuning epoch, create a frozen teacher
                 if epoch == split_epoch:
                    print("\nFreezing conformational embedding parameters...")
                    for param in estimator.theta_embedding.parameters():
                         param.requires_grad = False
 
-                print("\nCreating and freezing a static Teacher model for pseudo-labeling")
-                estimator_teacher = copy.deepcopy(estimator)
-                # Teacher is always in eval mode
-                estimator_teacher.eval()
-                # Explicitly disable gradient tracking for all teacher parameters
-                for param in estimator_teacher.parameters():
-                    param.requires_grad = False
+                   print("\nCreating and freezing a static Teacher model for pseudo-labeling")
+                   estimator_teacher = copy.deepcopy(estimator)
+                   # Teacher is always in eval mode
+                   estimator_teacher.eval()
+                   # Explicitly disable gradient tracking for all teacher parameters
+                   for param in estimator_teacher.parameters():
+                       param.requires_grad = False
 
-                # Selecting high-confidence images
-                print("\nSelecting high-confidence real images for fine-tuning...")
-                all_image_apes = []
-                with torch.no_grad():
-                    for real_images_batch in tqdm(real_train_loader, desc="  Calculating APE_R for all images"):
-                        batch_apes = calculate_apes(
-                           estimator_teacher,
-                           real_images_batch.to(device, non_blocking=True),
-                           n_models
-                        )
-                        all_image_apes.append(batch_apes)
-
-                all_image_apes = torch.cat(all_image_apes)
-
-                # Determine the number of images to select
-                N = 100*train_config["BATCH_SIZE"]
-                print(f"  Sorting images by APE_R and selecting the top {N} most confident examples.")
-
-                # Get the indices of the images with the lowest APE
-                sorted_indices = torch.argsort(all_image_apes)
-                top_N_indices = sorted_indices[:N]
-
-                # Create a Subset using these specific indices
-                finetune_dataset = Subset(real_train_dataset, top_N_indices.tolist())
-
-                # Create the final loader from this curated subset, with shuffling
-                fine_tune_loader = DataLoader(
-                    finetune_dataset,
-                    batch_size=train_config["BATCH_SIZE"],
-                    shuffle=True,
-                    num_workers=0,
-                    pin_memory=True,
-                    drop_last=True
-                )
-                fine_tune_iter = iter(fine_tune_loader)
-                print(f"✅ Created a new fine-tuning dataset with {len(finetune_dataset)} images.")
-
-                for _ in range(100):
+                # loop on mini-batches
+                for _ in range(400):
                     try:
-                        real_images_batch = next(fine_tune_iter)
+                        real_images_batch = next(real_train_iter)
                     except StopIteration:
-                        fine_tune_iter = iter(fine_tune_loader)
-                        real_images_batch = next(fine_tune_iter)
+                        real_train_iter = iter(real_train_loader)
+                        real_images_batch = next(real_train_iter)
                     
                     real_images_batch = real_images_batch.to(device, non_blocking=True)
 

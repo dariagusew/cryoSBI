@@ -218,7 +218,7 @@ def cryo_em_simulator(
     # special case of mixed noise
     if simulation_param["mixed_noise"]:
        # random selection of noise model
-       noise_type = random.choice(["Poisson", "Poisson-MTF", "empirical"])
+       noise_type = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "empirical"])
 
     # 3. Add noise
     if noise_type == "Gaussian":

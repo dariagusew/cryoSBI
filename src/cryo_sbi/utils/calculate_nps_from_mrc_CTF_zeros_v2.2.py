@@ -401,13 +401,15 @@ def main():
     nps_profile_1d_final[0] = 0.0 
     
     symmetric_nps_grid = reconstruct_2d_nps_from_1d(nps_profile_1d_final, output_size)
+    # as in the other nps script 
+    final_nps_grid_shifted = np.fft.fftshift(symmetric_nps_grid)
     print(f"✓ Reconstructed NPS on a {output_size}x{output_size} grid.")
 
     print("\n[Last Step] Saving final NPS grid and generating plot...")
     output_path = Path(args.output_nps)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with mrcfile.new(output_path, overwrite=True) as mrc:
-        mrc.set_data(symmetric_nps_grid.astype(np.float32))
+        mrc.set_data(final_nps_grid_shifted.astype(np.float32))
         mrc.voxel_size = 1.0 / (apix * output_size)
     print(f"\n✓ NPS calculation complete. Output saved to: {output_path.resolve()}")
 

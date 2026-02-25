@@ -1,0 +1,12 @@
+{
+    "EMBEDDING": "CRYOIEF",
+    "OUT_DIM": 384,
+    "NUM_TRANSFORM": 5,
+    "NUM_HIDDEN_FLOW": 2,
+    "HIDDEN_DIM_FLOW": 256,
+    "MODEL": "NSF",
+    "LEARNING_RATE": 1e-3,
+    "CLIP_GRADIENT": 1.0,
+    "NUM_MODELS": 4, 
+    "BATCH_SIZE": 512
+}

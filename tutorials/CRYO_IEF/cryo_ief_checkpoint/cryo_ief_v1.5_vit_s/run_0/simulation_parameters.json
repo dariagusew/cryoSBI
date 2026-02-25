@@ -1,0 +1,13 @@
+{
+    "N_PIXELS": 126,
+    "PIXEL_SIZE": 1.5,
+    "SIGMA": [2.0, 2.0],
+    "MODEL_FILE": "../../../models.pt",
+    "SHIFT": 0.0,
+    "DEFOCUS": [1.0, 3.0],
+    "SNR": [0.01, 0.1],
+    "AMP": 0.1,
+    "B_FACTOR": [50.0, 200.0],
+    "VOLTAGE": 300.0,
+    "SPHERICAL_ABERRATION": 2.7
+}

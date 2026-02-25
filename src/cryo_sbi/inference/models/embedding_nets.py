@@ -1,3 +1,5 @@
+import sys
+sys.path.append("/projects/dynaplix/people/zvh378/Cryo-IEF")
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -5,7 +7,11 @@ import torchvision.transforms as transforms
 import numpy as np
 import math
 from cryo_sbi.utils.image_utils import LowPassFilter, Mask
-
+import torch.nn.functional as F
+import Cryo_IEF.vits as vits
+from safetensors.torch import load_file
+from Cryo_IEF.vits import Classifier, Classifier_2linear 
+import torchvision.transforms as T 
 
 EMBEDDING_NETS = {}
 
@@ -860,15 +866,413 @@ class SpatialCryoGaussFFTEncoder(nn.Module):
         
         return x
     
-@add_embedding("ESMFOLD")
-class ESMFOLD(nn.Module):
-
-
-
-
-    def forward():
+@add_embedding("CRYOIEF")
+class CRYOIEF(nn.Module):
+    def __init__(self, dim: int = 768, D: int = 126, patch_size: int = 14):
+        super(CRYOIEF, self).__init__()
         
-        return x
+        self.D = D
+        self.dim = dim
+        self.patch_size = patch_size
+        # -----------------------------
+        # Build model 
+        # -----------------------------
+        if self.dim == 768:
+            self.cryoief = vits.vit_base(
+                num_classes = 0,           
+                dynamic_img_size = True,
+                patch_size = self.patch_size,
+                stop_grad_conv1 = False,
+                use_bn = True
+            )
+        elif self.dim == 384:
+            self.cryoief = vits.vit_small(
+                num_classes = 0,           
+                dynamic_img_size = True,
+                patch_size = self.patch_size,
+                stop_grad_conv1 = False,
+                use_bn = True
+            )
 
-if __name__ == "__main__":
-    pass
+
+
+    def forward(self, x):
+        """
+        x: Tensor (B, 1, H, W)
+        returns: Tensor (B, embedding_dim)
+        """
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        expected_channels = self.cryoief.patch_embed.proj.weight.shape[1]
+        if x.shape[1] != expected_channels:
+            raise ValueError(
+                f"Input channels ({x.shape[1]}) do not match checkpoint "
+                f"({expected_channels})"
+            )
+        x, _ = self.cryoief(x)
+        x = F.normalize(x, p=2, dim=1)
+        return x
+    
+@add_embedding("CRYOIEF_PATCHED")
+class CRYOIEF_PATCHED(nn.Module):
+    def __init__(self, dim: int = 768, D: int = 126, patch_size: int = 14):
+        super(CRYOIEF_PATCHED, self).__init__()
+        
+        self.D = D
+        self.dim = dim
+        self.patch_size = patch_size
+        # -----------------------------
+        # Build model 
+        # -----------------------------
+        if self.dim == 768:
+            self.cryoief = vits.vit_base(
+                num_classes = 0,           
+                dynamic_img_size = True,
+                patch_size = self.patch_size,
+                stop_grad_conv1 = False,
+                use_bn = True
+            )
+        elif self.dim == 384:
+            self.cryoief = vits.vit_small(
+                num_classes = 0,           
+                dynamic_img_size = True,
+                patch_size = self.patch_size,
+                stop_grad_conv1 = False,
+                use_bn = True
+            )
+            
+    def _pad_to_patch(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        Pad an image so H and W are divisible by patch_size
+        img: Tensor (1,H,W) or (H,W)
+        Returns: Tensor (1,H',W')
+        """
+        if img.ndim == 2:
+            img = img.unsqueeze(0)
+        H, W = img.shape[-2], img.shape[-1]
+        new_H = ((H + self.patch_size - 1) // self.patch_size) * self.patch_size
+        new_W = ((W + self.patch_size - 1) // self.patch_size) * self.patch_size
+        pad_H, pad_W = new_H - H, new_W - W
+        # pad (left, right, top, bottom)
+        img = F.pad(img, (0, pad_W, 0, pad_H))
+        return img
+
+
+
+    def forward(self, x):
+        """
+        x: Tensor (B, 1, H, W)
+        returns: Tensor (B, embedding_dim)
+        """
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        expected_channels = self.cryoief.patch_embed.proj.weight.shape[1]
+        if x.shape[1] != expected_channels:
+            raise ValueError(
+                f"Input channels ({x.shape[1]}) do not match checkpoint "
+                f"({expected_channels})"
+            )
+        x = torch.stack([self._pad_to_patch(img) for img in x])
+        x, _ = self.cryoief(x)
+        x = F.normalize(x, p=2, dim=1)
+        return x
+    
+
+    
+# @add_embedding("CRYOIEF_PATCH")
+# class CRYOIEF_PATCH(nn.Module):
+#     def __init__(self, output_dimension: int, D: int = 128):
+#         super(CRYOIEF_PATCH, self).__init__()
+
+#         self.patch_size = 14
+#         self.embed_dim = 768
+
+#         # -----------------------------
+#         # Build model 
+#         # -----------------------------
+#         weights_path = '/projects/dynaplix/people/zvh378/cryoBear/CRYO_IEF/Cryo-IEF/cryo_ief_checkpoint/cryo_ief_v1_vit_b/model.safetensors'
+
+#         self.cryoief = vits.vit_base(
+#             num_classes = 2,           
+#             dynamic_img_size = True,
+#             patch_size = self.patch_size,
+#             stop_grad_conv1 = False,
+#             use_bn = True,
+#             classifier = '1linear'
+#         )
+#         # -----------------------------
+#         # Load pretrained weights
+#         # -----------------------------
+#         state_dict = load_file(weights_path)
+        
+#         # Keep only base_encoder weights
+
+#         cleaned_state_dict = {}
+#         for k in state_dict:
+#             if k.startswith("base_encoder."):
+#                 cleaned_state_dict[k[len("base_encoder."):]] = state_dict[k]
+
+#          # Load checkpoint
+#         self.cryoief.load_state_dict(cleaned_state_dict, strict=False)
+
+#         self.cryoief.patch_embed.proj = nn.Conv2d(
+#             1, self.embed_dim,
+#             kernel_size = (self.patch_size, self.patch_size),
+#             stride = (self.patch_size, self.patch_size),
+#             padding = (0, 0),
+#             bias=True
+#         )
+
+    # def _pad_to_patch(self, img: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     Pad an image so H and W are divisible by patch_size
+    #     img: Tensor (1,H,W) or (H,W)
+    #     Returns: Tensor (1,H',W')
+    #     """
+    #     if img.ndim == 2:
+    #         img = img.unsqueeze(0)
+    #     H, W = img.shape[-2], img.shape[-1]
+    #     new_H = ((H + self.patch_size - 1) // self.patch_size) * self.patch_size
+    #     new_W = ((W + self.patch_size - 1) // self.patch_size) * self.patch_size
+    #     pad_H, pad_W = new_H - H, new_W - W
+    #     # pad (left, right, top, bottom)
+    #     img = F.pad(img, (0, pad_W, 0, pad_H))
+    #     return img
+    
+#     def forward(self, x):
+#         """
+#         x: Tensor (B, 1, H, W)
+#         returns: Tensor (B, embedding_dim)
+#         """
+#         x = x.unsqueeze(1)
+#         # Pad each image in batch to match patch size
+#         x = torch.stack([self._pad_to_patch(img) for img in x])
+#         x, _ = self.cryoief(x)
+#         x = F.normalize(x, p=2, dim=1)
+#         return x
+    
+
+# @add_embedding("CRYOIEF_SMALL")
+# class CRYOIEF_SMALL(nn.Module):
+#     def __init__(self, output_dimension: int, D: int = 128):
+#         super(CRYOIEF_SMALL, self).__init__()
+
+#         self.patch_size = 14
+#         self.embed_dim = 384
+
+#         # -----------------------------
+#         # Build model 
+#         # -----------------------------
+#         weights_path = '/projects/dynaplix/people/zvh378/cryoBear/CRYO_IEF/Cryo-IEF/cryo_ief_checkpoint/cryo_ief_v1.5_vit_s/model.safetensors'
+
+#         self.cryoief = vits.vit_small(
+#             num_classes = 2,           
+#             dynamic_img_size = True,
+#             patch_size = self.patch_size,
+#             stop_grad_conv1 = False,
+#             use_bn = True,
+#             classifier = '1linear'
+#         )
+#         # -----------------------------
+#         # Load pretrained weights
+#         # -----------------------------
+#         state_dict = load_file(weights_path)
+        
+#         # Keep only base_encoder weights
+
+#         cleaned_state_dict = {}
+#         for k in state_dict:
+#             if k.startswith("base_encoder."):
+#                 cleaned_state_dict[k[len("base_encoder."):]] = state_dict[k]
+
+#          # Load checkpoint
+#         self.cryoief.load_state_dict(cleaned_state_dict, strict=False)
+
+#         self.cryoief.patch_embed.proj = nn.Conv2d(
+#             1, self.embed_dim,
+#             kernel_size = (self.patch_size, self.patch_size),
+#             stride = (self.patch_size, self.patch_size),
+#             padding = (0, 0),
+#             bias=True
+#         )
+
+#     def forward(self, x):
+#         """
+#         x: Tensor (B, 1, H, W)
+#         returns: Tensor (B, embedding_dim)
+#         """
+#         x = x.unsqueeze(1)
+#         x, _ = self.cryoief(x)
+#         x = F.normalize(x, p=2, dim=1)
+#         return x
+    
+# @add_embedding("CRYOIEF_SMALL_PATCH")
+# class CRYOIEF_SMALL_PATCH(nn.Module):
+#     def __init__(self, output_dimension: int, D: int = 128):
+#         super(CRYOIEF_SMALL_PATCH, self).__init__()
+
+#         self.patch_size = 14
+#         self.embed_dim = 384
+
+#         # -----------------------------
+#         # Build model 
+#         # -----------------------------
+#         weights_path = '/projects/dynaplix/people/zvh378/cryoBear/CRYO_IEF/Cryo-IEF/cryo_ief_checkpoint/cryo_ief_v1.5_vit_s/model.safetensors'
+
+#         self.cryoief = vits.vit_small(
+#             num_classes = 2,           
+#             dynamic_img_size = True,
+#             patch_size = self.patch_size,
+#             stop_grad_conv1 = False,
+#             use_bn = True,
+#             classifier = '1linear'
+#         )
+#         # -----------------------------
+#         # Load pretrained weights
+#         # -----------------------------
+#         state_dict = load_file(weights_path)
+        
+#         # Keep only base_encoder weights
+
+#         cleaned_state_dict = {}
+#         for k in state_dict:
+#             if k.startswith("base_encoder."):
+#                 cleaned_state_dict[k[len("base_encoder."):]] = state_dict[k]
+
+#          # Load checkpoint
+#         self.cryoief.load_state_dict(cleaned_state_dict, strict=False)
+
+#         self.cryoief.patch_embed.proj = nn.Conv2d(
+#             1, self.embed_dim,
+#             kernel_size = (self.patch_size, self.patch_size),
+#             stride = (self.patch_size, self.patch_size),
+#             padding = (0, 0),
+#             bias=True
+#         )
+#     def _pad_to_patch(self, img: torch.Tensor) -> torch.Tensor:
+#         """
+#         Pad an image so H and W are divisible by patch_size
+#         img: Tensor (1,H,W) or (H,W)
+#         Returns: Tensor (1,H',W')
+#         """
+#         if img.ndim == 2:
+#             img = img.unsqueeze(0)
+#         H, W = img.shape[-2], img.shape[-1]
+#         new_H = ((H + self.patch_size - 1) // self.patch_size) * self.patch_size
+#         new_W = ((W + self.patch_size - 1) // self.patch_size) * self.patch_size
+#         pad_H, pad_W = new_H - H, new_W - W
+#         # pad (left, right, top, bottom)
+#         img = F.pad(img, (0, pad_W, 0, pad_H))
+#         return img
+    
+#     def forward(self, x):
+#         """
+#         x: Tensor (B, 1, H, W)
+#         returns: Tensor (B, embedding_dim)
+#         """
+#         x = x.unsqueeze(1)
+#         # Pad each image in batch to match patch size
+#         x = torch.stack([self._pad_to_patch(img) for img in x])
+#         x, _ = self.cryoief(x)
+#         x = F.normalize(x, p=2, dim=1)
+#         return x
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+# @add_embedding("CryoIEFSmall")
+# class CryoIEFSmall(nn.Module):
+#     def __init__(self, patch_size: int = 16, output_dim: int = 384, D: int = 128):
+#         """
+#         vit_small Cryo-IEF encoder.
+#         Args:
+#             patch_size: patch size for vit_small (default 16)
+#             output_dim: embedding dimension for vit_small (384)
+#         """
+#         super().__init__()
+#         self.patch_size = 16
+#         self.output_dim = 384
+
+#         # -----------------------------
+#         # Initialize vit_small
+#         # -----------------------------
+#         self.cryoief = vits.vit_small(
+#             num_classes=0,            
+#             dynamic_img_size=True,
+#             patch_size=self.patch_size,
+#             stop_grad_conv1=True,
+#             use_bn=False
+#         )
+
+#         # Adjust patch embedding for single-channel input
+#         self.cryoief.patch_embed.proj = nn.Conv2d(
+#             1, self.output_dim,
+#             kernel_size=(self.patch_size, self.patch_size),
+#             stride=(self.patch_size, self.patch_size),
+#             padding=(0, 0),
+#             bias=True
+#         )
+
+#         self.cryoief.eval()  # inference mode
+
+#         # -----------------------------
+#         # Transform to ensure divisible by patch_size
+#         # -----------------------------
+#         self.preprocess = T.Compose([
+#             T.Lambda(lambda img: self._pad_to_patch(img))
+#         ])
+
+    
+#     def _pad_to_patch(self, img: torch.Tensor) -> torch.Tensor:
+#         """
+#         Pad image so H and W are divisible by patch_size.
+#         Args:
+#             img: Tensor (1,H,W) or (H,W)
+#         Returns:
+#             Tensor (1,H',W')
+#         """
+#         if img.ndim == 2:
+#             img = img.unsqueeze(0)
+#         H, W = img.shape[-2], img.shape[-1]
+#         new_H = ((H + self.patch_size - 1) // self.patch_size) * self.patch_size
+#         new_W = ((W + self.patch_size - 1) // self.patch_size) * self.patch_size
+#         pad_H, pad_W = new_H - H, new_W - W
+#         # pad (left, right, top, bottom)
+#         img = F.pad(img, (0, pad_W, 0, pad_H))
+#         return img
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         x: Tensor of shape (B, 1, H, W) or (B, H, W)
+#         Returns: normalized embeddings (B, output_dim)
+#         """
+#         # Ensure channel dimension
+#         if x.ndim == 3:
+#             x = x.unsqueeze(1)
+
+#         # Preprocess each image (resize/pad)
+#         x = torch.stack([self.preprocess(img) for img in x])
+
+#         # Forward through vit_small
+        
+#         x, _ = self.cryoief(x)
+#         x = F.normalize(x, p=2, dim=1)
+
+#         return x
+    
+

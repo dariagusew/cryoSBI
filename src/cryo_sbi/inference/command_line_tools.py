@@ -109,7 +109,7 @@ def cl_nle_train_no_saving():
         "--pretrained_embedding_path",
         action="store",
         type=str,
-        required=True,
+        required=False,
         default=None,
     )
     

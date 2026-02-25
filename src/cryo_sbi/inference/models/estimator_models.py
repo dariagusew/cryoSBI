@@ -146,83 +146,98 @@ class NPEWithEmbedding(nn.Module):
 
         samples_standardized = self.flow(x).sample(shape)
         return self.standardize.transform(samples_standardized)
+    
 
 class NLEWithEmbedding(nn.Module):
-    """Neural Likelihood Estimation with embedding nets
+    """Neural Likelihood Estimation with a learned embedding for the conditioning variable.
 
-    Attributes:
-        nle (NLE): NLE model
-        embedding (nn.Module): embedding net
+    This class is designed for problems where the conditioning variable `theta`
+    represents a discrete set of categories (e.g., different physical models),
+    which are provided as integer labels.
     """
 
     def __init__(
         self,
-        embedding_net_x: nn.Module,
-        embedding_net_theta: nn.Module,
-        output_embedding_dim_x: int,
-        output_embedding_dim_theta: int,
+        embedding_net: nn.Module,
+        output_embedding_dim: int,
+        num_models: int,
         num_transforms: int = 4,
         num_hidden_flow: int = 2,
         hidden_flow_dim: int = 128,
         flow: nn.Module = zuko.flows.MAF,
-        num_models: int = 1,
         **kwargs,
     ) -> None:
         """
-        Neural Likelihood Estimation with embedding net.
-
         Args:
-            embedding_net_x (nn.Module):      embedding net for image
-            embedding_net_theta (nn.Module):  embedding net for conformation
-            output_embedding_dim_x (int):     output embedding dimension image
-            output_embedding_dim_theta (int): output embedding dimension conformation
-            num_transforms (int, optional):   number of transforms. Defaults to 4.
-            num_hidden_flow (int, optional):  number of hidden layers in flow. Defaults to 2.
-            hidden_flow_dim (int, optional):  hidden dimension in flow. Defaults to 128.
-            flow (nn.Module, optional): flow. Defaults to zuko.flows.MAF.
-            num_models (int): Number of models.
-            kwargs: additional arguments for the flow
-
-        Returns:
-            None
+            embedding_net (nn.Module):      Embedding net for the image `x`.
+            output_embedding_dim (int):     Output dimension of the image embedding.
+            num_models (int):               Number of distinct models/categories for `theta`.
+            num_transforms (int, optional): Number of transforms. Defaults to 4.
+            num_hidden_flow (int, optional): Number of hidden layers in flow. Defaults to 2.
+            hidden_flow_dim (int, optional): Hidden dimension in flow. Defaults to 128.
+            flow (nn.Module, optional):      Flow architecture. Defaults to zuko.flows.MAF.
+            kwargs:                          Additional arguments for the flow.
         """
         
         super().__init__()
 
+        # 0. Euristic for theta_embedding_dim
+        theta_embedding_dim = max(1, min(50, num_models // 2))
+
+        # 1. Create the learnable embedding layer for theta
+        self.theta_embedding = nn.Embedding(num_models, theta_embedding_dim)
+
+        # 2. The density estimator now takes a context of size `theta_embedding_dim`
         self.nle = NPE(
-            output_embedding_dim_x,
-            output_embedding_dim_theta,
+            output_embedding_dim,
+            theta_embedding_dim,
             transforms=num_transforms,
             build=flow,
             hidden_features=[*[hidden_flow_dim] * num_hidden_flow, 128, 64],
             **kwargs,
         )
 
-        # set image embedding
-        self.embedding_x = embedding_net_x()
-        self.embedding_theta = embedding_net_theta()
+        # 3. Set image embedding
+        self.embedding = embedding_net()
+        
 
+    def _embed_theta(self, theta: torch.Tensor) -> torch.Tensor:
+        """Helper function to process and embed theta."""
+        # nn.Embedding expects LongTensor of indices.
+        # Assuming theta comes in as (batch_size, 1) or (batch_size,) with float/int type.
+        if theta.dim() == 2 and theta.shape[1] == 1:
+            theta = theta.squeeze(-1)
+        
+        return self.theta_embedding(theta.round().long())
 
     def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the NLE model
+        Forward pass of the NLE model.
 
         Args:
             x (torch.Tensor): Image whose likelihood we model.
-            theta (torch.Tensor): Conformational parameters (conditioning variable).
+            theta (torch.Tensor): Integer labels for the models (conditioning variable).
 
         Returns:
             torch.Tensor: Log-likelihood
         """
+        # Embed both the image and the conditioning labels
+        x_embedded = self.embedding(x)
+        theta_embedded = self._embed_theta(theta)
 
-        return self.nle(self.embedding_x(x), self.embedding_theta(theta))
+        return self.nle(x_embedded, theta_embedded)
 
     def flow(self, theta: torch.Tensor):
         """
+        Conditions the likelihood on the model labels.
+
         Args:
-            theta (torch.Tensor): Conformational parameters to condition on.
+            theta (torch.Tensor): Integer labels for the models.
 
         Returns:
-            zuko.flows.Flow: Likelihood
+            zuko.flows.Flow: The likelihood distribution p(x | theta).
         """
-        return self.nle.flow(self.embedding_theta(theta))
+        # Embed the conditioning labels
+        theta_embedded = self._embed_theta(theta)
+        
+        return self.nle.flow(theta_embedded)

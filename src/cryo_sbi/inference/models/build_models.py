@@ -81,11 +81,8 @@ def build_nle_flow_model(config: dict, image_size: int, **embedding_kwargs) -> n
         )
 
     try:
-        embedding_x = partial(
-            EMBEDDING_NETS[config["EMBEDDING_X"]], config["OUT_DIM_X"], image_size, **embedding_kwargs
-        )
-        embedding_theta = partial(
-            EMBEDDING_NETS[config["EMBEDDING_THETA"]], config["OUT_DIM_THETA"], image_size, **embedding_kwargs
+        embedding = partial(
+            EMBEDDING_NETS[config["EMBEDDING"]], config["OUT_DIM"], image_size, **embedding_kwargs
         )
     except KeyError:
         raise NotImplementedError(
@@ -94,15 +91,13 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
         )
 
     estimator = estimator_models.NLEWithEmbedding(
-        embedding_net_x=embedding_x,
-        embedding_net_theta=embedding_theta,
-        output_embedding_dim_x=config["OUT_DIM_X"],
-        output_embedding_dim_theta=config["OUT_DIM_THETA"],
+        embedding_net=embedding,
+        output_embedding_dim=config["OUT_DIM"],
+        num_models=config["NUM_MODELS"],
         num_transforms=config["NUM_TRANSFORM"],
         num_hidden_flow=config["NUM_HIDDEN_FLOW"],
         hidden_flow_dim=config["HIDDEN_DIM_FLOW"],
         flow=model,
-        num_models=config["NUM_MODELS"],
         **{"activation": partial(nn.LeakyReLU, 0.1)},
     )
 

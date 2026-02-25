@@ -286,7 +286,7 @@ def cl_pretrain_image_embed():
     
     # Embedding architecture
     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO_FFT_FILTER',
-                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER', 'CRYOIEF','CryoIEFSmall','CryoIEFBaseSafe'],
                        help='Embedding architecture')
     
     # Training arguments
@@ -399,7 +399,7 @@ def cl_pretrain_image_embed_v1():
     
     # Embedding architecture
     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO_FFT_FILTER',
-                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER, CRYOIEF','CryoIEFSmall','CryoIEFBaseSafe'],
                        help='Embedding architecture')
     
     # Training arguments

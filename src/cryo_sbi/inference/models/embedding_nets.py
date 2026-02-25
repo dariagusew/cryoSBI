@@ -893,7 +893,7 @@ class CRYOIEF(nn.Module):
                 stop_grad_conv1 = False,
                 use_bn = True
             )
-            
+
     def forward(self, x):
         """
         x: Tensor (B, 1, H, W)
@@ -913,7 +913,7 @@ class CRYOIEF(nn.Module):
     
 @add_embedding("CRYOIEF_PATCHED")
 class CRYOIEF_PATCHED(nn.Module):
-    def __init__(self, dim: int = 768, D: int = 126, patch_size: int = 14):
+    def __init__(self, dim: int = 768, D: int = 128, patch_size: int = 14):
         super(CRYOIEF_PATCHED, self).__init__()
         
         self.D = D

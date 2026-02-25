@@ -196,7 +196,7 @@ def calculate_ctf_2d_torch(params, freq_sq, angle_grid, device):
     defocus_avg = (params['defocus_u'] + params['defocus_v']) / 2.0
     defocus_dev = (params['defocus_u'] - params['defocus_v']) / 2.0
     defocus_astig = defocus_avg + defocus_dev * torch.cos(2 * (angle_grid - defocus_angle_rad))
-    lambda_ = 12.26 / np.sqrt(params['voltage'] * 1000 + 0.978 * (params['voltage'] * 1000)**2 / 1e6)
+    lambda_ = 12.2643247 / np.sqrt(params['voltage'] * 1000 + 0.978466 * (params['voltage'] * 1000)**2 / 1e6)
     gamma = 2 * np.pi * (-0.5 * defocus_astig * lambda_ * freq_sq + 0.25 * params['cs'] * (lambda_**3) * (freq_sq**2))
     if 'phase_shift' in params: gamma += torch.deg2rad(torch.tensor(params['phase_shift'], device=device))
     ctf = -(torch.sqrt(torch.tensor(1 - params['amp_contrast']**2, device=device)) * torch.sin(gamma) - params['amp_contrast'] * torch.cos(gamma))
@@ -401,15 +401,13 @@ def main():
     nps_profile_1d_final[0] = 0.0 
     
     symmetric_nps_grid = reconstruct_2d_nps_from_1d(nps_profile_1d_final, output_size)
-    # as in the other nps script 
-    final_nps_grid_shifted = np.fft.fftshift(symmetric_nps_grid)
     print(f"✓ Reconstructed NPS on a {output_size}x{output_size} grid.")
 
     print("\n[Last Step] Saving final NPS grid and generating plot...")
     output_path = Path(args.output_nps)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with mrcfile.new(output_path, overwrite=True) as mrc:
-        mrc.set_data(final_nps_grid_shifted.astype(np.float32))
+        mrc.set_data(symmetric_nps_grid.astype(np.float32))
         mrc.voxel_size = 1.0 / (apix * output_size)
     print(f"\n✓ NPS calculation complete. Output saved to: {output_path.resolve()}")
 

@@ -39,25 +39,31 @@ def check_mrc_file_size(filepath):
     """Check MRC file size in bytes and GB."""
     filepath = Path(filepath)
     file_size = filepath.stat().st_size
-    file_size_gb = file_size / (1024**3)
-    return file_size, file_size_gb
+    return file_size, file_size / (1024**3)
 
 def validate_mrc_data(data):
-    """Validate MRC data after reading."""
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
     if data is None or data.size == 0 or data.ndim not in [2, 3]:
         return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
     try:
-        test_data = data[0] if data.ndim == 3 else data
+        # For memmap, only check the first particle to avoid loading all data.
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
         if np.all(test_data == 0): return False, "All data is zero"
         if np.any(np.isnan(test_data)): return False, "Data contains NaN"
         if np.any(np.isinf(test_data)): return False, "Data contains inf"
         if np.std(test_data) == 0: return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
-        return False, f"Validation error: {str(e)}"
+        return False, f"Error: {str(e)}"
 
 def read_mrc_header_raw(filepath):
-    """Read MRC header manually."""
+    """Read MRC header manually if standard methods fail."""
     try:
         with open(filepath, 'rb') as f:
             header_bytes = f.read(1024)
@@ -78,42 +84,40 @@ def validate_mrc_dimensions(nx, ny, nz):
     """Check if dimensions are reasonable."""
     if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
     if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
+    if nz > 50000000: return False, f"Stack too large: {nz}"
     return True, "Valid"
 
-@contextmanager
-def open_mrc_memmap(filepath):
-    """Context manager for opening MRC as memmap (never loads into RAM)."""
+def open_mrc_robust(filepath, max_size_gb=None):
+    """
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
+    """
     filepath = Path(filepath)
-    memmap_obj = None
+    if not filepath.exists():
+        return None, False, "File not found"
+
+    file_size, file_size_gb = check_mrc_file_size(filepath)
+    if max_size_gb is not None and file_size_gb > max_size_gb:
+        return None, False, f"Too large: {file_size_gb:.2f} GB"
+
     try:
-        if not filepath.exists():
-            yield None, False, "File not found"
-            return
-        try:
-            with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-                nx, ny, nz = mrc.header.nx, mrc.header.ny, mrc.header.nz
-                dtype = mrc.data.dtype
-            memmap_obj = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
-            if validate_mrc_data(memmap_obj)[0]:
-                yield memmap_obj, True, "Memmap via mrcfile header"
-                return
-        except Exception:
-            pass
         header_info = read_mrc_header_raw(filepath)
-        if header_info:
+        if header_info is not None:
             nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
-            if not validate_mrc_dimensions(nx, ny, nz)[0]:
-                yield None, False, f"Invalid dimensions from raw header: {nz}x{ny}x{nx}"
-                return
+            is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
+            if not is_valid:
+                return None, False, msg
+
             dtype = get_dtype_from_mode(mode)
-            memmap_obj = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
-            if validate_mrc_data(memmap_obj)[0]:
-                yield memmap_obj, True, "Memmap via manual header read"
-                return
-        yield None, False, "All MRC opening methods failed"
-    finally:
-        if memmap_obj is not None: del memmap_obj
-        gc.collect()
+            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
+
+            is_valid, msg = validate_mrc_data(data)
+            if is_valid:
+                return data, True, f"Memmap via manual header read"
+    except Exception as e:
+        return None, False, f"Failed: {str(e)[:100]}"
+
+    return None, False, "All MRC opening methods failed"
 
 
 class RealImageMRCDataset(Dataset):
@@ -129,8 +133,8 @@ class RealImageMRCDataset(Dataset):
         self.cache_size = cache_size
         
         print(f"  Opening MRC file: {mrc_path}")
-        self._mrc_context = open_mrc_memmap(mrc_path)
-        self.mrc_data, success, method = self._mrc_context.__enter__()
+        # Call the new function directly
+        self.mrc_data, success, method = open_mrc_robust(mrc_path)
 
         if not success:
             raise RuntimeError(f"Failed to open MRC file: {method}")
@@ -164,10 +168,6 @@ class RealImageMRCDataset(Dataset):
         
         return self.cache[idx]
     
-    def __del__(self):
-        if hasattr(self, '_mrc_context'):
-            self._mrc_context.__exit__(None, None, None)
-
 
 def generate_real_validation_set(mrc_path: str, val_size: int, device):
     """

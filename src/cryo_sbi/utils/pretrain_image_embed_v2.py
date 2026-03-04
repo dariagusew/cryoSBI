@@ -235,56 +235,6 @@ def count_parameters(model):
     }
 
 
-def generate_validation_set(prior_loader, models, simulation_param, val_size, device):
-    """
-    Generates a fixed set of validation images with a specific noise model.
-    """
-    print(f"\nGenerating {val_size} validation images with Gaussian noise...")
-    
-    val_images = []
-    generated_count = 0
-    val_iter = iter(prior_loader)
-
-    with tqdm(total=val_size, desc="  Generating val set") as pbar:
-        while generated_count < val_size:
-            try:
-                parameters = next(val_iter)
-            except StopIteration:
-                val_iter = iter(prior_loader) # Reset if we run out
-                parameters = next(val_iter)
-            
-            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-            # change b_factors from 50.0 to 200.0
-            ndata = indices.shape[0]
-            b_factor = 50.0 + (200.0 - 50.0) * torch.rand(ndata, 1, 1, device=device)
-
-            images, _ = cryo_em_simulator(
-                models,
-                indices.to(device, non_blocking=True),
-                quaternions.to(device, non_blocking=True),
-                shift.to(device, non_blocking=True),
-                defocus.to(device, non_blocking=True),
-                b_factor.to(device, non_blocking=True),
-                amp.to(device, non_blocking=True),
-                snr.to(device, non_blocking=True),
-                simulation_param,
-                "Gaussian"
-            )
-            
-            val_images.append(images)
-            generated_count += len(images)
-            pbar.update(len(images))
-
-    # Concatenate all generated images
-    all_images = torch.cat(val_images, dim=0)
-    # Compute memory
-    val_mem_gb = all_images.nelement() * all_images.element_size() / 1024**3
-
-    print(f"✅ Validation set created with {len(all_images)} images, consuming {val_mem_gb:.2f} GB of VRAM.")
-    return all_images
-
-
 # ============================================================================
 # MAIN TRAINING FUNCTION
 # ============================================================================

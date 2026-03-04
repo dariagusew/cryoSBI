@@ -248,7 +248,6 @@ def cl_estimate_snr_from_mrc():
     print("\n✓ Analysis complete!")
 
 
-
 def cl_pretrain_image_embed():
     """
     Parses command-line arguments and runs the pre-training script.
@@ -277,6 +276,12 @@ def cl_pretrain_image_embed():
                        help='Learning rate for the AdamW optimizer (default: 2e-4)')
     parser.add_argument('--l2_weight', type=float, default=0.0,
                        help='Weight for L2 regularization on embeddings (default: 0.0)')
+
+    # --- Fine-tuning Arguments ---
+    parser.add_argument('--real_data_mrc_path', type=str, default=None,
+                       help='Path to the real data MRC file for optional fine-tuning. (default: None)')
+    parser.add_argument('--real_data_fraction', type=float, default=0.0,
+                       help='Fraction of total epochs for fine-tuning on real data (e.g., 0.2 for last 20%%). (default: 0.0, disabled)')
 
     # --- I/O and Checkpoints ---
     parser.add_argument('--save_path', type=str, default='pretrained_image_embed.pt',
@@ -331,10 +336,13 @@ def cl_pretrain_image_embed():
         save_path=args.save_path,
         check_frequency=args.check_frequency,
         n_batches_per_epoch=args.n_batches_per_epoch,
-        l2_weight=args.l2_weight
+        l2_weight=args.l2_weight,
+        real_data_mrc_path=args.real_data_mrc_path,
+        real_data_fraction=args.real_data_fraction
     )
 
     print(f"\n✅ Pre-training complete!")
+
 
 def cl_pinfer_populations():
 

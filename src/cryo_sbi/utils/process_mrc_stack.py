@@ -14,7 +14,9 @@ import sys
 import gc
 import psutil
 from contextlib import contextmanager
-from typing import Tuple, Optional, Dict, Union
+from typing import Tuple, Optional, Dict, Union, List
+
+from cryo_sbi.wpa_simulator.ctf import generate_ctf, remove_ctf_batch
 
 # ============================================================================
 # MEMORY MANAGEMENT
@@ -305,6 +307,166 @@ def normalize_batch_gpu(images, method='per_particle', global_stats=None):
 
 
 # ============================================================================
+# STAR FILE PARSING
+# ============================================================================
+
+def parse_star_file_ctf(star_path: str) -> List[Dict]:
+    """
+    Parse a RELION STAR file and extract per-particle CTF parameters.
+
+    Reads the following columns (all required unless noted):
+        _rlnDefocusU          – defocus along U axis (Å)
+        _rlnDefocusV          – defocus along V axis (Å)
+        _rlnDefocusAngle      – astigmatism angle (degrees)
+        _rlnVoltage           – accelerating voltage (kV)
+        _rlnSphericalAberration – Cs (mm)
+        _rlnAmplitudeContrast – amplitude contrast (fraction, e.g. 0.1)
+        _rlnPhaseShift        – additional phase shift (degrees, optional, default 0)
+        _rlnCtfBfactor        – B-factor envelope (Å², optional, default 0)
+        _rlnCtfScalefactor    – overall scale factor (optional, default 1)
+
+    Args:
+        star_path: Path to the RELION STAR file.
+
+    Returns:
+        List of dicts, one per particle row, with keys:
+            'defocus_u', 'defocus_v', 'defocus_angle',
+            'voltage', 'cs', 'amplitude_contrast',
+            'phase_shift', 'bfactor', 'scale_factor'
+    """
+    star_path = Path(star_path)
+    if not star_path.exists():
+        raise FileNotFoundError(f"STAR file not found: {star_path}")
+
+    # Map from RELION column name → internal key and default value
+    _COL_MAP = {
+        '_rlnDefocusU':            ('defocus_u',          None),
+        '_rlnDefocusV':            ('defocus_v',          None),
+        '_rlnDefocusAngle':        ('defocus_angle',      None),
+        '_rlnVoltage':             ('voltage',            None),
+        '_rlnSphericalAberration': ('cs',                 None),
+        '_rlnAmplitudeContrast':   ('amplitude_contrast', None),
+        '_rlnPhaseShift':          ('phase_shift',        0.0),
+        '_rlnCtfBfactor':          ('bfactor',            0.0),
+        '_rlnCtfScalefactor':      ('scale_factor',       1.0),
+    }
+    _REQUIRED = {
+        '_rlnDefocusU', '_rlnDefocusV', '_rlnDefocusAngle',
+        '_rlnVoltage', '_rlnSphericalAberration', '_rlnAmplitudeContrast',
+    }
+
+    with open(star_path, 'r') as fh:
+        lines = fh.readlines()
+
+    # Locate the loop_ block and collect column headers
+    col_index: Dict[str, int] = {}   # rln_name → column index (0-based)
+    in_loop = False
+    data_start = None
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == 'loop_':
+            in_loop = True
+            col_index = {}
+            continue
+        if in_loop and stripped.startswith('_'):
+            parts = stripped.split()
+            col_name = parts[0]
+            col_idx = len(col_index)
+            col_index[col_name] = col_idx
+            continue
+        if in_loop and col_index and stripped and not stripped.startswith('_'):
+            data_start = i
+            break
+
+    if data_start is None:
+        raise ValueError(f"No data rows found in STAR file: {star_path}")
+
+    # Check required columns
+    missing = _REQUIRED - set(col_index.keys())
+    if missing:
+        raise ValueError(
+            f"STAR file is missing required CTF columns: {missing}\n"
+            f"Found columns: {list(col_index.keys())}"
+        )
+
+    # Build index lookup for the columns we care about
+    wanted: Dict[str, Tuple[str, float, int]] = {}  # rln_name → (key, default, col_idx)
+    for rln_name, (key, default) in _COL_MAP.items():
+        if rln_name in col_index:
+            wanted[rln_name] = (key, default, col_index[rln_name])
+
+    # Parse data rows
+    particles = []
+    for line in lines[data_start:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or stripped.startswith('data_') or stripped.startswith('loop_'):
+            continue
+        tokens = stripped.split()
+        entry: Dict[str, float] = {}
+        for rln_name, (key, default, idx) in wanted.items():
+            if idx < len(tokens):
+                entry[key] = float(tokens[idx])
+            elif default is not None:
+                entry[key] = default
+            else:
+                raise ValueError(
+                    f"Row has too few columns for required field '{rln_name}': {line!r}"
+                )
+        particles.append(entry)
+
+    if not particles:
+        raise ValueError(f"No particle rows parsed from STAR file: {star_path}")
+
+    return particles
+
+
+# ============================================================================
+# CTF HELPERS (delegates to cryo_sbi.wpa_simulator.ctf)
+# ============================================================================
+
+def _build_ctf_from_params(
+    ctf_params: List[Dict],
+    image_size: int,
+    pixel_size: float,
+    device: str,
+) -> torch.Tensor:
+    """
+    Build a batch CTF tensor from a list of per-particle parameter dicts
+    (as returned by :func:`parse_star_file_ctf`) by delegating to
+    :func:`cryo_sbi.wpa_simulator.ctf.generate_ctf`.
+
+    Args:
+        ctf_params: List of dicts with keys 'defocus_u', 'defocus_v',
+                    'defocus_angle', 'voltage', 'cs',
+                    'amplitude_contrast', 'bfactor'.
+        image_size: Side length of the square image (pixels).
+        pixel_size: Pixel size in Å.
+        device:     Torch device string.
+
+    Returns:
+        CTF tensor of shape (N, image_size, image_size), DC at corner.
+    """
+    def _t(key):
+        return torch.tensor(
+            [p[key] for p in ctf_params], dtype=torch.float32, device=device
+        )
+
+    return generate_ctf(
+        num_pixels=image_size,
+        pixel_size=pixel_size,
+        defocus_u=_t('defocus_u'),
+        defocus_v=_t('defocus_v'),
+        defocus_angle=_t('defocus_angle'),
+        voltage=_t('voltage'),
+        cs=_t('cs'),
+        amplitude_contrast=_t('amplitude_contrast'),
+        b_factor=_t('bfactor'),
+        device=device,
+    )
+
+
+# ============================================================================
 # STATISTICS COMPUTATION
 # ============================================================================
 
@@ -378,7 +540,9 @@ def process_mrc_stack(
     device='cuda',
     max_size_gb=None,
     stride=1,
-    validate_only=False
+    validate_only=False,
+    subtract_ctf=False,
+    star_file=None,
 ):
     """
     Process MRC particle stack: fix header and downsample.
@@ -395,6 +559,9 @@ def process_mrc_stack(
         max_size_gb: float or None, max file size to process
         stride: int, process every Nth particle
         validate_only: bool, only validate file without processing
+        subtract_ctf: bool, if True subtract the CTF from each particle
+        star_file: str or Path or None, RELION STAR file with CTF parameters
+                   (required when subtract_ctf=True)
     """
     
     print(f"=" * 80)
@@ -451,6 +618,27 @@ def process_mrc_stack(
         if validate_only:
             print(f"\n✅ VALIDATION COMPLETE - File is readable")
             return True
+
+        # ---- CTF setup -------------------------------------------------------
+        ctf_params_all = None
+        if subtract_ctf:
+            if star_file is None:
+                print("❌ --subtract-ctf requires --star-file to be specified")
+                return False
+            print(f"\n🔬 CTF subtraction enabled")
+            print(f"  Reading CTF parameters from: {star_file}")
+            try:
+                ctf_params_all = parse_star_file_ctf(star_file)
+                print(f"  ✓ Loaded CTF parameters for {len(ctf_params_all)} particles")
+                if len(ctf_params_all) < nz:
+                    print(f"  ⚠️  STAR file has fewer entries ({len(ctf_params_all)}) "
+                          f"than MRC stack ({nz}). Extra particles will use the last entry.")
+                elif len(ctf_params_all) > nz:
+                    print(f"  ⚠️  STAR file has more entries ({len(ctf_params_all)}) "
+                          f"than MRC stack ({nz}). Extra entries will be ignored.")
+            except Exception as e:
+                print(f"❌ Failed to read STAR file: {e}")
+                return False
         
         # Select particle indices based on stride
         particle_indices = np.arange(0, nz, stride)
@@ -506,6 +694,10 @@ def process_mrc_stack(
         downsample_factor = max(ny, nx) / target_size
         output_voxel_size = voxel_size * downsample_factor
         print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
+
+        # Warn if CTF subtraction is requested but pixel size is ambiguous
+        if subtract_ctf:
+            print(f"  CTF pixel size (after downsampling): {output_voxel_size:.3f} Å")
         
         # Compute global statistics if needed (in chunks, never loads all data)
         global_stats = None
@@ -564,8 +756,23 @@ def process_mrc_stack(
                                 if ny != target_size or nx != target_size:
                                    batch_tensor = downsample_gpu(batch_tensor, target_size)
 
+                                # CTF subtraction (after downsampling so pixel size is correct)
+                                if subtract_ctf and ctf_params_all is not None:
+                                    # Gather per-particle CTF params for this batch
+                                    batch_ctf_params = [
+                                        ctf_params_all[min(idx, len(ctf_params_all) - 1)]
+                                        for idx in batch_indices
+                                    ]
+                                    ctf_batch = _build_ctf_from_params(
+                                        batch_ctf_params,
+                                        image_size=target_size,
+                                        pixel_size=output_voxel_size,
+                                        device=device,
+                                    )
+                                    batch_tensor = remove_ctf_batch(batch_tensor, ctf_batch)
+
                                 # Normalize
-                                batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
+                                batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize,
                                                                   global_stats=global_stats)
 
                                 # Write directly to mrc.data (no intermediate array)

@@ -132,6 +132,12 @@ def cl_process_mrc_stack():
                        help='Maximum file size to process in GB (default: no limit)')
     parser.add_argument('--validate', action='store_true',
                        help='Only validate input file without processing')
+    parser.add_argument('--subtract-ctf', action='store_true', default=False,
+                       help='Subtract CTF from each particle using parameters from the STAR file '
+                            '(default: False). Requires --star-file.')
+    parser.add_argument('--star-file', type=str, default=None,
+                       help='Path to RELION STAR file containing per-particle CTF parameters '
+                            '(required when --subtract-ctf is used).')
     
     args = parser.parse_args()
     
@@ -159,6 +165,14 @@ def cl_process_mrc_stack():
             print("❌ Aborted by user")
             sys.exit(1)
     
+    # Validate CTF-related arguments
+    if args.subtract_ctf and args.star_file is None:
+        print("❌ Error: --subtract-ctf requires --star-file to be specified")
+        sys.exit(1)
+    if args.star_file is not None and not Path(args.star_file).exists():
+        print(f"❌ Error: STAR file not found: {args.star_file}")
+        sys.exit(1)
+
     # Process
     try:
         success = process_mrc_stack(
@@ -171,7 +185,9 @@ def cl_process_mrc_stack():
             device=args.device,
             max_size_gb=args.max_size_gb,
             stride=args.stride,
-            validate_only=args.validate
+            validate_only=args.validate,
+            subtract_ctf=args.subtract_ctf,
+            star_file=args.star_file,
         )
         
         sys.exit(0 if success else 1)

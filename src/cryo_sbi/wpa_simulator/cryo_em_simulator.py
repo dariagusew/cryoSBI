@@ -5,7 +5,7 @@ import torch
 import mrcfile
 import numpy as np
 import random
-from cryo_sbi.wpa_simulator.ctf import apply_ctf
+from cryo_sbi.wpa_simulator.ctf import generate_ctf, apply_ctf_batch
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
@@ -63,6 +63,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["pixel_size"] = torch.tensor(
         image_config["PIXEL_SIZE"], dtype=torch.float32, device=device
     )
+    # CTF flag (default: True)
+    ctf_raw = image_config.get("CTF", True)
+    if isinstance(ctf_raw, str):
+        simulation_param["apply_ctf"] = ctf_raw.strip().lower() != "false"
+    else:
+        simulation_param["apply_ctf"] = bool(ctf_raw)
     # astigmatism
     simulation_param["astigmatism"] = image_config.get("ASTIGMATISM", False)
     # other microscope parameters (for CTF and noise)
@@ -133,6 +139,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
 
     # Log configuration
     print("\nImage simulation parameters:")
+    print(f"  CTF: {'enabled' if simulation_param['apply_ctf'] else 'disabled'}")
     print(f"  Number of atoms: {natoms:,}")
     print(f"  Image size: {image_config['N_PIXELS']}×{image_config['N_PIXELS']} pixels")
     print(f"  Pixel size: {image_config['PIXEL_SIZE']:.3f} Å")
@@ -204,8 +211,46 @@ def cryo_em_simulator(
         simulation_param["add_garbage_model"]
     )
 
-    # 2. Add CTF
-    image = apply_ctf(image, defocus, b_factor, amp, simulation_param)
+    # 2. Add CTF (optional)
+    if simulation_param["apply_ctf"]:
+        device = simulation_param["device"]
+        num_pixels = int(simulation_param["num_pixels"].item())
+        pixel_size = simulation_param["pixel_size"].item()
+        voltage = torch.full((defocus.shape[0],), simulation_param["voltage"], dtype=torch.float32, device=device)
+        cs = torch.full((defocus.shape[0],), simulation_param["cs"], dtype=torch.float32, device=device)
+
+        # Build defocus_u, defocus_v, defocus_angle (all in Å)
+        if simulation_param["astigmatism"]:
+            # defocus shape: [N, 3] -> [defocus_avg_um, defocus_astig_um, angle_deg]
+            defocus_avg_A   = defocus[:, 0] * 1e4      # µm → Å
+            defocus_astig_A = defocus[:, 1] * 1e4      # µm → Å
+            defocus_angle   = defocus[:, 2]             # degrees
+            defocus_u = defocus_avg_A + defocus_astig_A
+            defocus_v = defocus_avg_A - defocus_astig_A
+        elif defocus.ndim == 2 and defocus.shape[1] == 3:
+            # Non-astigmatic case with star-file prior: use first column only
+            defocus_u     = defocus[:, 0] * 1e4        # µm → Å
+            defocus_v     = defocus_u.clone()
+            defocus_angle = torch.zeros(defocus.shape[0], dtype=torch.float32, device=device)
+        else:
+            # Non-astigmatic case with scalar defocus prior
+            defocus_u     = defocus.view(-1) * 1e4     # µm → Å
+            defocus_v     = defocus_u.clone()
+            defocus_angle = torch.zeros(defocus.shape[0], dtype=torch.float32, device=device)
+
+        ctf = generate_ctf(
+            num_pixels=num_pixels,
+            pixel_size=pixel_size,
+            defocus_u=defocus_u,
+            defocus_v=defocus_v,
+            defocus_angle=defocus_angle,
+            voltage=voltage,
+            cs=cs,
+            amplitude_contrast=amp.view(-1),
+            b_factor=b_factor.view(-1),
+            device=device,
+        )
+        image = apply_ctf_batch(image, ctf)
 
     # detach and clone the clean image
     image_clean = image.detach().clone()

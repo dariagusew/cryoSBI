@@ -13,7 +13,6 @@ from tqdm import tqdm
 import sys
 import gc
 import psutil
-from contextlib import contextmanager
 from typing import Tuple, Optional, Dict, Union
 
 # ============================================================================
@@ -95,156 +94,89 @@ def check_memory_feasibility(mem_est, device='cuda'):
 # ============================================================================
 # MRC FILE HANDLING
 # ============================================================================
-
 def check_mrc_file_size(filepath):
     """Check MRC file size in bytes and GB."""
     filepath = Path(filepath)
     file_size = filepath.stat().st_size
-    file_size_gb = file_size / (1024**3)
-    return file_size, file_size_gb
-
+    return file_size, file_size / (1024**3)
 
 def validate_mrc_data(data):
-    """Validate MRC data after reading."""
-    if data is None:
-        return False, "Data is None"
-    if data.size == 0:
-        return False, "Data is empty"
-    if data.ndim not in [2, 3]:
-        return False, f"Invalid dimensions: {data.ndim}D"
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
+    if data is None or data.size == 0 or data.ndim not in [2, 3]:
+        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
     try:
-        # For memmap, only check first particle to avoid loading all
+        # For memmap, only check the first particle to avoid loading all data.
         if isinstance(data, np.memmap):
             test_data = data[0] if data.ndim == 3 else data
         else:
             test_data = data
-            
-        if np.all(test_data == 0):
-            return False, "All data is zero"
-        if np.any(np.isnan(test_data)):
-            return False, "Data contains NaN"
-        if np.any(np.isinf(test_data)):
-            return False, "Data contains inf"
-        if np.std(test_data) == 0:
-            return False, "Zero variance"
+        if np.all(test_data == 0): return False, "All data is zero"
+        if np.any(np.isnan(test_data)): return False, "Data contains NaN"
+        if np.any(np.isinf(test_data)): return False, "Data contains inf"
+        if np.std(test_data) == 0: return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
-
 def read_mrc_header_raw(filepath):
-    """Read MRC header manually."""
+    """Read MRC header manually if standard methods fail."""
     try:
         with open(filepath, 'rb') as f:
             header_bytes = f.read(1024)
-            if len(header_bytes) < 1024:
-                return None
+            if len(header_bytes) < 1024: return None
             import struct
             nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
             mode = struct.unpack('i', header_bytes[12:16])[0]
-            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode, 'header_size': 1024}
+            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
     except:
         return None
-
 
 def get_dtype_from_mode(mode):
     """Convert MRC mode to numpy dtype."""
     dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
     return dtype_map.get(mode, np.float32)
 
-
 def validate_mrc_dimensions(nx, ny, nz):
     """Check if dimensions are reasonable."""
-    if nx <= 0 or ny <= 0 or nz <= 0:
-        return False, f"Non-positive: {nz}×{ny}×{nx}"
-    if nx > 8192 or ny > 8192:
-        return False, f"Too large: {ny}×{nx}"
-    if nz > 100000000:  # Increased limit for large stacks
-        return False, f"Stack too large: {nz}"
+    if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
+    if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
+    if nz > 50000000: return False, f"Stack too large: {nz}"
     return True, "Valid"
 
-
-@contextmanager
-def open_mrc_memmap(filepath, max_size_gb=None):
+def open_mrc_robust(filepath, max_size_gb=None):
     """
-    Context manager for opening MRC as memmap (never loads into RAM).
-    
-    Yields:
-        numpy.memmap or None
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
     """
     filepath = Path(filepath)
-    memmap_obj = None
+    if not filepath.exists():
+        return None, False, "File not found"
+    
+    file_size, file_size_gb = check_mrc_file_size(filepath)
+    if max_size_gb is not None and file_size_gb > max_size_gb:
+        return None, False, f"Too large: {file_size_gb:.2f} GB"
     
     try:
-        if not filepath.exists():
-            yield None, False, "File not found"
-            return
-        
-        file_size, file_size_gb = check_mrc_file_size(filepath)
-        if max_size_gb is not None and file_size_gb > max_size_gb:
-            yield None, False, f"Too large: {file_size_gb:.2f} GB"
-            return
-        
-        # Try standard mrcfile first (but don't load data)
-        try:
-            with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-                nx, ny, nz = mrc.header.nx, mrc.header.ny, mrc.header.nz
-                dtype = mrc.data.dtype
-                
-                # Close the mrcfile and open as pure memmap
-                pass
-            
-            # Now open as memmap
-            memmap_obj = np.memmap(
-                filepath, 
-                dtype=dtype, 
-                mode='r', 
-                offset=1024, 
-                shape=(nz, ny, nx)
-            )
-            
-            is_valid, msg = validate_mrc_data(memmap_obj)
-            if is_valid:
-                yield memmap_obj, True, "Memmap"
-                return
-                
-        except Exception as e:
-            pass
-        
-        # Fallback: force-read header
         header_info = read_mrc_header_raw(filepath)
         if header_info is not None:
-            nx = header_info['nx']
-            ny = header_info['ny']
-            nz = header_info['nz']
-            mode = header_info['mode']
-            
+            nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
             is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
             if not is_valid:
-                yield None, False, msg
-                return
+                return None, False, msg
             
             dtype = get_dtype_from_mode(mode)
-            memmap_obj = np.memmap(
-                filepath, 
-                dtype=dtype, 
-                mode='r', 
-                offset=1024, 
-                shape=(nz, ny, nx)
-            )
+            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
             
-            is_valid, msg = validate_mrc_data(memmap_obj)
+            is_valid, msg = validate_mrc_data(data)
             if is_valid:
-                yield memmap_obj, True, f"Force-read memmap"
-                return
-        
-        yield None, False, "All methods failed"
-        
-    finally:
-        # Cleanup
-        if memmap_obj is not None:
-            del memmap_obj
-        gc.collect()
+                return data, True, f"Memmap via manual header read"
+    except Exception as e:
+        return None, False, f"Failed: {str(e)[:100]}"
+    
+    return None, False, "All MRC opening methods failed"
 
 
 # ============================================================================
@@ -429,180 +361,182 @@ def process_mrc_stack(
     if file_size_gb > 10:
         print(f"  ⚠️  Large file detected - using memory-mapped I/O")
     
-    # Open MRC as memmap (never loads into RAM)
-    with open_mrc_memmap(input_path, max_size_gb=max_size_gb) as (data, success, msg):
-        if not success:
-            print(f"❌ Failed to read MRC: {msg}")
-            return False
-        
-        print(f"✓ Loaded successfully: {msg}")
-        print(f"  Shape: {data.shape} (nz={data.shape[0]}, ny={data.shape[1]}, nx={data.shape[2]})")
-        print(f"  Dtype: {data.dtype}")
-        
-        # Sample a few particles to show range
-        sample_indices = np.linspace(0, data.shape[0]-1, min(10, data.shape[0]), dtype=int)
-        sample_data = data[sample_indices]
-        print(f"  Sample range: [{sample_data.min():.3f}, {sample_data.max():.3f}]")
-        del sample_data
-        
-        nz, ny, nx = data.shape
-        
-        # Validate only mode
-        if validate_only:
-            print(f"\n✅ VALIDATION COMPLETE - File is readable")
-            return True
-        
-        # Select particle indices based on stride
-        particle_indices = np.arange(0, nz, stride)
-        n_output_particles = len(particle_indices)
-        
-        print(f"\n⚙️  Processing configuration:")
-        print(f"  Stride: {stride} (reading every {stride} particle(s))")
-        print(f"  Output particles: {n_output_particles} / {nz}")
-        print(f"  Batch size: {batch_size}")
-        print(f"  Target size: {target_size}x{target_size}")
-        
-        # Estimate memory requirements
-        print(f"\n💾 Memory estimation:")
-        mem_est = estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride)
-        print(f"  RAM for one batch: {mem_est['input_batch_ram']:.2f} GB")
-        print(f"  Estimated peak RAM usage: {mem_est['peak_ram']:.2f} GB")
-        print(f"  Output file disk size: {mem_est['output_file_disk_size']:.2f} GB")
-        if device == 'cuda':
-            print(f"  GPU memory needed: {mem_est['gpu_required']:.2f} GB")
-        
-        # Check memory feasibility
-        issues, warnings = check_memory_feasibility(mem_est, device)
-        
-        if issues:
-            print(f"\n❌ Memory issues detected:")
-            for issue in issues:
-                print(f"  • {issue}")
-            print(f"\nSuggestions:")
-            print(f"  • Reduce batch size (current: {batch_size})")
-            print(f"  • Increase stride (current: {stride})")
-            print(f"  • Use smaller target size (current: {target_size})")
-            return False
-        
-        if warnings:
-            print(f"\n⚠️  Warnings:")
-            for warning in warnings:
-                print(f"  • {warning}")
-            print(f"  Proceeding anyway...")
-        
-        # Determine voxel size
-        if voxel_size is None:
-            try:
-                with mrcfile.open(input_path, permissive=True, mode='r') as mrc:
-                    voxel_size = float(mrc.voxel_size.x)
-                    print(f"\n  Voxel size from header: {voxel_size:.3f} Å")
-            except:
-                voxel_size = 1.0
-                print(f"\n  ⚠️  Could not read voxel size, using default: {voxel_size:.3f} Å")
-        else:
-            print(f"\n  Using provided voxel size: {voxel_size:.3f} Å")
-        
-        # Calculate output voxel size
-        downsample_factor = max(ny, nx) / target_size
-        output_voxel_size = voxel_size * downsample_factor
-        print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
-        
-        # Compute global statistics if needed (in chunks, never loads all data)
-        global_stats = None
-        if normalize == 'global':
-            print(f"\n📊 Computing global statistics (this may take a while)...")
-            global_stats = compute_global_stats_chunked(data, chunk_size=1000, stride=stride)
-            print(f"  Global mean: {global_stats['mean']:.6f}")
-            print(f"  Global std: {global_stats['std']:.6f}")
-            print(f"  Total values: {global_stats['count']:,}")
-        
-        # Explain normalization
-        print(f"\n🔧 Normalization:")
-        if normalize == 'per_particle':
-            print(f"  Method: Per-particle Z-score (each particle: mean=0, std=1)")
-        elif normalize == 'global':
-            print(f"  Method: Global Z-score (all particles normalized by same mean/std)")
-        else:
-            print(f"  Method: None (original values preserved)")
-        
-        # Create output MRC file and process directly to it
-        print(f"\n⚙️  Creating output file ({mem_est['output_file_disk_size']:.2f} GB)...")
-        try:
-            # Define the shape for the new memory-mapped file
-            output_shape = (n_output_particles, target_size, target_size)
-
-            # Use mrcfile.new_mmap for robust, memory-free file creation and allocation
-            with mrcfile.new_mmap(output_path, shape=output_shape, mrc_mode=2, overwrite=True) as mrc:
-                # Header dimensions (nx, ny, nz) and mode are set automatically by new_mmap.
-                # We only need to set the remaining metadata.
-                mrc.voxel_size = output_voxel_size
-                mrc.header.map = b'MAP '
-                mrc.header.cella.x = mrc.header.nx * mrc.voxel_size.x
-                mrc.header.cella.y = mrc.header.ny * mrc.voxel_size.y
-                mrc.header.cella.z = mrc.header.nz * mrc.voxel_size.z
-
-                print(f"✓ File created successfully")
-
-                # Process in batches and write directly to mrc.data
-                print(f"\n🚀 Processing particles...")
-                n_batches = (n_output_particles + batch_size - 1) // batch_size
-                
-                try:
-                    with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
-                        for i in range(0, n_output_particles, batch_size):
-                            end_idx = min(i + batch_size, n_output_particles)
-                            
-                            # Get batch using stride indices (loads only this batch into RAM)
-                            batch_indices = particle_indices[i:end_idx]
-                            batch = data[batch_indices].astype(np.float32)  # Load batch
-                            
-                            with torch.no_grad():
-                                # Convert to torch tensor and move to device
-                                batch_tensor = torch.from_numpy(batch).to(device)
-
-                                # Downsample if needed
-                                if ny != target_size or nx != target_size:
-                                   batch_tensor = downsample_gpu(batch_tensor, target_size)
-
-                                # Normalize
-                                batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
-                                                                  global_stats=global_stats)
-
-                                # Write directly to mrc.data (no intermediate array)
-                                mrc.data[i:end_idx] = batch_tensor.cpu().numpy()
-
-                            # Clean up
-                            del batch
-                            if 'batch_tensor' in locals():
-                                del batch_tensor
-                            
-                            pbar.update(end_idx - i)
-                            
-                            # Clear GPU cache periodically
-                            if device == 'cuda' and (i // batch_size) % 10 == 0:
-                                torch.cuda.empty_cache()
-                    
-                    print(f"✓ Processing complete")
-                    # Update final header stats after processing is done
-                    mrc.update_header_stats()
-                    print(f"  Output shape: {mrc.data.shape}")
-                    
-                except KeyboardInterrupt:
-                    print(f"\n\n⚠️  Processing interrupted by user")
-                    return False
-                except Exception as e:
-                    print(f"\n\n❌ Error during processing: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
-                    return False
-                
-                print(f"\n✓ File written successfully")
-                
-        except Exception as e:
-            print(f"❌ Failed to write MRC: {str(e)}")
-            return False
+    # Open MRC as memmap (never loads into RAM) using the robust scheme
+    data, success, msg = open_mrc_robust(input_path, max_size_gb=max_size_gb)
     
-    # Data memmap is now closed and cleaned up (exited context manager)
+    if not success:
+        print(f"❌ Failed to read MRC: {msg}")
+        return False
+        
+    print(f"✓ Loaded successfully: {msg}")
+    print(f"  Shape: {data.shape} (nz={data.shape[0]}, ny={data.shape[1]}, nx={data.shape[2]})")
+    print(f"  Dtype: {data.dtype}")
+    
+    # Sample a few particles to show range
+    sample_indices = np.linspace(0, data.shape[0]-1, min(10, data.shape[0]), dtype=int)
+    sample_data = data[sample_indices]
+    print(f"  Sample range: [{sample_data.min():.3f}, {sample_data.max():.3f}]")
+    del sample_data
+    
+    nz, ny, nx = data.shape
+    
+    # Validate only mode
+    if validate_only:
+        print(f"\n✅ VALIDATION COMPLETE - File is readable")
+        return True
+    
+    # Select particle indices based on stride
+    particle_indices = np.arange(0, nz, stride)
+    n_output_particles = len(particle_indices)
+    
+    print(f"\n⚙️  Processing configuration:")
+    print(f"  Stride: {stride} (reading every {stride} particle(s))")
+    print(f"  Output particles: {n_output_particles} / {nz}")
+    print(f"  Batch size: {batch_size}")
+    print(f"  Target size: {target_size}x{target_size}")
+    
+    # Estimate memory requirements
+    print(f"\n💾 Memory estimation:")
+    mem_est = estimate_memory_requirements(nz, ny, nx, batch_size, target_size, stride)
+    print(f"  RAM for one batch: {mem_est['input_batch_ram']:.2f} GB")
+    print(f"  Estimated peak RAM usage: {mem_est['peak_ram']:.2f} GB")
+    print(f"  Output file disk size: {mem_est['output_file_disk_size']:.2f} GB")
+    if device == 'cuda':
+        print(f"  GPU memory needed: {mem_est['gpu_required']:.2f} GB")
+    
+    # Check memory feasibility
+    issues, warnings = check_memory_feasibility(mem_est, device)
+    
+    if issues:
+        print(f"\n❌ Memory issues detected:")
+        for issue in issues:
+            print(f"  • {issue}")
+        print(f"\nSuggestions:")
+        print(f"  • Reduce batch size (current: {batch_size})")
+        print(f"  • Increase stride (current: {stride})")
+        print(f"  • Use smaller target size (current: {target_size})")
+        return False
+    
+    if warnings:
+        print(f"\n⚠️  Warnings:")
+        for warning in warnings:
+            print(f"  • {warning}")
+        print(f"  Proceeding anyway...")
+    
+    # Determine voxel size
+    if voxel_size is None:
+        try:
+            with mrcfile.open(input_path, permissive=True, mode='r') as mrc:
+                voxel_size = float(mrc.voxel_size.x)
+                print(f"\n  Voxel size from header: {voxel_size:.3f} Å")
+        except:
+            voxel_size = 1.0
+            print(f"\n  ⚠️  Could not read voxel size, using default: {voxel_size:.3f} Å")
+    else:
+        print(f"\n  Using provided voxel size: {voxel_size:.3f} Å")
+    
+    # Calculate output voxel size
+    downsample_factor = max(ny, nx) / target_size
+    output_voxel_size = voxel_size * downsample_factor
+    print(f"  Output voxel size: {output_voxel_size:.3f} Å (downsample factor: {downsample_factor:.2f}x)")
+    
+    # Compute global statistics if needed (in chunks, never loads all data)
+    global_stats = None
+    if normalize == 'global':
+        print(f"\n📊 Computing global statistics (this may take a while)...")
+        global_stats = compute_global_stats_chunked(data, chunk_size=1000, stride=stride)
+        print(f"  Global mean: {global_stats['mean']:.6f}")
+        print(f"  Global std: {global_stats['std']:.6f}")
+        print(f"  Total values: {global_stats['count']:,}")
+    
+    # Explain normalization
+    print(f"\n🔧 Normalization:")
+    if normalize == 'per_particle':
+        print(f"  Method: Per-particle Z-score (each particle: mean=0, std=1)")
+    elif normalize == 'global':
+        print(f"  Method: Global Z-score (all particles normalized by same mean/std)")
+    else:
+        print(f"  Method: None (original values preserved)")
+    
+    # Create output MRC file and process directly to it
+    print(f"\n⚙️  Creating output file ({mem_est['output_file_disk_size']:.2f} GB)...")
+    try:
+        # Define the shape for the new memory-mapped file
+        output_shape = (n_output_particles, target_size, target_size)
+
+        # Use mrcfile.new_mmap for robust, memory-free file creation and allocation
+        with mrcfile.new_mmap(output_path, shape=output_shape, mrc_mode=2, overwrite=True) as mrc:
+            # Header dimensions (nx, ny, nz) and mode are set automatically by new_mmap.
+            # We only need to set the remaining metadata.
+            mrc.voxel_size = output_voxel_size
+            mrc.header.map = b'MAP '
+            mrc.header.cella.x = mrc.header.nx * mrc.voxel_size.x
+            mrc.header.cella.y = mrc.header.ny * mrc.voxel_size.y
+            mrc.header.cella.z = mrc.header.nz * mrc.voxel_size.z
+
+            print(f"✓ File created successfully")
+
+            # Process in batches and write directly to mrc.data
+            print(f"\n🚀 Processing particles...")
+            n_batches = (n_output_particles + batch_size - 1) // batch_size
+            
+            try:
+                with tqdm(total=n_output_particles, desc="Processing", unit="particles") as pbar:
+                    for i in range(0, n_output_particles, batch_size):
+                        end_idx = min(i + batch_size, n_output_particles)
+                        
+                        # Get batch using stride indices (loads only this batch into RAM)
+                        batch_indices = particle_indices[i:end_idx]
+                        batch = data[batch_indices].astype(np.float32)  # Load batch
+                        
+                        with torch.no_grad():
+                            # Convert to torch tensor and move to device
+                            batch_tensor = torch.from_numpy(batch).to(device)
+
+                            # Downsample if needed
+                            if ny != target_size or nx != target_size:
+                               batch_tensor = downsample_gpu(batch_tensor, target_size)
+
+                            # Normalize
+                            batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 
+                                                              global_stats=global_stats)
+
+                            # Write directly to mrc.data (no intermediate array)
+                            mrc.data[i:end_idx] = batch_tensor.cpu().numpy()
+
+                        # Clean up
+                        del batch
+                        if 'batch_tensor' in locals():
+                            del batch_tensor
+                        
+                        pbar.update(end_idx - i)
+                        
+                        # Clear GPU cache periodically
+                        if device == 'cuda' and (i // batch_size) % 10 == 0:
+                            torch.cuda.empty_cache()
+                
+                print(f"✓ Processing complete")
+                # Update final header stats after processing is done
+                mrc.update_header_stats()
+                print(f"  Output shape: {mrc.data.shape}")
+                
+            except KeyboardInterrupt:
+                print(f"\n\n⚠️  Processing interrupted by user")
+                return False
+            except Exception as e:
+                print(f"\n\n❌ Error during processing: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return False
+            
+            print(f"\n✓ File written successfully")
+            
+    except Exception as e:
+        print(f"❌ Failed to write MRC: {str(e)}")
+        return False
+    
+    # Clean up the input memmap object now that processing is complete
+    del data
     gc.collect()
     
     # Verify output

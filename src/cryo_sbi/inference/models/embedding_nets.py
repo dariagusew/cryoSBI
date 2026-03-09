@@ -1,10 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torchvision.models as models
 import torchvision.transforms as transforms
 import numpy as np
 import math
-from cryo_sbi.utils.image_utils import LowPassFilter, Mask
+
+from cryo_sbi.utils.image_utils import LowPassFilter, Mask, fourier_down_sample
 
 
 EMBEDDING_NETS = {}
@@ -219,7 +221,7 @@ class ResNet101_Encoder(nn.Module):
 
 @add_embedding("CONVNET")
 class ConvNet_Encoder(nn.Module):
-    def __init__(self, output_dimension: int):
+    def __init__(self, output_dimension: int, D: int = 128):
         super(ConvNet_Encoder, self).__init__()
 
         self.convnet = models.convnext_tiny()
@@ -236,7 +238,7 @@ class ConvNet_Encoder(nn.Module):
         return x
 
 
-@add_embedding("CONVNET")
+@add_embedding("CONVNET_2")
 class RegNetX_Encoder(nn.Module):
     def __init__(self, output_dimension: int):
         super(RegNetX_Encoder, self).__init__()
@@ -857,6 +859,510 @@ class SpatialCryoGaussFFTEncoder(nn.Module):
         x = self.output_norm(x)
         
         return x
+    
+# @add_embedding("HETSIREN")
+# class HETSIREN(torch.Module):
+#     def __init__(self, output_dimension: int, D: int = 128, architecture="convnn",
+#                  downsample = False,
+#                  trainable = True
+#                  ):
+#         super(HETSIREN, self).__init__()
+#         #HETSIREN ENCODER 
+
+#         self.D = D
+#         self.output_dimension = output_dimension
+#         self.downsample = downsample
+#         self.trainable = trainable 
+#         self.n_pixels = n_pixels
+
+#     def forward(self, x):
+
+#         if x.dim() == 3:
+#             x = x.unsqueeze(1)
+
+#         if self.downsample:
+#             x = fourier_down_sample(x, self.D, self.n_pixels)
+#             x = x.view(-1, 1, 64, 64)
+#             x = nn.ReLU()(x)
+#         else:
+#             x = nn.Flatten()(x)
+#             x = nn.Dense(64 * 64)(x)
+#             x = x.view(-1, 1, 64, 64)
+
+
+#         # First conv: 4 filters, 5x5 kernel, stride 2, padding="same"
+#         conv1 = nn.Conv2d(in_channels=1, out_channels=4, kernel_size=5, stride=2, padding=2)
+#         x = nn.ReLU(conv1(x))  # activation applied separately
+
+#         # Second conv: 8 filters, 5x5 kernel, stride 2, padding="same"
+#         conv2 = nn.Conv2d(in_channels=4, out_channels=8, kernel_size=5, stride=2, padding=2)
+#         b1_out = nn.ReLU(conv2(x))
+
+#         # Third conv branch
+#         conv3a = nn.Conv2d(in_channels=8, out_channels=8, kernel_size=1, stride=1, padding=0)  # "same" padding for 1x1 = 0
+#         b2_x = nn.ReLU(conv3a(b1_out))
+
+#         conv3b = nn.Conv2d(in_channels=8, out_channels=8, kernel_size=1, stride=1, padding=0)
+#         b2_x = conv3b(b2_x)  # linear activation → no ReLU
+#         # b1_out and b2_x: tensors of same shape
+#         b2_add = b1_out + b2_x  # element-wise addition
+#         b2_add = nn.ReLU(b2_add)  # ReLU activation
+
+#         conv1 = nn.Conv2d(1, 4, 5, stride=2, padding=2)
+#         conv2 = nn.Conv2d(4, 8, 5, stride=2, padding=2)
+
+#         x = nn.ReLU(conv1(x))
+#         b1_out = nn.ReLU(conv2(x))
+
+#         # ---- Block 2: residual branch ----
+#         conv_b2_1 = nn.Conv2d(8, 8, 1, stride=1, padding=0)  # linear activation
+#         b2_x = conv_b2_1(b1_out)
+#         b2_add = nn.ReLU(b1_out + b2_x)  # residual add + ReLU
+
+#         # Another 1x1 linear residual (loop of 1)
+#         conv_b2_loop = nn.Conv2d(8, 8, 1, stride=1, padding=0)
+#         b2_x = conv_b2_loop(b2_add)
+#         b2_add = nn.ReLU(b2_add + b2_x)
+
+#         # Downsample after residual
+#         conv_b2_down = nn.Conv2d(8, 16, 3, stride=2, padding=1)
+#         b2_out = nn.ReLU(conv_b2_down(b2_add))
+
+#         # ---- Block 3: residual branch ----
+#         conv_b3_1 = nn.Conv2d(16, 16, 1, stride=1, padding=0)  # ReLU
+#         conv_b3_2 = nn.Conv2d(16, 16, 1, stride=1, padding=0)  # linear
+
+#         b3_x = nn.ReLU(conv_b3_1(b2_out))
+#         b3_x = conv_b3_2(b3_x)
+#         b3_add = nn.ReLU(b2_out + b3_x)
+
+#         # Another 1x1 linear residual (loop of 1)
+#         conv_b3_loop = nn.Conv2d(16, 16, 1, stride=1, padding=0)
+#         b3_x = conv_b3_loop(b3_add)
+#         b3_add = nn.ReLU(b3_add + b3_x)
+
+#         # Downsample after residual
+#         conv_b3_down = nn.Conv2d(16, 16, 3, stride=2, padding=1)
+#         b3_out = nn.ReLU(conv_b3_down(b3_add))
+
+#         # ---- Flatten and Dense layers ----
+#         x = torch.flatten(b3_out, start_dim=1)  # flatten all except batch
+
+#         # Fully connected layers (4 layers of 256 neurons with ReLU)
+#         fc1 = nn.Linear(x.shape[1], 256)
+#         fc2 = nn.Linear(256, 256)
+#         fc3 = nn.Linear(256, 256)
+#         fc4 = nn.Linear(256, 256)
+
+#         x = nn.ReLU(fc1(x))
+#         x = nn.ReLU(fc2(x))
+#         x = nn.ReLU(fc3(x))
+#         x = nn.ReLU(fc4(x))
+
+#         return x
+
+
+
+
+
+
+class Residual1x1Block(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, kernel_size=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        out = self.conv(x)
+        x = x + out
+        return self.relu(x)
+
+
+@add_embedding("HETSIREN")
+class HETSIREN(nn.Module):
+    def __init__(self,
+                 embedding_dim=256,
+                 D=64,
+                 architecture="convnn",
+                 refPose=True,
+                 mode="spa",
+                 downsample=False):
+        super(HETSIREN, self).__init__()
+
+        self.embedding_dim = embedding_dim
+        self.D = D
+        self.mode = mode
+        self.architecture = architecture
+        self.downsample = downsample
+
+        # ====================================================
+        # CONVNN
+        # ====================================================
+        if architecture == "convnn":
+            if downsample:
+                self.pre_fc = None
+            else:
+                self.pre_fc = nn.Linear(D * D, 64 * 64)
+
+            self.conv1 = nn.Conv2d(1, 4, 5, stride=2, padding=2)
+            self.conv2 = nn.Conv2d(4, 8, 5, stride=2, padding=2)
+
+            self.b2_conv1 = nn.Conv2d(8, 8, 1)
+            self.b2_conv2 = nn.Conv2d(8, 8, 1)
+            self.b2_res = Residual1x1Block(8)
+
+            self.b2_out = nn.Conv2d(8, 16, 3, stride=2, padding=1)
+
+            self.b3_conv1 = nn.Conv2d(16, 16, 1)
+            self.b3_conv2 = nn.Conv2d(16, 16, 1)
+            self.b3_res = Residual1x1Block(16)
+
+            self.b3_out = nn.Conv2d(16, 16, 3, stride=2, padding=1)
+
+            self.fc_layers = nn.ModuleList(
+                [nn.Linear(16 * 4 * 4, embedding_dim)] +
+                [nn.Linear(embedding_dim, embedding_dim) for _ in range(3)]
+            )
+
+        # ====================================================
+        # DEEPCONV
+        # ====================================================
+        elif architecture == "deepconv":
+            self.conv1 = nn.Conv2d(1, 64, 5, stride=2, padding=2)
+            self.conv2 = nn.Conv2d(64, 128, 5, stride=2, padding=2)
+
+            self.deep_res2 = nn.ModuleList([Residual1x1Block(128) for _ in range(12)])
+            self.b2_out = nn.Conv2d(128, 256, 3, stride=2, padding=1)
+
+            self.deep_res3 = nn.ModuleList([Residual1x1Block(256) for _ in range(12)])
+            self.b3_out = nn.Conv2d(256, 512, 3, stride=2, padding=1)
+
+            self.fc1 = nn.Linear(512 * 4 * 4, embedding_dim)
+            self.fc_res = nn.ModuleList([nn.Linear(embedding_dim, embedding_dim) for _ in range(4)])
+
+        # ====================================================
+        # MLP
+        # ====================================================
+        elif architecture == "mlpnn":
+            self.mlp = nn.Sequential(
+                nn.Linear(D * D, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, embedding_dim),
+                nn.ReLU()
+            )
+
+        # ====================================================
+        # LATENT HEAD
+        # ====================================================
+        self.latent_layers = nn.ModuleList(
+            [nn.Linear(embedding_dim if architecture != "deepconv" else embedding_dim, embedding_dim)] +
+            [nn.Linear(embedding_dim, embedding_dim) for _ in range(2)]
+        )
+
+        # ====================================================
+        # ROWS HEAD
+        # ====================================================
+        self.rows_layers = nn.ModuleList(
+            [nn.Linear(embedding_dim if architecture != "deepconv" else embedding_dim, 256)] +
+            [nn.Linear(256, 256) for _ in range(2)]
+        )
+
+        # ====================================================
+        # SHIFTS HEAD
+        # ====================================================
+        self.shifts_layers = nn.ModuleList(
+            [nn.Linear(embedding_dim if architecture != "deepconv" else embedding_dim, 256)] +
+            [nn.Linear(256, 256) for _ in range(2)]
+        )
+
+        # Freeze if refPose=False
+        if not refPose:
+            for p in self.rows_layers.parameters():
+                p.requires_grad = False
+            for p in self.shifts_layers.parameters():
+                p.requires_grad = False
+
+        # ====================================================
+        # TOMO LABEL HEAD
+        # ====================================================
+        if mode == "tomo":
+            self.label_layers = nn.ModuleList(
+                [nn.Linear(100, 1024)] +
+                [nn.Linear(1024, 1024) for _ in range(2)] +
+                [nn.Linear(1024, 256) for _ in range(2)]
+            )
+            
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)  # add channel
+
+        batch_size = x.size(0)
+        x = F.interpolate(x, size=(self.D, self.D))  # make input size flexible
+
+        # ================= CONVNN =================
+        if self.architecture == "convnn":
+            x = F.relu(self.conv1(x))
+            x = F.relu(self.conv2(x))
+
+            b2 = F.relu(self.b2_conv1(x))
+            b2 = self.b2_conv2(b2)
+            x = F.relu(x + b2)
+            x = self.b2_res(x)
+            x = F.relu(self.b2_out(x))
+
+            b3 = F.relu(self.b3_conv1(x))
+            b3 = self.b3_conv2(b3)
+            x = F.relu(x + b3)
+            x = self.b3_res(x)
+            x = F.relu(self.b3_out(x))
+
+            # Adaptive pooling to fixed size (e.g., 4x4)
+            x = F.adaptive_avg_pool2d(x, (4, 4))
+            x = torch.flatten(x, 1)
+
+            # FC to embedding_dim
+            for layer in self.fc_layers:
+                x = F.relu(layer(x))
+
+        # ================= DEEPCONV =================
+        elif self.architecture == "deepconv":
+            x = F.relu(self.conv1(x))
+            x = F.relu(self.conv2(x))
+            for block in self.deep_res2:
+                x = block(x)
+            x = F.relu(self.b2_out(x))
+            for block in self.deep_res3:
+                x = block(x)
+            x = F.relu(self.b3_out(x))
+            x = F.adaptive_avg_pool2d(x, (4,4))
+            x = torch.flatten(x, 1)
+            x = F.relu(self.fc1(x))
+            for layer in self.fc_res:
+                x = F.relu(layer(x)) + x
+
+        # ================= MLP =================
+        elif self.architecture == "mlpnn":
+            x = x.view(batch_size, -1)
+            x = self.mlp(x)
+
+        # LATENT mapping
+        for i, layer in enumerate(self.fc_layers):
+            x = layer(x)
+            if i < len(self.fc_layers) - 1:
+                x = F.relu(x)
+            return x
+
+
+
+# Residual 1x1 Block (linear activation after first conv, as in Keras)
+class Residual1x1Block(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=1)
+
+    def forward(self, x):
+        out = F.relu(self.conv1(x))
+        out = self.conv2(out)  # linear activation in Keras
+        return F.relu(out + x)
+
+@add_embedding("HETSIREN2")
+class HETSIREN2(nn.Module):
+    def __init__(self, output_dimension=256, D=128, architecture="convnn", mode="spa", refPose=True):
+        """
+        output_dimension: latent embedding size
+        D: side length of input image
+        """
+        super(HETSIREN2, self).__init__()
+        self.architecture = architecture
+        self.mode = mode
+        self.D = D
+        self.output_dimension = output_dimension
+
+        # ================= CONVNN =================
+        if architecture == "convnn":
+            self.pre_fc = nn.Linear(D * D, 64 * 64)  # Keras: flatten → Dense → reshape
+
+            self.conv1 = nn.Conv2d(1, 4, 5, stride=2, padding=2)
+            self.conv2 = nn.Conv2d(4, 8, 5, stride=2, padding=2)
+
+            self.b2_conv1 = nn.Conv2d(8, 8, 1)
+            self.b2_conv2 = nn.Conv2d(8, 8, 1)
+            self.b2_res = Residual1x1Block(8)
+            self.b2_out = nn.Conv2d(8, 16, 3, stride=2, padding=1)
+
+            self.b3_conv1 = nn.Conv2d(16, 16, 1)
+            self.b3_conv2 = nn.Conv2d(16, 16, 1)
+            self.b3_res = Residual1x1Block(16)
+            self.b3_out = nn.Conv2d(16, 16, 3, stride=2, padding=1)
+
+            self.fc_layers = nn.ModuleList([nn.Linear(16*4*4, output_dimension)] +
+                                           [nn.Linear(output_dimension, output_dimension) for _ in range(2)])
+
+        # ================= DEEPCONV =================
+        elif architecture == "deepconv":
+            self.conv1 = nn.Conv2d(1, 64, 5, stride=2, padding=2)
+            self.conv2 = nn.Conv2d(64, 128, 5, stride=2, padding=2)
+
+            self.deep_res2 = nn.ModuleList([Residual1x1Block(128) for _ in range(12)])
+            self.b2_out = nn.Conv2d(128, 256, 3, stride=2, padding=1)
+
+            self.deep_res3 = nn.ModuleList([Residual1x1Block(256) for _ in range(12)])
+            self.b3_out = nn.Conv2d(256, 512, 3, stride=2, padding=1)
+
+            self.fc1 = nn.Linear(512*4*4, 512)
+            self.fc_res = nn.ModuleList([nn.Linear(512, 512) for _ in range(4)])
+
+            self.latent_fc = nn.ModuleList([nn.Linear(512, output_dimension)] +
+                                           [nn.Linear(output_dimension, output_dimension) for _ in range(2)])
+
+        # ================= MLP =================
+        elif architecture == "mlpnn":
+            self.mlp = nn.Sequential(
+                nn.Linear(D * D, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, 1024),
+                nn.ReLU()
+            )
+            self.latent_fc = nn.ModuleList([nn.Linear(1024, output_dimension)] +
+                                           [nn.Linear(output_dimension, output_dimension) for _ in range(2)])
+        self.output_norm = nn.LayerNorm(output_dimension)
+
+    def forward(self, x):
+        batch_size = x.size(0)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)  # add channel
+
+        # ================= CONVNN =================
+        if self.architecture == "convnn":
+            # Keras: Flatten → Dense → reshape
+            x = x.view(batch_size, -1)
+            x = self.pre_fc(x)
+            x = x.view(batch_size, 1, 64, 64)
+
+            x = F.relu(self.conv1(x))
+            x = F.relu(self.conv2(x))
+
+            b2 = F.relu(self.b2_conv1(x))
+            b2 = self.b2_conv2(b2)
+            x = F.relu(x + b2)
+            x = self.b2_res(x)
+            x = F.relu(self.b2_out(x))
+
+            b3 = F.relu(self.b3_conv1(x))
+            b3 = self.b3_conv2(b3)
+            x = F.relu(x + b3)
+            x = self.b3_res(x)
+            x = F.relu(self.b3_out(x))
+
+            x = torch.flatten(x, 1)  # Keras: Flatten
+
+            for i, layer in enumerate(self.fc_layers):
+                x = layer(x)
+                if i < len(self.fc_layers)-1:
+                    x = F.relu(x)
+
+        # ================= DEEPCONV =================
+        elif self.architecture == "deepconv":
+            x = F.relu(self.conv1(x))
+            x = F.relu(self.conv2(x))
+            for block in self.deep_res2:
+                x = block(x)
+            x = F.relu(self.b2_out(x))
+            for block in self.deep_res3:
+                x = block(x)
+            x = F.relu(self.b3_out(x))
+            x = torch.flatten(x, 1)
+            x = F.relu(self.fc1(x))
+            for layer in self.fc_res:
+                x = F.relu(layer(x)) + x
+
+            for i, layer in enumerate(self.latent_fc):
+                x = layer(x)
+                if i < len(self.latent_fc)-1:
+                    x = F.relu(x)
+
+        # ================= MLP =================
+        elif self.architecture == "mlpnn":
+            x = x.view(batch_size, -1)
+            x = self.mlp(x)
+
+            for i, layer in enumerate(self.latent_fc):
+                x = layer(x)
+                if i < len(self.latent_fc)-1:
+                    x = F.relu(x)
+        x = self.output_norm(x)
+        return x
+       
+    # def forward(self, x):
+
+    #     if x.dim() == 3:
+    #         x = x.unsqueeze(1)  # add channel dimension
+
+    #     batch_size = x.size(0)
+    #     x = F.interpolate(x, size=(self.D, self.D))
+
+    #     # ================= CONVNN =================
+    #     if self.architecture == "convnn":
+    #         if not self.downsample:
+    #             x = x.view(batch_size, -1)
+    #             x = self.pre_fc(x)
+    #             x = x.view(batch_size, 1, 64, 64)
+    #         else:
+    #             x = F.interpolate(x, size=(64, 64))
+
+    #         x = F.relu(self.conv1(x))
+    #         x = F.relu(self.conv2(x))
+
+    #         b2 = F.relu(self.b2_conv1(x))
+    #         b2 = self.b2_conv2(b2)
+    #         x = F.relu(x + b2)
+    #         x = self.b2_res(x)
+
+    #         x = F.relu(self.b2_out(x))
+
+    #         b3 = F.relu(self.b3_conv1(x))
+    #         b3 = self.b3_conv2(b3)
+    #         x = F.relu(x + b3)
+    #         x = self.b3_res(x)
+
+    #         x = F.relu(self.b3_out(x))
+    #         x = torch.flatten(x, 1)
+
+    #         for layer in self.fc_layers:
+    #             x = F.relu(layer(x))
+
+    #     # ================= DEEPCONV =================
+    #     elif self.architecture == "deepconv":
+    #         x = F.relu(self.conv1(x))
+    #         x = F.relu(self.conv2(x))
+    #         for block in self.deep_res2:
+    #             x = block(x)
+    #         x = F.relu(self.b2_out(x))
+    #         for block in self.deep_res3:
+    #             x = block(x)
+    #         x = F.relu(self.b3_out(x))
+    #         x = torch.flatten(x, 1)
+    #         x = F.relu(self.fc1(x))
+    #         for layer in self.fc_res:
+    #             aux = F.relu(layer(x))
+    #             x = x + aux
+
+    #     # ================= MLP =================
+    #     elif self.architecture == "mlpnn":
+    #         x = x.view(batch_size, -1)
+    #         x = self.mlp(x)
+
+        
+    #     for layer in self.latent_layers:
+    #         x = F.relu(layer(x))
+    #     return x
+
+
 
 if __name__ == "__main__":
     pass

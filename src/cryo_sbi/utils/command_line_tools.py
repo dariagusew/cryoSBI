@@ -262,7 +262,7 @@ def cl_pretrain_image_embed():
 
     # --- Model & Architecture ---
     parser.add_argument('--embedding', type=str, default='SPATIAL_CRYO',
-                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER'],
+                       choices=['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER', 'RESNET18', 'RESNET18_FFT_FILTER','CONVNET', 'HETSIREN', 'HETSIREN2'],
                        help='Embedding network architecture to use')
     parser.add_argument('--embedding_dim', type=int, default=16,
                        help='Output dimension of the embedding network (default: 16)')

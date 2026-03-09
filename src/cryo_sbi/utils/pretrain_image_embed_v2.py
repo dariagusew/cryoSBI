@@ -288,6 +288,302 @@ class SpatialCryoDecoder(nn.Module):
 
         return x
 
+class Sine(nn.Module):
+    def __init__(self, w0=1.0):
+        super().__init__()
+        self.w0 = w0
+
+    def forward(self, x):
+        return torch.sin(self.w0 * x)
+
+
+def sine_init(m, is_first=False, w0=30.0):
+    """SIREN weight initialization for nn.Linear"""
+    if isinstance(m, nn.Linear):
+        with torch.no_grad():
+            num_input = m.weight.size(-1)
+            if is_first:
+                bound = 1.0 / num_input
+            else:
+                bound = (6 / num_input)**0.5 / w0
+            m.weight.uniform_(-bound, bound)
+            if m.bias is not None:
+                m.bias.fill_(0)
+
+class HETSIRENDECODER(nn.Module):
+    """
+    HETSIREN Decoder compatibel to HETSIREN embedding 
+    """
+    def __init__(self, embedding_dim, generator, use_hyper_network=True, w0_first=30.0):  # CTF="apply"):
+        super().__init__()
+        self.generator = generator
+        #self.CTF = CTF
+        self.use_hyper_network = use_hyper_network
+        self.embedding_dim = embedding_dim
+        self.w0_first = w0_first
+
+        # Residual dense layers
+        self.res_layers = nn.ModuleList()
+        self.sine_activations = nn.ModuleList()
+
+        if use_hyper_network:
+            # Hypernetwork version requires MetaDenseWrapper in PyTorch
+            self.res_layers.append(MetaDenseWrapper(embedding_dim, embedding_dim, embedding_dim,
+                                                    w0=w0_first,
+                                                    meta_kernel_initializer=SIRENFirstLayerInitializer(scale=6.0)))
+            self.sine_activations.append(Sine(w0_first))
+            for _ in range(3):
+                self.res_layers.append(MetaDenseWrapper(embedding_dim, embedding_dim, embedding_dim,
+                                                        w0=1.0,
+                                                        meta_kernel_initializer=SIRENInitializer()))
+                self.sine_activations.append(Sine(1.0))
+        else:
+            # SIREN version
+            # First layer
+            layer = nn.Linear(embedding_dim, embedding_dim)
+            sine_init(layer, is_first=True, w0=w0_first)
+            self.res_layers.append(layer)
+            self.sine_activations.append(Sine(w0_first))
+
+            # Subsequent residual layers
+            for _ in range(3):
+                layer = nn.Linear(embedding_dim, embedding_dim)
+                sine_init(layer, is_first=False, w0=1.0)
+                self.res_layers.append(layer)
+                self.sine_activations.append(Sine(1.0))
+
+        # Final dense layer to total voxels
+        self.final_dense = nn.Linear(embedding_dim, generator.total_voxels)
+        nn.init.xavier_uniform_(self.final_dense.weight)
+        if self.final_dense.bias is not None:
+            self.final_dense.bias.data.fill_(0.0)
+        
+    def default_rows(self, batch_size):
+        return torch.zeros(batch_size, 3)  # shape [B,3]
+
+    def default_shifts(self, batch_size):
+        return torch.zeros(batch_size, 2)  # shape [B,2]
+    
+    def getRotatedGrid(self, rows):
+        return torch.zeros(rows.size(0), self.total_voxels)  # just a dummy
+    
+    def scatterImgByPass(self, coords, shifts, delta_het):
+        # For testing, just reshape delta_het to "volume"
+        B = delta_het.size(0)
+        size = int(round(delta_het.size(1) ** (1/3)))  # assume cubic
+        return delta_het.view(B, size, size, size)
+
+    def forward_delta(self, latent):
+        """
+        Pass latent through dense residual blocks with SIREN activations
+        Returns delta_het [B, total_voxels]
+        """
+        x = latent
+        for i, layer in enumerate(self.res_layers):
+            out = layer(x)
+            if i > 0:
+                x = x + out  # residual addition
+            else:
+                x = out
+            # Apply sine activation if not hypernetwork
+            if not self.use_hyper_network:
+                x = self.sine_activations[i](x)
+        delta_het = self.final_dense(x)
+        return delta_het
+
+    def forward(self, latent):
+        """
+        Args:
+            latent: [B, embedding_dim]
+        Returns:
+            reconstruction: [B, 1, H, W] or [B, D, D, D] depending on generator
+        """
+        batch_size = latent.size(0)
+
+        # Generate default rows/shifts internally
+        rows = self.default_rows(batch_size)      # [B, 3]
+        shifts = self.default_shifts(batch_size)  # [B, 2]
+
+        # Dense residual blocks -> delta
+        delta_het = self.forward_delta(latent)
+
+        # Scatter delta into 3D/2D volume
+        coords = self.getRotatedGrid(rows)
+        decoded = self.scatterImgByPass(coords, shifts, delta_het)
+
+        # Post-processing
+        #decoded = self.generator.gaussianFilterImage(decoded)
+        #decoded = self.generator.softThresholdImage(decoded)
+
+        #if self.CTF == "apply":
+        #    decoded = self.generator.ctfFilterImage(decoded)
+
+        # Return single reconstruction (compatible with ImageEmbedPretrainModel)
+        return decoded
+
+
+# Minimal Sine activation for SIREN
+class Sine(nn.Module):
+    def __init__(self, w0=1.0):
+        super().__init__()
+        self.w0 = w0
+    def forward(self, x):
+        return torch.sin(self.w0 * x)
+
+def sine_init(layer, is_first=False, w0=1.0):
+    """Custom SIREN initialization for Linear layers"""
+    with torch.no_grad():
+        if is_first:
+            layer.weight.uniform_(-1 / layer.in_features, 1 / layer.in_features)
+        else:
+            layer.weight.uniform_(-math.sqrt(6 / layer.in_features) / w0,
+                                  math.sqrt(6 / layer.in_features) / w0)
+        if layer.bias is not None:
+            layer.bias.fill_(0.0)
+
+
+# class HETSIRENDECODER_LIGHT(nn.Module):
+#     def __init__(self, embedding_dim, output_size, use_hyper_network=False, w0_first=30.0):
+#         """
+#         HETSIREN Decoder compatibel to HETSIREN embedding 
+#         Lightweight, some functions were stubbed for the moment
+#         Args:
+#             embedding_dim: dimensionality of latent embedding
+#             output_size: cubic size D of output [B, D, D, D]
+#             use_hyper_network: if True, use MetaDenseWrapper (stubbed here)
+#             w0_first: initial w0 for SIREN
+#         """
+#         super().__init__()
+#         self.embedding_dim = embedding_dim
+#         self.output_size = output_size
+#         self.total_voxels = output_size ** 3
+#         self.use_hyper_network = use_hyper_network
+
+#         # Residual dense network
+#         self.res_layers = nn.ModuleList()
+#         self.sine_activations = nn.ModuleList()
+
+#         if use_hyper_network:
+#             # Stub MetaDenseWrapper with normal Linear for now
+#             self.res_layers.append(nn.Linear(embedding_dim, embedding_dim))
+#             self.sine_activations.append(Sine(w0_first))
+#             for _ in range(3):
+#                 self.res_layers.append(nn.Linear(embedding_dim, embedding_dim))
+#                 self.sine_activations.append(Sine(1.0))
+#         else:
+#             # SIREN dense layers
+#             layer = nn.Linear(embedding_dim, embedding_dim)
+#             sine_init(layer, is_first=True, w0=w0_first)
+#             self.res_layers.append(layer)
+#             self.sine_activations.append(Sine(w0_first))
+#             for _ in range(3):
+#                 layer = nn.Linear(embedding_dim, embedding_dim)
+#                 sine_init(layer, is_first=False, w0=1.0)
+#                 self.res_layers.append(layer)
+#                 self.sine_activations.append(Sine(1.0))
+
+#         # Final linear layer to total voxels
+#         self.final_dense = nn.Linear(embedding_dim, self.total_voxels)
+#         nn.init.xavier_uniform_(self.final_dense.weight)
+#         if self.final_dense.bias is not None:
+#             self.final_dense.bias.data.fill_(0.0)
+
+#     def forward_delta(self, latent):
+#         """Pass latent through residual SIREN layers to get delta_het"""
+#         x = latent
+#         for i, layer in enumerate(self.res_layers):
+#             out = layer(x)
+#             if i > 0:
+#                 x = x + out
+#             else:
+#                 x = out
+#             if not self.use_hyper_network:
+#                 x = self.sine_activations[i](x)
+#         delta_het = self.final_dense(x)
+#         return delta_het
+
+#     def forward(self, latent):
+#         """
+#         Args:
+#             latent: [B, embedding_dim]
+#         Returns:
+#             decoded: [B, 1, H, W]
+#         """
+#         x = self.forward_delta(latent)
+#         x = self.final_dense(x)  # [B, H*W]
+#         B = x.size(0)
+#         decoded = x.view(B, 1, self.output_size, self.output_size)
+#         return decoded
+    
+class HETSIRENDECODER_LIGHT(nn.Module):
+    """
+        HETSIREN Decoder compatibel to HETSIREN embedding 
+        Lightweight, some functions were stubbed for the moment
+        Args:
+            embedding_dim: dimensionality of latent embedding
+            output_size: cubic size D of output [B, D, D, D]
+            use_hyper_network: if True, use MetaDenseWrapper (stubbed here)
+            w0_first: initial w0 for SIREN
+        """
+    def __init__(self, embedding_dim, output_size, use_hyper_network=False, w0_first=30.0):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+        self.output_size = output_size
+        self.total_voxels = output_size * output_size  # 2D projections
+        self.use_hyper_network = use_hyper_network
+
+        # Residual dense network
+        self.res_layers = nn.ModuleList()
+        self.sine_activations = nn.ModuleList()
+
+        if use_hyper_network:
+            # Stub Hypernetwork with normal Linear
+            self.res_layers.append(nn.Linear(embedding_dim, embedding_dim))
+            self.sine_activations.append(Sine(w0_first))
+            for _ in range(3):
+                self.res_layers.append(nn.Linear(embedding_dim, embedding_dim))
+                self.sine_activations.append(Sine(1.0))
+        else:
+            # SIREN dense layers
+            layer = nn.Linear(embedding_dim, embedding_dim)
+            sine_init(layer, is_first=True, w0=w0_first)
+            self.res_layers.append(layer)
+            self.sine_activations.append(Sine(w0_first))
+            for _ in range(3):
+                layer = nn.Linear(embedding_dim, embedding_dim)
+                sine_init(layer, is_first=False, w0=1.0)
+                self.res_layers.append(layer)
+                self.sine_activations.append(Sine(1.0))
+
+        # Final linear layer to flatten 2D output
+        self.final_dense = nn.Linear(embedding_dim, self.total_voxels)
+        nn.init.xavier_uniform_(self.final_dense.weight)
+        if self.final_dense.bias is not None:
+            self.final_dense.bias.data.fill_(0.0)
+
+    def forward_delta(self, latent):
+        """Pass latent through residual SIREN layers to get delta_het [B, H*W]"""
+        x = latent
+        for i, layer in enumerate(self.res_layers):
+            out = layer(x)
+            x = x + out if i > 0 else out
+            if not self.use_hyper_network:
+                x = self.sine_activations[i](x)
+        delta_het = self.final_dense(x)  # [B, H*W]
+        return delta_het
+
+    def forward(self, latent):
+        """
+        Args:
+            latent: [B, embedding_dim]
+        Returns:
+            decoded: [B, 1, H, W]
+        """
+        delta_het = self.forward_delta(latent)  # [B, H*W]
+        B = delta_het.size(0)
+        decoded = delta_het.view(B, 1, self.output_size, self.output_size)  # 2D projection
+        return decoded
+
 # ============================================================================
 # MODEL WRAPPER
 # ============================================================================
@@ -311,6 +607,11 @@ class ImageEmbedPretrainModel(nn.Module):
         if embedding_name in ['SPATIAL_CRYO', 'SPATIAL_CRYO_FFT_FILTER', 'SPATIAL_CRYO_GAUSS_FFT_FILTER']:
            self.decoder = SpatialCryoDecoder(embedding_dim, image_size)
            print(f"  Decoder: SpatialCryoDecoder")
+
+        if embedding_name in ['HETSIREN', 'HETSIREN2']:
+           self.decoder = HETSIRENDECODER_LIGHT(embedding_dim, image_size)
+           print(f"  Decoder: HETSIRENDECODER_LIGHT")
+
         else:
            self.decoder = SimpleDecoder(embedding_dim, image_size)
            print(f"  Decoder: SimpleDecoder")

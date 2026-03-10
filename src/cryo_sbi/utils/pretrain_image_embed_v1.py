@@ -1,41 +1,34 @@
+# "pretrain_image_embed_v3.py"
 """
-pretrain_image_embed_v1.py
-
-Simplified unsupervised pre-training of image encoder.
-Supports 3 training modes:
-- 'synthetic': Train on simulated images only
-- 'real': Train on real images only  
-- 'mixed': Train on both (50/50 mix)
-
-Can resume from checkpoint for fine-tuning with different data mix.
+pretrain_image_embed_v3.py
 
 Usage (train on synthetic):
-    python pretrain_image_embed.py \
+    python pretrain_image_embed_v3.py \
         --image_config config.json \
         --training_mode synthetic \
-        --embedding SPATIAL_CRYO_FFT_FILTER \
+        --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
         --epochs 100 \
         --batch_size 256
 
 Usage (fine-tune on real):
-    python pretrain_image_embed.py \
+    python pretrain_image_embed_v3.py \
         --image_config config.json \
         --training_mode real \
         --real_images real_data.mrc \
         --resume_from pretrained_image_embed_full_model.pt \
-        --embedding SPATIAL_CRYO_FFT_FILTER \
+        --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
         --epochs 20 \
         --batch_size 256 \
         --lr 2e-4
 
 Usage (train on mixed):
-    python pretrain_image_embed.py \
+    python pretrain_image_embed_v3.py \
         --image_config config.json \
         --training_mode mixed \
         --real_images real_data.mrc \
-        --embedding SPATIAL_CRYO_FFT_FILTER \
+        --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
         --epochs 100 \
         --batch_size 256
@@ -65,94 +58,73 @@ except ImportError:
 
 
 # ============================================================================
-# MRC FILE HANDLING
+# ROBUST MRC FILE HANDLING
 # ============================================================================
 
 def check_mrc_file_size(filepath):
     """Check MRC file size in bytes and GB."""
     filepath = Path(filepath)
     file_size = filepath.stat().st_size
-    file_size_gb = file_size / (1024**3)
-    return file_size, file_size_gb
-
+    return file_size, file_size / (1024**3)
 
 def validate_mrc_data(data):
-    """Validate MRC data after reading."""
-    if data is None:
-        return False, "Data is None"
-    if data.size == 0:
-        return False, "Data is empty"
-    if data.ndim not in [2, 3]:
-        return False, f"Invalid dimensions: {data.ndim}D"
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
+    if data is None or data.size == 0 or data.ndim not in [2, 3]:
+        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
     try:
-        if np.all(data == 0):
-            return False, "All data is zero"
-        if np.any(np.isnan(data)):
-            return False, "Data contains NaN"
-        if np.any(np.isinf(data)):
-            return False, "Data contains inf"
-        if np.std(data) == 0:
-            return False, "Zero variance"
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
+        if np.all(test_data == 0): return False, "All data is zero"
+        if np.any(np.isnan(test_data)): return False, "Data contains NaN"
+        if np.any(np.isinf(test_data)): return False, "Data contains inf"
+        if np.std(test_data) == 0: return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
-
 def read_mrc_header_raw(filepath):
-    """Read MRC header manually."""
+    """Read MRC header manually if standard methods fail."""
     try:
         with open(filepath, 'rb') as f:
             header_bytes = f.read(1024)
-            if len(header_bytes) < 1024:
-                return None
+            if len(header_bytes) < 1024: return None
             import struct
             nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
             mode = struct.unpack('i', header_bytes[12:16])[0]
-            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode, 'header_size': 1024}
+            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
     except:
         return None
-
 
 def get_dtype_from_mode(mode):
     """Convert MRC mode to numpy dtype."""
     dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
     return dtype_map.get(mode, np.float32)
 
-
 def validate_mrc_dimensions(nx, ny, nz):
     """Check if dimensions are reasonable."""
-    if nx <= 0 or ny <= 0 or nz <= 0:
-        return False, f"Non-positive: {nz}×{ny}×{nx}"
-    if nx > 8192 or ny > 8192:
-        return False, f"Too large: {ny}×{nx}"
-    if nz > 50000000:
-        return False, f"Stack too large: {nz}"
+    if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
+    if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
+    if nz > 50000000: return False, f"Stack too large: {nz}"
     return True, "Valid"
 
-
 def open_mrc_robust(filepath, max_size_gb=None):
-    """Robustly open MRC file with fallback methods."""
+    """
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
+    """
     filepath = Path(filepath)
-    
     if not filepath.exists():
         return None, False, "File not found"
-    
+
     file_size, file_size_gb = check_mrc_file_size(filepath)
     if max_size_gb is not None and file_size_gb > max_size_gb:
         return None, False, f"Too large: {file_size_gb:.2f} GB"
-    
-    # Method 1: Standard
-    try:
-        with mrcfile.open(filepath, permissive=True, mode='r') as mrc:
-            if mrc.data is not None and mrc.data.size > 0:
-                is_valid, msg = validate_mrc_data(mrc.data)
-                if is_valid:
-                    data = np.array(mrc.data) if file_size_gb < 1.0 else mrc.data
-                    return data, True, "Standard"
-    except:
-        pass
-    
-    # Method 2: Force-read
+
     try:
         header_info = read_mrc_header_raw(filepath)
         if header_info is not None:
@@ -160,17 +132,14 @@ def open_mrc_robust(filepath, max_size_gb=None):
             is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
             if not is_valid:
                 return None, False, msg
-            
             dtype = get_dtype_from_mode(mode)
             data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
-            
             is_valid, msg = validate_mrc_data(data[0])
             if is_valid:
-                return data, True, f"Force-read memmap"
+                return data, True, f"Memmap via manual header read"
     except Exception as e:
         return None, False, f"Failed: {str(e)[:100]}"
-    
-    return None, False, "All methods failed"
+    return None, False, "All MRC opening methods failed"
 
 
 # ============================================================================
@@ -393,7 +362,8 @@ class RealImageMRCDataset(Dataset):
             oldest = self.cache_order.pop(0)
             del self.cache[oldest]
         
-        self.cache[idx] = torch.FloatTensor(img)
+        # Using .copy() is important with memmap to ensure the tensor owns its memory
+        self.cache[idx] = torch.from_numpy(img.copy())
         self.cache_order.append(idx)
         
         return self.cache[idx]
@@ -474,7 +444,7 @@ def pretrain_image_embed(
     training_mode: str = 'synthetic',  # 'synthetic', 'real', or 'mixed'
     real_images_path: str = None,
     resume_from: str = None,
-    embedding_name: str = 'SPATIAL_CRYO_FFT_FILTER',
+    embedding_name: str = 'SPATIAL_CRYO',
     device: str = 'cuda',
     embedding_dim: int = 16,
     epochs: int = 100,
@@ -485,7 +455,7 @@ def pretrain_image_embed(
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
     l2_weight: float = 0.0,
-    mix_ratio: float = 0.5
+    mix_ratio: float = 0.9
 ):
     """
     Unsupervised pre-training with flexible data sources
@@ -617,6 +587,8 @@ def pretrain_image_embed(
     # Setup optimizer
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
     # Setup simulation parameters if needed
     if training_mode in ['synthetic', 'mixed']:
        simulation_param = create_simulation_param(image_config, models, device=device)
@@ -787,6 +759,8 @@ def pretrain_image_embed(
                 print(f"    Embedding dist: {emb_dist:.6f}")
                 
                 model.train()
+            
+            scheduler.step()
 
     
     # Final embedding health check
@@ -879,4 +853,3 @@ def pretrain_image_embed(
     print("="*70 + "\n")
     
     return model, final_loss
-

@@ -91,7 +91,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         mtf, nps, sf = get_mtf_nps_grids(simulation_param)
         # Update the dictionary with the new values.
         simulation_param["mtf"] = mtf
-        simulation_param["nps"] = nps
+        simulation_param["nps-e"] = nps
         simulation_param["sf"] = sf
 
     # check parameters for Empirical noise
@@ -224,7 +224,7 @@ def cryo_em_simulator(
        # Get pre-calculated values for noise model Poisson-MTF 
        if noise_type == "Poisson-MTF":
           mtf = simulation_param["mtf"]
-          nps = simulation_param["nps"]
+          nps = simulation_param["nps-e"]
           sf = simulation_param["sf"].expand(snr.shape[0], 1, 1)
 
        # Define target snr to account for MTF/NPS:

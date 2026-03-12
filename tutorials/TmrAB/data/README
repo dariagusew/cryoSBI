@@ -3,3 +3,6 @@ lftp -c "open https://ftp.ebi.ac.uk/empiar/world_availability/10317/data/Particl
 
 2) Reduce size
 process_mrc_stack 1p5mln-TmrAB-stack-EMPIAR.mrcs 1p5mln-TmrAB-stack-128-small.mrcs 128 --batch-size 512 --voxel-size 1.077 --stride 10
+
+3) Create empirical noise model
+python calculate_nps_from_mrc_CTF_zeros_v2.5.py --in_stack 1p5mln-TmrAB-stack-128-small.mrcs --in_star 1p5mln-TmrAB-stack.star --stride 10 --output_nps noise.mrc --plot --pixel_size 2.154 --zero_threshold 0.10 --exclude_first 7

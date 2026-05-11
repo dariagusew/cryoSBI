@@ -39,8 +39,6 @@ from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
 from typing import Optional
 
-<<<<<<< src/cryo_sbi/utils/pretrain_image_embed_v2.py
-=======
 try:
     import mrcfile
     MRCFILE_AVAILABLE = True
@@ -169,7 +167,6 @@ class RealImageMRCDataset(Dataset):
         self.cache_order.append(idx)
         return self.cache[idx]
 
->>>>>>> src/cryo_sbi/utils/pretrain_image_embed_v2.py.from
 # ============================================================================
 # DECODERS
 # ============================================================================
@@ -492,8 +489,6 @@ def pretrain_image_embed(
     # Setup simulation parameters
     simulation_param = create_simulation_param(image_config, models, device=device)
 
-<<<<<<< src/cryo_sbi/utils/pretrain_image_embed_v2.py
-=======
     real_train_loader = None
     if real_data_fraction > 0.0:
         print(f"\n--- Setting up real data loader for fine-tuning (starting epoch {split_epoch}) ---")
@@ -509,7 +504,6 @@ def pretrain_image_embed(
         real_train_iter = iter(real_train_loader)
         print("------------------------------------------------------------------------------------\n")
 
->>>>>>> src/cryo_sbi/utils/pretrain_image_embed_v2.py.from
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")

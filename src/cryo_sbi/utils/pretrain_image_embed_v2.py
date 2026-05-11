@@ -37,7 +37,139 @@ from pathlib import Path
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_simulation_param
+from typing import Optional
 
+<<<<<<< src/cryo_sbi/utils/pretrain_image_embed_v2.py
+=======
+try:
+    import mrcfile
+    MRCFILE_AVAILABLE = True
+except ImportError:
+    MRCFILE_AVAILABLE = False
+    print("Warning: mrcfile not installed. Real image loading for fine-tuning disabled.")
+
+# ============================================================================
+# ROBUST MRC FILE HANDLING
+# ============================================================================
+
+def check_mrc_file_size(filepath):
+    """Check MRC file size in bytes and GB."""
+    filepath = Path(filepath)
+    file_size = filepath.stat().st_size
+    return file_size, file_size / (1024**3)
+
+def validate_mrc_data(data):
+    """
+    Validate MRC data after reading. This version is 'memmap-aware' to avoid
+    loading entire large files into memory for validation.
+    """
+    if data is None or data.size == 0 or data.ndim not in [2, 3]:
+        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
+    try:
+        if isinstance(data, np.memmap):
+            test_data = data[0] if data.ndim == 3 else data
+        else:
+            test_data = data
+        if np.all(test_data == 0): return False, "All data is zero"
+        if np.any(np.isnan(test_data)): return False, "Data contains NaN"
+        if np.any(np.isinf(test_data)): return False, "Data contains inf"
+        if np.std(test_data) == 0: return False, "Zero variance"
+        return True, "Valid"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+def read_mrc_header_raw(filepath):
+    """Read MRC header manually if standard methods fail."""
+    try:
+        with open(filepath, 'rb') as f:
+            header_bytes = f.read(1024)
+            if len(header_bytes) < 1024: return None
+            import struct
+            nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
+            mode = struct.unpack('i', header_bytes[12:16])[0]
+            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
+    except:
+        return None
+
+def get_dtype_from_mode(mode):
+    """Convert MRC mode to numpy dtype."""
+    dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
+    return dtype_map.get(mode, np.float32)
+
+def validate_mrc_dimensions(nx, ny, nz):
+    """Check if dimensions are reasonable."""
+    if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
+    if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
+    if nz > 50000000: return False, f"Stack too large: {nz}"
+    return True, "Valid"
+
+def open_mrc_robust(filepath, max_size_gb=None):
+    """
+    Robustly open MRC file with fallback methods, prioritizing memory-mapping
+    to avoid loading large files into RAM.
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        return None, False, "File not found"
+
+    file_size, file_size_gb = check_mrc_file_size(filepath)
+    if max_size_gb is not None and file_size_gb > max_size_gb:
+        return None, False, f"Too large: {file_size_gb:.2f} GB"
+
+    try:
+        header_info = read_mrc_header_raw(filepath)
+        if header_info is not None:
+            nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
+            is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
+            if not is_valid:
+                return None, False, msg
+            dtype = get_dtype_from_mode(mode)
+            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
+            is_valid, msg = validate_mrc_data(data)
+            if is_valid:
+                return data, True, f"Memmap via manual header read"
+    except Exception as e:
+        return None, False, f"Failed: {str(e)[:100]}"
+    return None, False, "All MRC opening methods failed"
+
+
+class RealImageMRCDataset(Dataset):
+    """
+    Dataset for loading real images from MRC stack
+    Efficient streaming without loading all into memory
+    """
+    def __init__(self, mrc_path, cache_size=10000):
+        if not MRCFILE_AVAILABLE:
+            raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
+        self.mrc_path = mrc_path
+        self.cache_size = cache_size
+        print(f"  Opening MRC file: {mrc_path}")
+        self.mrc_data, success, method = open_mrc_robust(mrc_path)
+        if not success:
+            raise RuntimeError(f"Failed to open MRC file: {method}")
+        self.n_images = self.mrc_data.shape[0]
+        self.image_shape = self.mrc_data.shape[1:]
+        print(f"  Loaded MRC: {self.n_images} images of shape {self.image_shape}")
+        print(f"  Loading method: {method}")
+        self.cache = {}
+        self.cache_order = []
+
+    def __len__(self):
+        return self.n_images
+
+    def __getitem__(self, idx):
+        if idx in self.cache:
+            return self.cache[idx]
+        img = self.mrc_data[idx].astype(np.float32)
+        img = (img - img.mean()) / (img.std() + 1e-8)
+        if len(self.cache) >= self.cache_size:
+            oldest = self.cache_order.pop(0)
+            del self.cache[oldest]
+        self.cache[idx] = torch.from_numpy(img.copy())
+        self.cache_order.append(idx)
+        return self.cache[idx]
+
+>>>>>>> src/cryo_sbi/utils/pretrain_image_embed_v2.py.from
 # ============================================================================
 # DECODERS
 # ============================================================================
@@ -235,56 +367,6 @@ def count_parameters(model):
     }
 
 
-def generate_validation_set(prior_loader, models, simulation_param, val_size, device):
-    """
-    Generates a fixed set of validation images with a specific noise model.
-    """
-    print(f"\nGenerating {val_size} validation images with Gaussian noise...")
-    
-    val_images = []
-    generated_count = 0
-    val_iter = iter(prior_loader)
-
-    with tqdm(total=val_size, desc="  Generating val set") as pbar:
-        while generated_count < val_size:
-            try:
-                parameters = next(val_iter)
-            except StopIteration:
-                val_iter = iter(prior_loader) # Reset if we run out
-                parameters = next(val_iter)
-            
-            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-            # change b_factors from 50.0 to 200.0
-            ndata = indices.shape[0]
-            b_factor = 50.0 + (200.0 - 50.0) * torch.rand(ndata, 1, 1, device=device)
-
-            images, _ = cryo_em_simulator(
-                models,
-                indices.to(device, non_blocking=True),
-                quaternions.to(device, non_blocking=True),
-                shift.to(device, non_blocking=True),
-                defocus.to(device, non_blocking=True),
-                b_factor.to(device, non_blocking=True),
-                amp.to(device, non_blocking=True),
-                snr.to(device, non_blocking=True),
-                simulation_param,
-                "Gaussian"
-            )
-            
-            val_images.append(images)
-            generated_count += len(images)
-            pbar.update(len(images))
-
-    # Concatenate all generated images
-    all_images = torch.cat(val_images, dim=0)
-    # Compute memory
-    val_mem_gb = all_images.nelement() * all_images.element_size() / 1024**3
-
-    print(f"✅ Validation set created with {len(all_images)} images, consuming {val_mem_gb:.2f} GB of VRAM.")
-    return all_images
-
-
 # ============================================================================
 # MAIN TRAINING FUNCTION
 # ============================================================================
@@ -302,7 +384,9 @@ def pretrain_image_embed(
     save_path: str = 'pretrained_image_embed.pt',
     check_frequency: int = 5,
     n_batches_per_epoch: int = 100,
-    l2_weight: float = 0.0
+    l2_weight: float = 0.0,
+    real_data_mrc_path: Optional[str] = None,
+    real_data_fraction: float = 0.0
 ):
     """
     Unsupervised pre-training on synthetic data
@@ -321,6 +405,8 @@ def pretrain_image_embed(
         check_frequency: How often to print detailed stats
         n_batches_per_epoch: Number of simulation batches per epoch
         l2_weight: Weight for L2 regularization on embeddings
+        real_data_mrc_path: Path to .mrc file with real data for fine-tuning.
+        real_data_fraction: Fraction of final epochs to fine-tune on real data.
 
     Returns:
         model: Trained model
@@ -329,11 +415,19 @@ def pretrain_image_embed(
     
     print("\n" + "="*70)
     print(f"PRETRAINING: {embedding_name}")
-    print(f"Training mode: SYNTHETIC ONLY")
+    if real_data_fraction > 0:
+        print(f"Training mode: SYNTHETIC -> REAL (fine-tune for last {real_data_fraction*100:.0f}% of epochs)")
+    else:
+        print(f"Training mode: SYNTHETIC ONLY")
     if resume_from:
         print(f"Resuming from: {resume_from}")
     print("="*70)
+
+    if real_data_fraction > 0 and not real_data_mrc_path:
+        raise ValueError("A `real_data_mrc_path` must be provided to use real data fine-tuning.")
     
+    split_epoch = int(epochs * (1.0 - real_data_fraction))
+
     # Load image config
     image_config = json.load(open(image_config_path))
     image_size = image_config["N_PIXELS"]
@@ -398,6 +492,24 @@ def pretrain_image_embed(
     # Setup simulation parameters
     simulation_param = create_simulation_param(image_config, models, device=device)
 
+<<<<<<< src/cryo_sbi/utils/pretrain_image_embed_v2.py
+=======
+    real_train_loader = None
+    if real_data_fraction > 0.0:
+        print(f"\n--- Setting up real data loader for fine-tuning (starting epoch {split_epoch}) ---")
+        real_train_dataset = RealImageMRCDataset(real_data_mrc_path)
+        real_train_loader = DataLoader(
+            real_train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+            drop_last=True
+        )
+        real_train_iter = iter(real_train_loader)
+        print("------------------------------------------------------------------------------------\n")
+
+>>>>>>> src/cryo_sbi/utils/pretrain_image_embed_v2.py.from
     print("\nTraining configuration:")
     print(f"  Embedding: {embedding_name}")
     print(f"  Embedding dimension: {embedding_dim}")
@@ -434,34 +546,20 @@ def pretrain_image_embed(
             epoch_recon_loss = 0
             epoch_l2_loss = 0
             n_batches = 0
- 
-            for batch_idx in range(n_batches_per_epoch):
+
+            if epoch >= split_epoch and real_data_fraction > 0.0:
+                # PHASE 2: Fine-tuning on real data
+                tq.set_description("Fine-tuning (Real Data)")
                 
-                try:
-                    parameters = next(synthetic_iter)
-                except StopIteration:
-                    synthetic_iter = iter(synthetic_loader)
-                    parameters = next(synthetic_iter)
+                # We iterate 4*n_batches_per_epoch times to keep epoch lengths consistent
+                for _ in range(4*n_batches_per_epoch):
+                    try:
+                        batch_images = next(real_train_iter)
+                    except StopIteration:
+                        real_train_iter = iter(real_train_loader)
+                        batch_images = next(real_train_iter)
 
-                (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-                # get synthetic images
-                images, _ = cryo_em_simulator(
-                    models,
-                    indices.to(device, non_blocking=True),
-                    quaternions.to(device, non_blocking=True),
-                    shift.to(device, non_blocking=True),
-                    defocus.to(device, non_blocking=True),
-                    b_factor.to(device, non_blocking=True),
-                    amp.to(device, non_blocking=True),
-                    snr.to(device, non_blocking=True),
-                    simulation_param,
-                    simulation_param["noise"]
-                )
-
-                # Train on mini-batches
-                for i in range(0, len(images), batch_size):
-                    batch_images = images[i:i+batch_size]
+                    batch_images = batch_images.to(device, non_blocking=True)
                     
                     optimizer.zero_grad()
                     
@@ -487,7 +585,64 @@ def pretrain_image_embed(
                     epoch_recon_loss += recon_loss.item()
                     epoch_l2_loss += l2_loss.item()
                     n_batches += 1
-            
+
+            else:
+                # PHASE 1: Standard pre-training on simulated data
+                tq.set_description("Pre-training (Synthetic)")
+
+                for batch_idx in range(n_batches_per_epoch):
+
+                    try:
+                        parameters = next(synthetic_iter)
+                    except StopIteration:
+                        synthetic_iter = iter(synthetic_loader)
+                        parameters = next(synthetic_iter)
+
+                    (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
+
+                    # get synthetic images
+                    images, _ = cryo_em_simulator(
+                        models,
+                        indices.to(device, non_blocking=True),
+                        quaternions.to(device, non_blocking=True),
+                        shift.to(device, non_blocking=True),
+                        defocus.to(device, non_blocking=True),
+                        b_factor.to(device, non_blocking=True),
+                        amp.to(device, non_blocking=True),
+                        snr.to(device, non_blocking=True),
+                        simulation_param,
+                        simulation_param["noise"]
+                    )
+
+                    # Train on mini-batches
+                    for i in range(0, len(images), batch_size):
+                        batch_images = images[i:i+batch_size]
+
+                        optimizer.zero_grad()
+
+                        # Forward pass
+                        embeddings, reconstruction = model(batch_images)
+
+                        # Reconstruction loss
+                        recon_loss = F.mse_loss(reconstruction.squeeze(1), batch_images)
+
+                        # L2 regularization - per-sample norm
+                        l2_loss = (torch.norm(embeddings, dim=1) ** 2).mean()
+
+                        # Total loss
+                        loss = recon_loss + l2_weight * l2_loss
+
+                        # Backward pass
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                        optimizer.step()
+
+                        # Track metrics
+                        epoch_loss += loss.item()
+                        epoch_recon_loss += recon_loss.item()
+                        epoch_l2_loss += l2_loss.item()
+                        n_batches += 1
+
             # Epoch statistics
             avg_loss = epoch_loss / n_batches
             avg_recon_loss = epoch_recon_loss / n_batches
@@ -616,4 +771,3 @@ def pretrain_image_embed(
     print("="*70 + "\n")
     
     return model, final_loss
-

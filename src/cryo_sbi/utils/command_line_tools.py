@@ -316,6 +316,10 @@ def cl_pretrain_image_embed():
                        help='Number of simulation batches to generate per epoch (default: 100)')
     parser.add_argument('--check_frequency', type=int, default=5,
                        help='How often to print detailed stats, in epochs (default: 5)')
+    parser.add_argument('--real_data_mrc_path', type=str, default=None,
+                       help='Path to .mrc file with real data for fine-tuning.')
+    parser.add_argument('--real_data_fraction', type=float, default=0.0,
+                       help='Fraction of final epochs to fine-tune on real data.')
 
     args = parser.parse_args()
 

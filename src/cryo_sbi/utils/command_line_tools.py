@@ -1,4 +1,5 @@
 import argparse
+import json
 from modulefinder import Module
 import sys
 import torch
@@ -175,7 +176,7 @@ def cl_process_mrc_stack():
 
     # Process
     try:
-        success = process_mrc_stack(
+        result = process_mrc_stack(
             input_path=args.input,
             output_path=args.output,
             target_size=args.size,
@@ -189,8 +190,12 @@ def cl_process_mrc_stack():
             subtract_ctf=args.subtract_ctf,
             star_file=args.star_file,
         )
-        
-        sys.exit(0 if success else 1)
+
+        if result:
+            print(json.dumps(result, indent=2))
+            sys.exit(0)
+        else:
+            sys.exit(1)
         
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")

@@ -5,6 +5,7 @@ Optimized for very large files (100+ GB).
 """
 
 import argparse
+import json
 import numpy as np
 import torch
 import mrcfile
@@ -349,6 +350,9 @@ def parse_star_file_ctf(star_path: str) -> List[Dict]:
         '_rlnPhaseShift':          ('phase_shift',        0.0),
         '_rlnCtfBfactor':          ('bfactor',            0.0),
         '_rlnCtfScalefactor':      ('scale_factor',       1.0),
+        '_rlnDosePerFrame':        ('dose_per_frame',     None),
+        '_rlnMicrographDose':      ('micrograph_dose',    None),
+        '_rlnAccumMotionTotal':    ('accum_dose',         None),
     }
     _REQUIRED = {
         '_rlnDefocusU', '_rlnDefocusV', '_rlnDefocusAngle',
@@ -562,6 +566,11 @@ def process_mrc_stack(
         subtract_ctf: bool, if True subtract the CTF from each particle
         star_file: str or Path or None, RELION STAR file with CTF parameters
                    (required when subtract_ctf=True)
+
+    Returns:
+        On success: dict with keys 'mrc_file', 'star_file', 'dose',
+                    'pixel_size', 'image_size'.
+        On failure: False.
     """
     
     print(f"=" * 80)
@@ -596,6 +605,9 @@ def process_mrc_stack(
     if file_size_gb > 10:
         print(f"  ⚠️  Large file detected - using memory-mapped I/O")
     
+    # Collect dose from STAR file (populated later if available)
+    _dose_value = None
+
     # Open MRC as memmap (never loads into RAM)
     with open_mrc_memmap(input_path, max_size_gb=max_size_gb) as (data, success, msg):
         if not success:
@@ -636,6 +648,12 @@ def process_mrc_stack(
                 elif len(ctf_params_all) > nz:
                     print(f"  ⚠️  STAR file has more entries ({len(ctf_params_all)}) "
                           f"than MRC stack ({nz}). Extra entries will be ignored.")
+                # Extract dose: prefer micrograph_dose, then dose_per_frame, then accum_dose
+                for dose_key in ('micrograph_dose', 'dose_per_frame', 'accum_dose'):
+                    candidate = ctf_params_all[0].get(dose_key)
+                    if candidate is not None:
+                        _dose_value = candidate
+                        break
             except Exception as e:
                 print(f"❌ Failed to read STAR file: {e}")
                 return False
@@ -814,16 +832,36 @@ def process_mrc_stack(
     
     # Verify output
     print(f"\n🔍 Verifying output...")
+    final_pixel_size = output_voxel_size
+    final_image_size = target_size
     try:
         with mrcfile.open(output_path, mode='r') as mrc:
             print(f"✓ Output file is valid")
             print(f"  Shape: {mrc.data.shape}")
             print(f"  Voxel size: {mrc.voxel_size.x:.3f} Å")
+            final_pixel_size = float(mrc.voxel_size.x)
+            final_image_size = mrc.data.shape[1]
     except Exception as e:
         print(f"⚠️  Warning: Could not verify output: {str(e)}")
     
     print(f"\n{'=' * 80}")
     print(f"✅ SUCCESS: Processing complete")
     print(f"{'=' * 80}\n")
-    
-    return True
+
+    result = {
+        "mrc_file": str(output_path),
+        "star_file": str(star_file) if star_file is not None else None,
+        "dose": _dose_value,
+        "pixel_size": final_pixel_size,
+        "image_size": final_image_size,
+    }
+
+    json_path = output_path.with_suffix(".json")
+    try:
+        with open(json_path, "w") as fh:
+            json.dump(result, fh, indent=2)
+        print(f"  Summary saved to: {json_path}")
+    except Exception as e:
+        print(f"⚠️  Warning: Could not write JSON summary: {str(e)}")
+
+    return result

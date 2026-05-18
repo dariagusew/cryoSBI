@@ -621,6 +621,12 @@ def run_inference_real_data(args):
     log_probs_matrix = log_probs_matrix.T
     print(f"Likelihood matrix evaluation complete. Shape: {log_probs_matrix.shape}")
 
+    # 5b. Optionally save the likelihood matrix
+    log_likelihood_file = getattr(args, "log_likelihood_file", None)
+    if log_likelihood_file is not None:
+        print(f"Saving likelihood matrix to {log_likelihood_file}")
+        torch.save(log_probs_matrix, log_likelihood_file)
+
     # 6. Optimize Weights (use two different optimizers)
     print("Initializing weight optimizer...")
 

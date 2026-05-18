@@ -476,6 +476,11 @@ def cl_run_inference_real_data():
     parser.add_argument("--output-file", type=str, required=True,
                         help="Path to save the resulting optimal weights tensor (.pt file).")
 
+    parser.add_argument("--log-likelihood-file", type=str, default=None,
+                        dest="log_likelihood_file",
+                        help="Optional path to save the full likelihood matrix [N_models, N_images] as a .pt file. "
+                             "If not specified, the matrix is not saved.")
+
     # --- Performance and Hardware ---
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run the computation on (e.g., 'cuda:0' or 'cpu').")

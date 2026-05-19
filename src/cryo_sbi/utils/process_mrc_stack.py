@@ -569,7 +569,9 @@ def process_mrc_stack(
 
     Returns:
         On success: dict with keys 'mrc_file', 'star_file', 'dose',
-                    'pixel_size', 'image_size'.
+                    'pixel_size', 'image_size', 'voltage',
+                    'spherical_aberration', 'amplitude_contrast'.
+                    CTF fields are None when no star_file is provided.
         On failure: False.
     """
     
@@ -605,8 +607,11 @@ def process_mrc_stack(
     if file_size_gb > 10:
         print(f"  ⚠️  Large file detected - using memory-mapped I/O")
     
-    # Collect dose from STAR file (populated later if available)
+    # Collect dose and CTF metadata from STAR file (populated later if available)
     _dose_value = None
+    _voltage = None
+    _spherical_aberration = None
+    _amplitude_contrast = None
 
     # Open MRC as memmap (never loads into RAM)
     with open_mrc_memmap(input_path, max_size_gb=max_size_gb) as (data, success, msg):
@@ -637,8 +642,9 @@ def process_mrc_stack(
             if star_file is None:
                 print("❌ --subtract-ctf requires --star-file to be specified")
                 return False
-            print(f"\n🔬 CTF subtraction enabled")
-            print(f"  Reading CTF parameters from: {star_file}")
+
+        if star_file is not None:
+            print(f"\n🔬 Reading STAR file: {star_file}")
             try:
                 ctf_params_all = parse_star_file_ctf(star_file)
                 print(f"  ✓ Loaded CTF parameters for {len(ctf_params_all)} particles")
@@ -654,9 +660,16 @@ def process_mrc_stack(
                     if candidate is not None:
                         _dose_value = candidate
                         break
+                # Extract CTF metadata from first particle
+                _voltage = ctf_params_all[0].get('voltage')
+                _spherical_aberration = ctf_params_all[0].get('cs')
+                _amplitude_contrast = ctf_params_all[0].get('amplitude_contrast')
             except Exception as e:
                 print(f"❌ Failed to read STAR file: {e}")
                 return False
+
+        if subtract_ctf and ctf_params_all is not None:
+            print(f"  CTF subtraction enabled")
         
         # Select particle indices based on stride
         particle_indices = np.arange(0, nz, stride)
@@ -854,6 +867,9 @@ def process_mrc_stack(
         "dose": _dose_value,
         "pixel_size": final_pixel_size,
         "image_size": final_image_size,
+        "voltage": _voltage,
+        "spherical_aberration": _spherical_aberration,
+        "amplitude_contrast": _amplitude_contrast,
     }
 
     json_path = output_path.with_suffix(".json")

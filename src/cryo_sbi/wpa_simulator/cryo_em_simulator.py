@@ -139,7 +139,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
     print(f"  Image size: {image_config['N_PIXELS']}×{image_config['N_PIXELS']} pixels")
-    print(f"  Pixel size: {image_config["PIXEL_SIZE"]:.3f} Å")
+    print(f"  Pixel size: {image_config['PIXEL_SIZE']:.3f} Å")
     print(f"  Voltage: {simulation_param['voltage']:.1f} kV")
     print(f"  Spherical aberration: {simulation_param['cs']:.2f} mm")
     if "TOPOLOGY" in image_config:

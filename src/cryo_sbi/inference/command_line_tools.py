@@ -151,6 +151,19 @@ def cl_nle_train_no_saving_with_finetuning():
 
     cl_parser.add_argument('--sample_indices', action='store_true')
 
+    cl_parser.add_argument('--n_batches_per_epoch', type=int, default=100,
+                       help='Number of simulation batches to generate per epoch (default: 100)')
+
+    cl_parser.add_argument(
+        "--noise_model_path",
+        action="store",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to trained ResidualUNet noise model. "
+             "If provided, synthetic images are passed through it before the encoder.",
+    )
+
     args = cl_parser.parse_args()
 
     nle_train_no_saving_with_finetuning(
@@ -165,12 +178,14 @@ def cl_nle_train_no_saving_with_finetuning():
         device=args.train_device,
         saving_frequency=args.saving_freq,
         simulation_batch_size=args.simulation_batch_size,
+        n_batches_per_epoch=args.n_batches_per_epoch,
         pretrained_embedding_path=args.pretrained_embedding_path,
         freeze_embedding=args.freeze_embedding,
         use_differential_lr=args.use_differential_lr,
         embedding_lr_factor=args.embedding_lr_factor,
         validation_mrc_path=args.validation_mrc_path,
         real_data_finetune_fraction=args.real_data_fraction,
-        sample_indices=args.sample_indices
-    )
+        sample_indices=args.sample_indices,
+        noise_model_path=args.noise_model_path
+)
 

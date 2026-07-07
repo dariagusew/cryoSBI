@@ -169,6 +169,62 @@ class RealImageMRCDataset(Dataset):
         return self.cache[idx]
     
 
+class _UNetBlock(torch.nn.Module):
+    def __init__(self, in_ch: int, out_ch: int):
+        super().__init__()
+        self.conv = torch.nn.Sequential(
+            torch.nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            torch.nn.BatchNorm2d(out_ch),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            torch.nn.BatchNorm2d(out_ch),
+            torch.nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv(x)
+
+
+class ResidualUNet(torch.nn.Module):
+    """
+    Lightweight residual U-Net for adding realistic noise/background to
+    clean synthetic cryo-EM images. Input and output are [B, H, W].
+    Requires image_size divisible by 4.
+    """
+    def __init__(self, base: int = 32):
+        super().__init__()
+        self.enc1 = _UNetBlock(1, base)
+        self.pool1 = torch.nn.MaxPool2d(2)
+        self.enc2 = _UNetBlock(base, base * 2)
+        self.pool2 = torch.nn.MaxPool2d(2)
+        self.bottleneck = _UNetBlock(base * 2, base * 4)
+
+        self.up2 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.dec2 = _UNetBlock(base * 4 + base * 2, base * 2)
+        self.up1 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.dec1 = _UNetBlock(base * 2 + base, base)
+        self.outc = torch.nn.Conv2d(base, 1, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        input_x = x
+        if x.ndim == 3:
+            x = x.unsqueeze(1)
+
+        x1 = self.enc1(x)
+        x2 = self.enc2(self.pool1(x1))
+        x3 = self.bottleneck(self.pool2(x2))
+
+        x = self.up2(x3)
+        x = self.dec2(torch.cat([x, x2], dim=1))
+        x = self.up1(x)
+        x = self.dec1(torch.cat([x, x1], dim=1))
+
+        out  = input_x + self.outc(x).squeeze(1)
+        mean = out.mean(dim=(-2, -1), keepdim=True)
+        std  = out.std(dim=(-2, -1), keepdim=True)
+        return (out - mean) / (std + 1e-8)
+
+
 def generate_real_validation_set(mrc_path: str, val_size: int, device):
     """
     Extract a fixed set of real validation images.
@@ -195,7 +251,10 @@ def generate_real_validation_set(mrc_path: str, val_size: int, device):
     return real_images
 
 
-def generate_synthetic_validation_set(prior_loader, models, simulation_param, val_size, device):
+def generate_synthetic_validation_set(
+    prior_loader, models, simulation_param, val_size, device,
+    noise_model: Optional[torch.nn.Module] = None
+):
     """
     Generates a fixed set of synthetic validation images.
     """
@@ -227,7 +286,12 @@ def generate_synthetic_validation_set(prior_loader, models, simulation_param, va
                 simulation_param,
                 simulation_param["noise"]
             )
-            
+
+            # Apply frozen noise model on top of synthetic images
+            if noise_model is not None:
+                with torch.no_grad():
+                    images = noise_model(images)
+
             val_images.append(images)
             generated_count += len(images)
             pbar.update(len(images))
@@ -438,6 +502,7 @@ def nle_train_no_saving_with_finetuning(
     device: str = "cuda",
     saving_frequency: int = 100,
     simulation_batch_size: int = 2048,
+    n_batches_per_epoch: int = 100,
     pretrained_embedding_path: Optional[str] = None,
     freeze_embedding: bool = True,
     use_differential_lr: bool = False,
@@ -446,7 +511,8 @@ def nle_train_no_saving_with_finetuning(
     validation_log_file: str = 'validation_scores.pt',
     n_validation_images: int = 10240,
     real_data_finetune_fraction: float = 0.0,
-    sample_indices: bool = False
+    sample_indices: bool = False,
+    noise_model_path: Optional[str] = None
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -512,6 +578,21 @@ def nle_train_no_saving_with_finetuning(
         image_size = image_config["N_PIXELS"]
     )
 
+    noise_model = None
+    if noise_model_path is not None and noise_model_path != "":
+        print(f"\n{'='*70}")
+        print("LOADING NOISE MODEL")
+        print(f"{'='*70}")
+        print(f"Loading from: {noise_model_path}")
+        noise_model = ResidualUNet(base=32).to(device)
+        noise_model.load_state_dict(
+            torch.load(noise_model_path, map_location=device, weights_only=True)
+        )
+        noise_model.eval()
+        for param in noise_model.parameters():
+            param.requires_grad = False
+        print("✅ Noise model loaded and frozen")
+        print(f"{'='*70}\n")
 
     if validation_mrc_path:
         print("\n--- Setting up validation ---")
@@ -520,7 +601,8 @@ def nle_train_no_saving_with_finetuning(
                 validation_mrc_path, n_validation_images, device
             )
             syn_val_images = generate_synthetic_validation_set(
-                prior_loader, models, simulation_param, n_validation_images, device
+                prior_loader, models, simulation_param, n_validation_images,
+                device, noise_model=noise_model
             )
         except Exception as e:
             print(f"Warning: Could not create validation set: {e}. Training without validation.")
@@ -643,7 +725,7 @@ def nle_train_no_saving_with_finetuning(
                        param.requires_grad = False
 
                 # loop on mini-batches
-                for _ in range(400):
+                for _ in range(4*n_batches_per_epoch):
                     try:
                         real_images_batch = next(real_train_iter)
                     except StopIteration:
@@ -679,7 +761,7 @@ def nle_train_no_saving_with_finetuning(
             else:
                 # PHASE 1: Standard training on simulated data
                 tq.set_description("Training (Simulated Data)")
-                for parameters in islice(prior_loader, 100):
+                for parameters in islice(prior_loader, n_batches_per_epoch):
                     (
                         indices, quaternions, shift, defocus,
                         b_factor, amp, snr,
@@ -697,7 +779,12 @@ def nle_train_no_saving_with_finetuning(
                         simulation_param,
                         simulation_param["noise"] 
                     )
-                    
+
+                    # Apply frozen noise model on top of synthetic simulator output
+                    if noise_model is not None:
+                        with torch.no_grad():
+                            images = noise_model(images)
+
                     for _indices, _images in zip(
                         indices.split(train_config["BATCH_SIZE"]),
                         images.split(train_config["BATCH_SIZE"]),

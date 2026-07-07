@@ -166,7 +166,7 @@ def extract_amplitude_contrast(star_file):
 # 4. CORE NPS CALCULATION LOGIC & PLOTTING
 # ============================================================================
 def nps_model_advanced(k, A, k0, a, kd, C):
-    """Physically-motivated analytical model for cryo-EM NPS."""
+    """Physically-motivated analytical model for cryo-EM NPS, including a water ring."""
     k_safe = np.maximum(k, 1e-9)
     # Term 1: Main decay (Butterworth-like * Gaussian envelope)
     main_decay = (A / (1 + (k_safe / k0)**a)) * np.exp(-(k_safe / kd)**2)
@@ -415,8 +415,10 @@ def main():
         ]
         
         bounds = [
-            (0, None), (1e-3, input_size / 4.0), (0.5, 20.0), 
-            (input_size / 4.0, input_size * 2), (0, None)
+#            (0, None), (1e-3, input_size / 4.0), (0.5, 20.0), 
+#            (input_size / 4.0, input_size * 2), (0, None)
+            (0, None), (1e-3, input_size / 1.0), (0.5, 20.0),
+            (input_size / 4.0, input_size * 4), (0, None)
         ]
 
         result = minimize(negative_log_likelihood, initial_guesses, 

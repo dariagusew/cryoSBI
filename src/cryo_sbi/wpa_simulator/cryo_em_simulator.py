@@ -2,7 +2,6 @@ import json
 import numpy as np
 import torch
 import mrcfile
-import numpy as np
 import random
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
@@ -65,6 +64,15 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.8)
     simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.2)
     simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.4)
+    # detector stuff - default for Falcon 4
+    #simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.90)
+    #simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.28)
+    #simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.09)
+    # detector stuff - default for Falcon 4i
+    #simulation_param["qe"] = image_config.get("QUANTUM_EFFICIENCY", 0.92)
+    #simulation_param["qe_n"] = image_config.get("QUANTUM_EFFICIENCY_NYQ", 0.5)
+    #simulation_param["mtf_n"] = image_config.get("MTF_NYQ", 0.09)
+    # readout error
     simulation_param["readout_std"] = image_config.get("READOUT_STD", 1.0)
 
     # noise model
@@ -131,7 +139,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
     print(f"  Image size: {image_config['N_PIXELS']}×{image_config['N_PIXELS']} pixels")
-    print(f"  Pixel size: {image_config['PIXEL_SIZE']:.3f} Å")
+    print(f"  Pixel size: {image_config["PIXEL_SIZE"]:.3f} Å")
     print(f"  Voltage: {simulation_param['voltage']:.1f} kV")
     print(f"  Spherical aberration: {simulation_param['cs']:.2f} mm")
     if "TOPOLOGY" in image_config:

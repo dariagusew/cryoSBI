@@ -134,7 +134,7 @@ class NLEWithEmbedding(nn.Module):
         super().__init__()
 
         # 0. Euristic for theta_embedding_dim
-        theta_embedding_dim = max(1, min(50, num_models // 2))
+        theta_embedding_dim = 2 #max(4, min(50, num_models // 2))
 
         # 1. Create the learnable embedding layer for theta
         self.theta_embedding = nn.Embedding(num_models, theta_embedding_dim)

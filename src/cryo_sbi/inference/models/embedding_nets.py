@@ -568,83 +568,79 @@ class ConvEncoder(nn.Module):
 @add_embedding("SPATIAL_CRYO")
 class SpatialCryoEncoder(nn.Module):
     """
-    Lightweight spatial encoder for cryo-EM images
-    Inspired by CryoDRGN's ConvEncoder but flexible for any image size
-    
-    Architecture:
-    - All-convolutional design (no heavy FC layers)
-    - Progressive downsampling: D → D/2 → ... → 4 → 1
-    - Channel progression: 1 → 16 → 32 → 64 → ... → output_dim
-    - Final conv trick: 4x4 → 1x1 instead of flatten+FC
-    
-    Parameters:
-    - D=64:  ~300K  (CryoDRGN scale)
-    - D=128: ~1.75M (6x lighter than ResNet18)
-    - D=256: ~7M    (still lighter than ResNet18)
+    Shared-trunk encoder for cryo-EM images.
+    Public interface: encoder(x) -> mu   (used by the flow at inference)
+    Training interface: encoder.forward_vib(x) -> mu, log_var, z
     """
+
     def __init__(self, output_dimension: int, D: int = 128):
-        super(SpatialCryoEncoder, self).__init__()
-        
+        super().__init__()
         self.D = D
         self.output_dimension = output_dimension
-        
-        # Base channel dimension (CryoDRGN choice)
+
         ndf = 16
-        
-        # Calculate downsampling stages: D → 4
         n_stages = int(math.log2(D)) - 2
-        
         if n_stages < 1:
             raise ValueError(f"Image size D={D} too small. Minimum D=8.")
-        
-        layers = []
+
+        # ---- Shared convolutional trunk ----
+        trunk_layers = []
         in_channels = 1
-        
-        # Progressive downsampling with exponential channel growth
         for i in range(n_stages):
             out_channels = ndf * (2 ** i)
-            layers.extend([
-                nn.Conv2d(in_channels, out_channels, 
-                         kernel_size=4, stride=2, padding=1, bias=False),
+            trunk_layers.extend([
+                nn.Conv2d(in_channels, out_channels,
+                          kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(out_channels),
-                nn.LeakyReLU(0.2, inplace=True)
+                nn.LeakyReLU(0.2, inplace=True),
             ])
             in_channels = out_channels
-        
-        # Final convolutional layer: 4x4 → 1x1
-        # This eliminates the need for large FC layers
-        layers.append(
+
+        # Final conv: 4x4 -> 1x1, output_dimension channels
+        trunk_layers.append(
             nn.Conv2d(in_channels, output_dimension,
-                     kernel_size=4, stride=1, padding=0, bias=False)
+                      kernel_size=4, stride=1, padding=0, bias=False)
         )
-        
-        self.conv_encoder = nn.Sequential(*layers)
-        
-        # Output normalization for stable flow training
+
+        self.trunk_conv = nn.Sequential(*trunk_layers)
+
+        # Normalization on the shared trunk output
         self.output_norm = nn.LayerNorm(output_dimension)
-    
-    def forward(self, x):
-        """
-        Args:
-            x: [B, D, D] or [B, 1, D, D] images
-        
-        Returns:
-            embeddings: [B, output_dimension]
-        """
-        # Ensure 4D input [B, 1, D, D]
-        if len(x.shape) == 3:
+
+        # ---- Two small heads on the shared representation ----
+        self.mu_head     = nn.Linear(output_dimension, output_dimension)
+        self.log_var_head = nn.Linear(output_dimension, output_dimension)
+
+    def trunk(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared representation h = trunk(x)."""
+        if x.ndim == 3:
             x = x.unsqueeze(1)
-        
-        # Convolutional encoding
-        x = self.conv_encoder(x)  # [B, output_dim, 1, 1]
-        
-        # Flatten to [B, output_dim]
-        x = x.view(x.size(0), -1)
-        
-        # Normalize for flow training
-        x = self.output_norm(x)
-        
-        return x
+
+        h = self.trunk_conv(x)          # [B, output_dim, 1, 1]
+        h = h.view(h.size(0), -1)       # [B, output_dim]
+        h = self.output_norm(h)         # [B, output_dim]
+        return h
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Inference interface.
+        Returns: mu [B, output_dim]
+        """
+        h   = self.trunk(x)
+        mu  = self.mu_head(h)
+        return mu
+
+    def forward_vib(self, x: torch.Tensor) -> tuple:
+        """
+        Training interface.
+        Returns: mu, log_var, z  each [B, output_dim]
+        """
+        h       = self.trunk(x)
+        mu      = self.mu_head(h)
+        log_var = self.log_var_head(h).clamp(-4, 4)
+        z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
+        return mu, log_var, z
+
 
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")
 class SpatialCryoFFTEncoder(nn.Module):

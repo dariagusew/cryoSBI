@@ -269,6 +269,7 @@ def generate_and_encode_synthetic(
     simulation_param: dict,
     noise_model: Optional[nn.Module] = None,
     n_example_images: int = 8,
+    use_noiseless_images: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generate synthetic cryo-EM images and encode them.
@@ -302,7 +303,7 @@ def generate_and_encode_synthetic(
 
             indices, quaternions, shift, defocus, b_factor, amp, snr = parameters
 
-            clean_images, _ = cryo_em_simulator(
+            noisy_images, clean_images = cryo_em_simulator(
                 models,
                 indices.to(device,     non_blocking=True),
                 quaternions.to(device, non_blocking=True),
@@ -315,10 +316,10 @@ def generate_and_encode_synthetic(
                 simulation_param["noise"],
             )
 
+            images = clean_images if use_noiseless_images else noisy_images
+
             if noise_model is not None:
-                images = noise_model(clean_images)
-            else:
-                images = clean_images
+                images = noise_model(images)
 
             # Collect example images from the first batch only
             if len(example_buf) < n_example_images:
@@ -511,6 +512,7 @@ def validate_embedding(
     output_path:           str = "embedding_validation.png",
     noise_model_path:      Optional[str] = None,
     n_example_images:      int = 8,
+    use_noiseless_images:  bool = False
 ):
     print("\n" + "=" * 70)
     print("EMBEDDING VALIDATION")
@@ -557,7 +559,12 @@ def validate_embedding(
             p.requires_grad = False
         print("✅ Noise model loaded — applying to clean synthetic images")
     else:
-        print("\nNo noise model provided — using noisy simulator output directly")
+        print("\nNo noise model provided — using simulator output directly")
+
+    if use_noiseless_images:
+        print("Using NOISELESS synthetic images (second simulator output).")
+    else:
+        print("Using NOISY synthetic images (first simulator output).")
 
     # ------------------------------------------------------------------
     # Generate and encode synthetic images
@@ -567,6 +574,7 @@ def validate_embedding(
         model, image_config, models, device,
         n_synthetic, simulation_batch_size, encode_batch_size,
         simulation_param, noise_model, n_example_images,
+        use_noiseless_images
     )
 
     print(f"  Embedding shape:    {synth_embeddings.shape}")
@@ -654,6 +662,7 @@ if __name__ == "__main__":
     parser.add_argument("--output",                default="embedding_validation.png",     help="Output figure path")
     parser.add_argument("--noise_model",           default=None,                           help="Path to trained noise model weights (.pt); if omitted, uses noisy simulator output")
     parser.add_argument("--n_example_images",      type=int,   default=8,                  help="Number of example images to show per panel (displayed as 2×4 grid)")
+    parser.add_argument("--use_noiseless_images",  action="store_true",                    help="Use the noiseless simulator output instead of the noisy one")
 
     args = parser.parse_args()
 
@@ -673,4 +682,5 @@ if __name__ == "__main__":
         output_path           = args.output,
         noise_model_path      = args.noise_model,
         n_example_images      = args.n_example_images,
+        use_noiseless_images  = args.use_noiseless_images
     )

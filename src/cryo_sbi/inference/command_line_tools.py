@@ -164,6 +164,13 @@ def cl_nle_train_no_saving_with_finetuning():
              "If provided, synthetic images are passed through it before the encoder.",
     )
 
+    cl_parser.add_argument(
+        "--use_noiseless_images",
+        action="store_true",
+        help="Use the noiseless simulator output (second output of cryo_em_simulator) "
+             "instead of the noisy output.",
+    )
+
     args = cl_parser.parse_args()
 
     nle_train_no_saving_with_finetuning(
@@ -186,6 +193,7 @@ def cl_nle_train_no_saving_with_finetuning():
         validation_mrc_path=args.validation_mrc_path,
         real_data_finetune_fraction=args.real_data_fraction,
         sample_indices=args.sample_indices,
-        noise_model_path=args.noise_model_path
-)
+        noise_model_path=args.noise_model_path,
+        use_noiseless_images=args.use_noiseless_images
+    )
 

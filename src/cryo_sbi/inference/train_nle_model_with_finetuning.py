@@ -1,4 +1,4 @@
-# "train_nle_model_with_validation.py"
+# "train_nle_model_with_finetuning.py"
 from typing import Tuple, Dict, Union, Optional
 import json
 import torch
@@ -253,7 +253,8 @@ def generate_real_validation_set(mrc_path: str, val_size: int, device):
 
 def generate_synthetic_validation_set(
     prior_loader, models, simulation_param, val_size, device,
-    noise_model: Optional[torch.nn.Module] = None
+    noise_model: Optional[torch.nn.Module] = None,
+    use_noiseless_images: bool = False
 ):
     """
     Generates a fixed set of synthetic validation images.
@@ -274,7 +275,7 @@ def generate_synthetic_validation_set(
             
             (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
 
-            images, _ = cryo_em_simulator(
+            noisy_images, clean_images = cryo_em_simulator(
                 models,
                 indices.to(device, non_blocking=True),
                 quaternions.to(device, non_blocking=True),
@@ -286,6 +287,9 @@ def generate_synthetic_validation_set(
                 simulation_param,
                 simulation_param["noise"]
             )
+
+            # Select noisy or noiseless simulator output
+            images = clean_images if use_noiseless_images else noisy_images
 
             # Apply frozen noise model on top of synthetic images
             if noise_model is not None:
@@ -512,7 +516,8 @@ def nle_train_no_saving_with_finetuning(
     n_validation_images: int = 10240,
     real_data_finetune_fraction: float = 0.0,
     sample_indices: bool = False,
-    noise_model_path: Optional[str] = None
+    noise_model_path: Optional[str] = None,
+    use_noiseless_images: bool = False
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -535,6 +540,8 @@ def nle_train_no_saving_with_finetuning(
         validation_log_file (str, optional): Path to save validation loss history.
         n_validation_images (int, optional): Number of real images for validation loss.
         real_data_finetune_fraction (float, optional): Fraction of final epochs to fine-tune on real data. Defaults to 0.0 (disabled).
+        noise_model_path (str, optional): Path to trained noise model weights.
+        use_noiseless_images (bool, optional): Use the noiseless simulator output instead of the noisy one.
     """
     train_config = json.load(open(train_config))
     check_train_params(train_config)
@@ -594,6 +601,11 @@ def nle_train_no_saving_with_finetuning(
         print("✅ Noise model loaded and frozen")
         print(f"{'='*70}\n")
 
+    if use_noiseless_images:
+        print("Using NOISELESS synthetic images (second simulator output).")
+    else:
+        print("Using NOISY synthetic images (first simulator output).")
+
     if validation_mrc_path:
         print("\n--- Setting up validation ---")
         try:
@@ -602,7 +614,8 @@ def nle_train_no_saving_with_finetuning(
             )
             syn_val_images = generate_synthetic_validation_set(
                 prior_loader, models, simulation_param, n_validation_images,
-                device, noise_model=noise_model
+                device, noise_model=noise_model,
+                use_noiseless_images=use_noiseless_images
             )
         except Exception as e:
             print(f"Warning: Could not create validation set: {e}. Training without validation.")
@@ -767,7 +780,7 @@ def nle_train_no_saving_with_finetuning(
                         b_factor, amp, snr,
                     ) = parameters
                     
-                    images, _ = cryo_em_simulator(
+                    noisy_images, clean_images = cryo_em_simulator(
                         models,
                         indices.to(device, non_blocking=True),
                         quaternions.to(device, non_blocking=True),
@@ -779,6 +792,9 @@ def nle_train_no_saving_with_finetuning(
                         simulation_param,
                         simulation_param["noise"] 
                     )
+
+                    # Select noisy or noiseless simulator output
+                    images = clean_images if use_noiseless_images else noisy_images
 
                     # Apply frozen noise model on top of synthetic simulator output
                     if noise_model is not None:

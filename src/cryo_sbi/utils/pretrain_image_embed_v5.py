@@ -377,6 +377,7 @@ def _run_vib_epoch(
     pred_weights: Dict[str, float],
     normalizer: FixedTargetNormalizer,
     noise_model: Optional[nn.Module] = None,
+    use_noiseless_images: bool = False
 ) -> tuple:
     """Single VIB epoch. If noise_model is provided, applies it to clean images."""
     epoch_loss = 0.0
@@ -395,8 +396,8 @@ def _run_vib_epoch(
         indices, quaternions, shift, defocus, b_factor, amp, snr = parameters
 
         with torch.no_grad():
-            # synthetic images out of simulator (with simple noise)
-            clean_images, _ = cryo_em_simulator(
+            # synthetic images out of simulator
+            noisy_images, clean_images = cryo_em_simulator(
                 models,
                 indices.to(device,     non_blocking=True),
                 quaternions.to(device, non_blocking=True),
@@ -408,6 +409,9 @@ def _run_vib_epoch(
                 simulation_param,
                 simulation_param["noise"],
             )
+
+        # clean or noisy
+        clean_images = clean_images if use_noiseless_images else noisy_images
 
         n_full = (len(clean_images) // batch_size) * batch_size
         for i in range(0, n_full, batch_size):
@@ -459,7 +463,8 @@ def _train_noise_model(
     noise_lr: float,
     lambda_adv: float,
     lambda_content: float,
-    check_frequency: int = 5
+    check_frequency: int = 5,
+    use_noiseless_images: bool = False
 ) -> nn.Module:
     print("\n" + "=" * 70)
     print("STAGE 2: TRAINING RESIDUAL NOISE MODEL")
@@ -504,13 +509,16 @@ def _train_noise_model(
          
                 indices, quaternions, shift, defocus, b_factor, amp, snr = parameters
                 with torch.no_grad():
-                    clean_images, _ = cryo_em_simulator(
+                    noisy_images, clean_images = cryo_em_simulator(
                         models,
                         indices.to(device), quaternions.to(device), shift.to(device),
                         defocus.to(device), b_factor.to(device), amp.to(device), snr.to(device),
                         simulation_param,
                         simulation_param["noise"],
                     )
+
+                # clean or noisy
+                clean_images = clean_images if use_noiseless_images else noisy_images
          
                 real_images = next(real_iter).to(device)
          
@@ -598,13 +606,18 @@ def pretrain_image_embed(
     finetune_epochs: int = 50,
     finetune_lr: float = 1e-4,
     lambda_adv: float = 1.0,
-    lambda_content: float = 1.0
+    lambda_content: float = 1.0,
+    use_noiseless_images: bool = False
 ):
     print("\n" + "=" * 70)
     print(f"PRETRAINING: {embedding_name}")
-    print("Training mode: 3-STAGE VIB ON CLEAN SYNTHETIC + REAL NOISE MODEL")
+    print("Training mode: 3-STAGE VIB ON SYNTHETIC + REAL NOISE MODEL")
     if resume_from:
         print(f"Resuming from: {resume_from}")
+    print("=" * 70)
+
+    if use_noiseless_images:
+        print("Using NOISELESS synthetic images")
     print("=" * 70)
 
     if pred_weights is None:
@@ -732,6 +745,7 @@ def pretrain_image_embed(
                 pred_weights=pred_weights,
                 normalizer=normalizer,
                 noise_model=None,
+                use_noiseless_images=use_noiseless_images
             )
 
             history["loss"].append(avg_loss)
@@ -790,7 +804,8 @@ def pretrain_image_embed(
         noise_lr=noise_lr,
         lambda_adv=lambda_adv,
         lambda_content=lambda_content,
-        check_frequency=check_frequency
+        check_frequency=check_frequency,
+        use_noiseless_images=use_noiseless_images
     )
 
     # Save noise model after Stage 2
@@ -835,6 +850,7 @@ def pretrain_image_embed(
                 pred_weights=pred_weights,
                 normalizer=normalizer,
                 noise_model=noise_model,
+                use_noiseless_images=use_noiseless_images
             )
 
             history["loss"].append(avg_loss)
@@ -978,6 +994,7 @@ if __name__ == "__main__":
     parser.add_argument("--finetune_lr",           type=float, default=1e-4,  help="Stage 3 learning rate")
     parser.add_argument("--lambda_adv",            type=float, default=1.0,   help="Stage 2 adversarial loss weight")
     parser.add_argument("--lambda_content",        type=float, default=1.0,   help="Stage 2 content preservation loss weight")
+    parser.add_argument("--use_noiseless_images",  action="store_true",       help="Use noiseless images")
 
     args = parser.parse_args()
 
@@ -1011,5 +1028,6 @@ if __name__ == "__main__":
         finetune_epochs       = args.finetune_epochs,
         finetune_lr           = args.finetune_lr,
         lambda_adv            = args.lambda_adv,
-        lambda_content        = args.lambda_content
+        lambda_content        = args.lambda_content,
+        use_noiseless_images  = args.use_noiseless_images,
     )

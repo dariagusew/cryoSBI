@@ -78,38 +78,69 @@ class _UNetBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
 
+class StochasticResidualUNet(torch.nn.Module):
+    """
+    Stochastic residual U-Net for adding realistic noise/background.
+    Samples a latent noise vector internally; optionally accepts an external z
+    for reproducible evaluation.
 
-class ResidualUNet(nn.Module):
-    """Lightweight residual U-Net — must match the architecture in pretrain_image_embed_v5.py."""
-    def __init__(self, base: int = 32):
+    Input and output are [B, H, W]. Requires image_size divisible by 4.
+    """
+    def __init__(self, base: int = 32, noise_dim: int = 16):
         super().__init__()
-        self.enc1       = _UNetBlock(1, base)
-        self.pool1      = nn.MaxPool2d(2)
-        self.enc2       = _UNetBlock(base, base * 2)
-        self.pool2      = nn.MaxPool2d(2)
+        self.noise_dim = noise_dim
+
+        self.enc1 = _UNetBlock(1, base)
+        self.pool1 = torch.nn.MaxPool2d(2)
+        self.enc2 = _UNetBlock(base, base * 2)
+        self.pool2 = torch.nn.MaxPool2d(2)
         self.bottleneck = _UNetBlock(base * 2, base * 4)
 
-        self.up2  = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec2 = _UNetBlock(base * 4 + base * 2, base * 2)
-        self.up1  = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec1 = _UNetBlock(base * 2 + base, base)
-        self.outc = nn.Conv2d(base, 1, 1)
+        # Project latent noise into bottleneck feature space
+        self.noise_proj = torch.nn.Sequential(
+            torch.nn.Linear(noise_dim, base * 4),
+            torch.nn.ReLU(inplace=True),
+            torch.nn.Linear(base * 4, base * 4),
+        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.up2 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.dec2 = _UNetBlock(base * 4 + base * 2, base * 2)
+        self.up1 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
+        self.dec1 = _UNetBlock(base * 2 + base, base)
+        self.outc = torch.nn.Conv2d(base, 1, 1)
+
+    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
         input_x = x
         if x.ndim == 3:
             x = x.unsqueeze(1)
+
+        # Sample noise internally if not provided
+        if z is None:
+            z = torch.randn(
+                x.size(0), self.noise_dim,
+                device=x.device, dtype=x.dtype
+            )
+
+        # Encode
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool1(x1))
         x3 = self.bottleneck(self.pool2(x2))
-        x  = self.up2(x3)
-        x  = self.dec2(torch.cat([x, x2], dim=1))
-        x  = self.up1(x)
-        x  = self.dec1(torch.cat([x, x1], dim=1))
 
-        out  = input_x + self.outc(x).squeeze(1)
+        # Inject noise at bottleneck; broadcasts over spatial dims
+        z_feat = self.noise_proj(z).view(x.size(0), -1, 1, 1)
+        x3 = x3 + z_feat
+
+        # Decode
+        x = self.up2(x3)
+        x = self.dec2(torch.cat([x, x2], dim=1))
+        x = self.up1(x)
+        x = self.dec1(torch.cat([x, x1], dim=1))
+
+        out = input_x + self.outc(x).squeeze(1)
+
+        # Per-image z-score normalization
         mean = out.mean(dim=(-2, -1), keepdim=True)
-        std  = out.std(dim=(-2, -1), keepdim=True)
+        std = out.std(dim=(-2, -1), keepdim=True)
         return (out - mean) / (std + 1e-8)
 
 
@@ -552,7 +583,7 @@ def validate_embedding(
     noise_model = None
     if noise_model_path is not None:
         print(f"\nLoading noise model from: {noise_model_path}")
-        noise_model = ResidualUNet(base=32).to(device)
+        noise_model = StochasticResidualUNet(base=32).to(device)
         noise_model.load_state_dict(torch.load(noise_model_path, map_location=device))
         noise_model.eval()
         for p in noise_model.parameters():

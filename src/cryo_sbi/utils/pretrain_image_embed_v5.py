@@ -1,4 +1,5 @@
 # "pretrain_image_embed_v5.py"
+# "pretrain_image_embed_v5.py"
 """
 pretrain_image_embed_v5.py
 
@@ -12,6 +13,9 @@ Stages:
     3. Fine-tune the Stage-1 encoder with the frozen noise model added
        to the simulator.
 
+By default, Stage 2 and Stage 3 are skipped.  Stage 3 is skipped whenever
+Stage 2 is skipped (because it requires the trained noise model).
+
 The encoder is trained as a stochastic sufficient statistic for the full
 parameter vector (X, θ). The encoder's public interface returns a
 deterministic embedding mu = encoder(d) used by the flow at inference.
@@ -22,7 +26,6 @@ afterwards.
 Usage:
     python pretrain_image_embed_v5.py \
         --image_config config.json \
-        --real_data_mrc real_images.mrc \
         --embedding SPATIAL_CRYO_FFT_FILTER \
         --embedding_dim 16 \
         --epochs 100
@@ -519,20 +522,20 @@ def _train_noise_model(
     synthetic_iter = iter(synthetic_loader)
 
     with tqdm(range(noise_epochs), desc="Stage 2: noise model") as tq:
-         for epoch in tq:
+        for epoch in tq:
             epoch_L_D       = 0.0
             epoch_L_adv     = 0.0
             epoch_L_content = 0.0
             epoch_L_G       = 0.0
             n_steps         = 0
-         
+
             for _ in range(noise_n_batches_per_epoch):
                 try:
                     parameters = next(synthetic_iter)
                 except StopIteration:
                     synthetic_iter = iter(synthetic_loader)
                     parameters = next(synthetic_iter)
-         
+
                 indices, quaternions, shift, defocus, b_factor, amp, snr = parameters
                 with torch.no_grad():
                     noisy_images, clean_images = cryo_em_simulator(
@@ -545,9 +548,9 @@ def _train_noise_model(
 
                 # clean or noisy
                 clean_images = clean_images if use_noiseless_images else noisy_images
-         
+
                 real_images = next(real_iter).to(device)
-         
+
                 # ---- discriminator step ----
                 opt_D.zero_grad()
                 with torch.no_grad():
@@ -558,41 +561,41 @@ def _train_noise_model(
                 L_D.backward()
                 torch.nn.utils.clip_grad_norm_(discriminator.parameters(), 1.0)
                 opt_D.step()
-         
+
                 # ---- generator step ----
                 opt_G.zero_grad()
                 fake_images = generator(clean_images)
                 d_fake_g = discriminator(fake_images)
                 L_adv = F.softplus(-d_fake_g).mean()
-         
+
                 with torch.no_grad():
                     z_clean = encoder(clean_images)
                 z_fake = encoder(fake_images)
                 L_content = F.mse_loss(z_fake, z_clean)
-         
+
                 L_G = lambda_adv * L_adv + lambda_content * L_content
                 L_G.backward()
                 torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
                 opt_G.step()
-         
+
                 epoch_L_D       += L_D.item()
                 epoch_L_adv     += L_adv.item()
                 epoch_L_content += L_content.item()
                 epoch_L_G       += L_G.item()
                 n_steps         += 1
-         
+
             avg_L_D       = epoch_L_D       / max(n_steps, 1)
             avg_L_adv     = epoch_L_adv     / max(n_steps, 1)
             avg_L_content = epoch_L_content / max(n_steps, 1)
             avg_L_G       = epoch_L_G       / max(n_steps, 1)
-         
+
             tq.set_postfix({
                 "L_D":       f"{avg_L_D:.4f}",
                 "L_G":       f"{avg_L_G:.4f}",
                 "L_adv":     f"{avg_L_adv:.4f}",
                 "L_content": f"{avg_L_content:.4f}",
             })
-         
+
             if epoch % check_frequency == 0:
                 print(f"\n  Stage 2 Epoch {epoch:3d}:")
                 print(f"    Discriminator loss:  {avg_L_D:.6f}")
@@ -610,7 +613,7 @@ def _train_noise_model(
 
 def pretrain_image_embed(
     image_config_path: str,
-    real_data_mrc_path: str,
+    real_data_mrc_path: Optional[str] = None,
     resume_from: Optional[str] = None,
     embedding_name: str = "SPATIAL_CRYO",
     device: str = "cuda",
@@ -625,11 +628,11 @@ def pretrain_image_embed(
     beta: float = 1e-3,
     pred_weights: Optional[Dict[str, float]] = None,
     noise_model_path: str = "noise_model.pt",
-    noise_epochs: int = 50,
+    noise_epochs: int = 0,
     noise_batch_size: int = 64,
     noise_lr: float = 2e-4,
     noise_n_batches_per_epoch: int = 100,
-    finetune_epochs: int = 50,
+    finetune_epochs: int = 0,
     finetune_lr: float = 1e-4,
     lambda_adv: float = 1.0,
     lambda_content: float = 1.0,
@@ -637,7 +640,17 @@ def pretrain_image_embed(
 ):
     print("\n" + "=" * 70)
     print(f"PRETRAINING: {embedding_name}")
-    print("Training mode: 3-STAGE VIB ON SYNTHETIC + REAL NOISE MODEL")
+
+    if noise_epochs == 0 and finetune_epochs == 0:
+        print("Training mode: Stage 1 only (Stage 2 & 3 disabled by default)")
+    elif noise_epochs > 0 and finetune_epochs == 0:
+        print("Training mode: Stage 1 + Stage 2 noise model")
+    elif noise_epochs > 0 and finetune_epochs > 0:
+        print("Training mode: Stage 1 + Stage 2 + Stage 3 fine-tuning")
+    else:
+        print("Training mode: Stage 1")
+        if finetune_epochs > 0:
+            print("  Note: finetune_epochs > 0 but noise_epochs = 0, so Stage 3 is skipped.")
     if resume_from:
         print(f"Resuming from: {resume_from}")
     print("=" * 70)
@@ -645,6 +658,10 @@ def pretrain_image_embed(
     if use_noiseless_images:
         print("Using NOISELESS synthetic images")
     print("=" * 70)
+
+    # Validate required args for enabled stages
+    if noise_epochs > 0 and real_data_mrc_path is None:
+        raise ValueError("--real_data_mrc is required when --noise_epochs > 0")
 
     if pred_weights is None:
         pred_weights = {
@@ -811,95 +828,106 @@ def pretrain_image_embed(
     # ------------------------------------------------------------------
     # Stage 2: train residual noise model on real images
     # ------------------------------------------------------------------
+    noise_model: Optional[nn.Module] = None
 
-    # Freeze full model for Stage 2
-    model.eval()
-    for p in model.parameters():
-        p.requires_grad = False
+    if noise_epochs > 0:
+        print("\n" + "=" * 70)
+        print("STAGE 2: TRAINING RESIDUAL NOISE MODEL")
+        print("=" * 70)
 
-    noise_model = _train_noise_model(
-        encoder=model.encoder,
-        image_prior=image_prior,
-        models=models,
-        simulation_param=simulation_param,
-        device=device,
-        real_data_mrc_path=real_data_mrc_path,
-        noise_epochs=noise_epochs,
-        noise_batch_size=noise_batch_size,
-        noise_n_batches_per_epoch=noise_n_batches_per_epoch,
-        noise_lr=noise_lr,
-        lambda_adv=lambda_adv,
-        lambda_content=lambda_content,
-        check_frequency=check_frequency,
-        use_noiseless_images=use_noiseless_images
-    )
+        # Freeze full model for Stage 2
+        model.eval()
+        for p in model.parameters():
+            p.requires_grad = False
 
-    # Save noise model after Stage 2
-    torch.save(noise_model.state_dict(), noise_model_path)
-    print(f"✅ Noise model:                {noise_model_path}")
+        noise_model = _train_noise_model(
+            encoder=model.encoder,
+            image_prior=image_prior,
+            models=models,
+            simulation_param=simulation_param,
+            device=device,
+            real_data_mrc_path=real_data_mrc_path,
+            noise_epochs=noise_epochs,
+            noise_batch_size=noise_batch_size,
+            noise_n_batches_per_epoch=noise_n_batches_per_epoch,
+            noise_lr=noise_lr,
+            lambda_adv=lambda_adv,
+            lambda_content=lambda_content,
+            check_frequency=check_frequency,
+            use_noiseless_images=use_noiseless_images
+        )
+
+        torch.save(noise_model.state_dict(), noise_model_path)
+        print(f"✅ Noise model:                {noise_model_path}")
+    else:
+        print("\n  Skipping Stage 2 (noise_epochs=0).")
 
     # ------------------------------------------------------------------
     # Stage 3: fine-tune encoder with frozen noise model
     # ------------------------------------------------------------------
-    print("\n" + "=" * 70)
-    print("STAGE 3: FINE-TUNING ENCODER WITH FROZEN NOISE MODEL")
-    print("=" * 70)
+    if noise_epochs > 0 and finetune_epochs > 0:
+        print("\n" + "=" * 70)
+        print("STAGE 3: FINE-TUNING ENCODER WITH FROZEN NOISE MODEL")
+        print("=" * 70)
 
-    # Re-enable full model for Stage 3
-    model.train()
-    for p in model.parameters():
-        p.requires_grad = True
-        
-    # Freeze noise model for Stage 3
-    noise_model.eval()
-    for p in noise_model.parameters():
-        p.requires_grad = False
+        # Re-enable full model for Stage 3
+        model.train()
+        for p in model.parameters():
+            p.requires_grad = True
 
-    # Set optimizer 
-    optimizer = optim.AdamW(model.parameters(), lr=finetune_lr, weight_decay=0.01)
+        # Freeze noise model for Stage 3
+        noise_model.eval()
+        for p in noise_model.parameters():
+            p.requires_grad = False
 
-    synthetic_iter = iter(synthetic_loader)
+        optimizer = optim.AdamW(model.parameters(), lr=finetune_lr, weight_decay=0.01)
+        synthetic_iter = iter(synthetic_loader)
 
-    with tqdm(range(finetune_epochs), desc="Stage 3: fine-tuning") as tq:
-        for epoch in tq:
-            avg_loss, avg_pred_loss, avg_kl_loss, last_mu, synthetic_iter = _run_vib_epoch(
-                model=model,
-                optimizer=optimizer,
-                synthetic_iter=synthetic_iter,
-                synthetic_loader=synthetic_loader,
-                models=models,
-                simulation_param=simulation_param,
-                device=device,
-                batch_size=batch_size,
-                n_batches_per_epoch=n_batches_per_epoch,
-                beta=beta,
-                pred_weights=pred_weights,
-                normalizer=normalizer,
-                noise_model=noise_model,
-                use_noiseless_images=use_noiseless_images
-            )
+        with tqdm(range(finetune_epochs), desc="Stage 3: fine-tuning") as tq:
+            for epoch in tq:
+                avg_loss, avg_pred_loss, avg_kl_loss, last_mu, synthetic_iter = _run_vib_epoch(
+                    model=model,
+                    optimizer=optimizer,
+                    synthetic_iter=synthetic_iter,
+                    synthetic_loader=synthetic_loader,
+                    models=models,
+                    simulation_param=simulation_param,
+                    device=device,
+                    batch_size=batch_size,
+                    n_batches_per_epoch=n_batches_per_epoch,
+                    beta=beta,
+                    pred_weights=pred_weights,
+                    normalizer=normalizer,
+                    noise_model=noise_model,
+                    use_noiseless_images=use_noiseless_images
+                )
 
-            history["loss"].append(avg_loss)
-            history["pred_loss"].append(avg_pred_loss)
-            history["kl_loss"].append(avg_kl_loss)
+                history["loss"].append(avg_loss)
+                history["pred_loss"].append(avg_pred_loss)
+                history["kl_loss"].append(avg_kl_loss)
 
-            tq.set_postfix({
-                "loss": f"{avg_loss:.4f}",
-                "pred": f"{avg_pred_loss:.4f}",
-                "kl":   f"{avg_kl_loss:.4f}",
-            })
+                tq.set_postfix({
+                    "loss": f"{avg_loss:.4f}",
+                    "pred": f"{avg_pred_loss:.4f}",
+                    "kl":   f"{avg_kl_loss:.4f}",
+                })
 
-            if epoch % check_frequency == 0 and last_mu is not None:
-                emb_std, emb_dist = check_embedding_health(last_mu, device)
-                history["emb_std"].append(emb_std)
-                history["emb_dist"].append(emb_dist)
+                if epoch % check_frequency == 0 and last_mu is not None:
+                    emb_std, emb_dist = check_embedding_health(last_mu, device)
+                    history["emb_std"].append(emb_std)
+                    history["emb_dist"].append(emb_dist)
 
-                print(f"\n  Stage 3 Epoch {epoch:3d}:")
-                print(f"    Total loss:     {avg_loss:.6f}")
-                print(f"    Pred loss:      {avg_pred_loss:.6f}")
-                print(f"    KL loss:        {avg_kl_loss:.6f}")
-                print(f"    Embedding std:  {emb_std:.6f}")
-                print(f"    Embedding dist: {emb_dist:.6f}")
+                    print(f"\n  Stage 3 Epoch {epoch:3d}:")
+                    print(f"    Total loss:     {avg_loss:.6f}")
+                    print(f"    Pred loss:      {avg_pred_loss:.6f}")
+                    print(f"    KL loss:        {avg_kl_loss:.6f}")
+                    print(f"    Embedding std:  {emb_std:.6f}")
+                    print(f"    Embedding dist: {emb_dist:.6f}")
+    else:
+        if finetune_epochs > 0:
+            print("\n  Skipping Stage 3 because Stage 2 was skipped (noise_epochs=0).")
+        else:
+            print("\n  Skipping Stage 3 (finetune_epochs=0).")
 
     # ------------------------------------------------------------------
     # Final embedding health check
@@ -972,7 +1000,9 @@ def pretrain_image_embed(
         "beta":           beta,
         "pred_weights":   pred_weights,
         "resumed_from":   resume_from,
-        "noise_model_path": noise_model_path,
+        "noise_model_path": noise_model_path if noise_model is not None else None,
+        "noise_epochs":   noise_epochs,
+        "finetune_epochs": finetune_epochs,
     })
     torch.save(history, history_path)
     print(f"✅ Training history:           {history_path}")
@@ -991,9 +1021,9 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("--image_config",          required=True,                       help="Path to image config JSON")
-    parser.add_argument("--real_data_mrc",         required=True,                       help="Path to real MRC stack for noise model training")
+    parser.add_argument("--real_data_mrc",         default=None,                        help="Path to real MRC stack for noise model training (required if --noise_epochs > 0)")
     parser.add_argument("--embedding",             default="SPATIAL_CRYO",              help="Embedding architecture name")
-    parser.add_argument("--embedding_dim",         type=int,   default=16,              help="Encoder output dimension")
+    parser.add_argument("--embedding_dim",         type=int,   default=16,            help="Encoder output dimension")
     parser.add_argument("--epochs",                type=int,   default=50,             help="Stage 1 epochs")
     parser.add_argument("--batch_size",            type=int,   default=256,             help="Mini-batch size")
     parser.add_argument("--lr",                    type=float, default=2e-4,            help="Stage 1 learning rate")
@@ -1012,11 +1042,11 @@ if __name__ == "__main__":
     parser.add_argument("--weight_bfactor", type=float, default=0.3,  help="B-factor prediction loss weight")
 
     parser.add_argument("--noise_model_path",      default="noise_model.pt", help="Path to save/load noise model")
-    parser.add_argument("--noise_epochs",          type=int,   default=50,    help="Stage 2 epochs")
+    parser.add_argument("--noise_epochs",          type=int,   default=0,     help="Stage 2 epochs (0 = skip)")
     parser.add_argument("--noise_batch_size",      type=int,   default=64,    help="Stage 2 mini-batch size")
     parser.add_argument("--noise_lr",              type=float, default=2e-4,  help="Stage 2 learning rate")
     parser.add_argument("--noise_n_batches_per_epoch", type=int, default=100, help="Stage 2 batches per epoch")
-    parser.add_argument("--finetune_epochs",       type=int,   default=50,    help="Stage 3 epochs")
+    parser.add_argument("--finetune_epochs",       type=int,   default=0,     help="Stage 3 epochs (0 = skip)")
     parser.add_argument("--finetune_lr",           type=float, default=1e-4,  help="Stage 3 learning rate")
     parser.add_argument("--lambda_adv",            type=float, default=1.0,   help="Stage 2 adversarial loss weight")
     parser.add_argument("--lambda_content",        type=float, default=1.0,   help="Stage 2 content preservation loss weight")

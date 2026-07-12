@@ -120,65 +120,6 @@ class DefocusPrior:
         return self.param_triplets[indices]  # Shape: [batch_size, 3]
 
 
-class SNRPrior:
-    """
-    Samples Signal-to-Noise Ratio (SNR) values from an empirical
-    distribution defined by a text file.
-    """
-    def __init__(self, file_path: str, device: str = 'cpu'):
-        """
-        Args:
-            file_path: Path to the text file containing one SNR value per line.
-            device: The torch device to store the parameters on.
-        """
-        self.device = device
-        self.snr_values = self._load_and_process_snr_file(file_path)
-
-    def _load_and_process_snr_file(self, path: str) -> torch.Tensor:
-        """Reads a single-column text file and converts it to a tensor."""
-        print(f"Loading SNR values from: {path}")
-        try:
-            # Use numpy.loadtxt for simple, efficient reading of numerical data
-            values = np.loadtxt(path, dtype=np.float32)
-        except Exception as e:
-            raise IOError(f"Failed to read or parse SNR file '{path}'. Error: {e}")
-
-        # Ensure the file was not empty and resulted in a 1D array
-        if values.ndim != 1 or values.size == 0:
-            raise ValueError(
-                f"File '{path}' should contain a single column of numbers. "
-                f"Loaded data has an unexpected shape: {values.shape}."
-            )
-
-        # Convert to a PyTorch tensor and reshape to a column vector [N, 1]
-        snr_tensor = torch.from_numpy(values).to(self.device).unsqueeze(1)
-        
-        print(f"Successfully loaded {len(snr_tensor)} SNR values.")
-        return snr_tensor
-
-    def sample(self, shape: Tuple[int]) -> torch.Tensor:
-        """
-        Samples a batch of SNR values.
-
-        Args:
-            shape: A tuple representing the batch shape, e.g., (batch_size,).
-
-        Returns:
-            A single tensor of shape [batch_size, 1, 1] containing sampled SNR values.
-        """
-        batch_size = shape[0]
-        num_total_values = self.snr_values.shape[0]
-
-        # Randomly select indices with replacement
-        indices = torch.randint(0, num_total_values, (batch_size,), device=self.device)
-
-        # Gather the sampled values, which results in a tensor of shape [batch_size, 1]
-        sampled_values = self.snr_values[indices]
-
-        # Reshape to [batch_size, 1, 1] for broadcasting and return
-        return sampled_values.view(batch_size, 1, 1)
-
-
 
 class PreferredOrientationPrior:
     """
@@ -375,19 +316,8 @@ def get_image_priors(
     shift = image_config["SHIFT"]
     lower=torch.tensor([-shift, -shift], dtype=torch.float32, device=device) 
     upper=torch.tensor([+shift, +shift], dtype=torch.float32, device=device)
-    # get prior type
-    shift_gauss = image_config.get("SHIFT_GAUSS", None)
-
-    # Truncated Gaussian prior
-    if isinstance(shift_gauss, (float, int)) and shift_gauss>0:
-       loc   = torch.tensor([0, 0], dtype=torch.float32, device=device) 
-       scale = torch.tensor([shift_gauss, shift_gauss], dtype=torch.float32, device=device)
-       shift_prior = zuko.distributions.Truncated(zuko.distributions.Normal(loc, scale), lower=lower, upper=upper)
-
     # Uniform prior
-    else:
-       shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
-
+    shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
 
     # Defocus prior
     defocus = image_config["DEFOCUS"]
@@ -418,26 +348,22 @@ def get_image_priors(
             raise ValueError("B_FACTOR lower bound must be positive")
         if lower > upper:
             raise ValueError(f"B_FACTOR lower bound ({lower.item()}) must be ≤ upper bound ({upper.item()})")
-        # check if you want Jeffreys prior, otherwise back to old uniform
-        if image_config.get("USE_JEFFREYS_BFACT", False):
-           b_factor_prior = zuko.distributions.TransformedUniform(LogTransform(), lower, upper)
-        else:
-           b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        # Uniform prior
+        b_factor_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
 
     # SNR prior
     snr = image_config["SNR"]
-    if isinstance(snr, str):
-        # Prior from data file
-        snr_prior = SNRPrior(snr, device=device)
-
-    # Log-uniform prior
-    elif isinstance(snr, list) and len(snr) == 2:
+    if isinstance(snr, list) and len(snr) == 2:
         lower = torch.tensor([[ snr[0] ]], dtype=torch.float32, device=device)
         upper = torch.tensor([[ snr[1] ]], dtype=torch.float32, device=device)
         if lower > upper:
             raise ValueError(f"SNR lower bound must be ≤ upper bound")
-        # Log-uniform (Jeffreys) prior
-        snr_prior = zuko.distributions.TransformedUniform(LogTransform(), lower, upper)
+        # Uniform
+        if image_config.get("USE_UNIFORM_SNR", False):
+           snr_prior = zuko.distributions.BoxUniform(lower=lower, upper=upper, ndims=1)
+        else:
+           # Log-uniform (Jeffreys) prior
+           snr_prior = zuko.distributions.TransformedUniform(LogTransform(), lower, upper)
 
     # Amplitude prior
     amp_prior = zuko.distributions.BoxUniform(
@@ -491,10 +417,7 @@ def get_image_priors(
 
     # Shifts
     print(f"  Shift prior (pixels):")
-    if isinstance(shift_prior, zuko.distributions.Truncated):
-        print(f"    Type: Truncated Gaussian (μ=0.0, σ={shift_gauss:.2f})")
-    else:
-        print(f"    Type: Uniform")
+    print(f"    Type: Uniform")
     print(f"    Range: [{-shift:.2f}, {+shift:.2f}]")
 
     # Defocus
@@ -510,20 +433,19 @@ def get_image_priors(
 
     # B-factor
     print(f"  B-factor prior (Å²):")
-    if isinstance(b_factor_prior, zuko.distributions.TransformedUniform):
-        print(f"    Type: Log-Uniform (Jeffreys)")
-    else:
-        print(f"    Type: Uniform")
+    print(f"    Type: Uniform")
     lower, upper = image_config["B_FACTOR"]
     print(f"    Range: [{lower:.1f}, {upper:.1f}]")
 
     # SNR
     print(f"  Signal-to-Noise Ratio (SNR) prior:")
-    if isinstance(snr_prior, SNRPrior):
-        print(f"    Type: Empirical (from data file)")
-
-    elif isinstance(snr_prior, zuko.distributions.TransformedUniform):
+    if isinstance(snr_prior, zuko.distributions.TransformedUniform):
         print(f"    Type: Log-Uniform (Jeffreys)")
+        lower, upper = image_config["SNR"]
+        print(f"    Range: [{lower:.3f}, {upper:.3f}]")
+
+    elif isinstance(snr_prior, zuko.distributions.BoxUniform):
+        print(f"    Type: Uniform")
         lower, upper = image_config["SNR"]
         print(f"    Range: [{lower:.3f}, {upper:.3f}]")
 

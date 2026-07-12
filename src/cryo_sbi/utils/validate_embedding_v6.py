@@ -5,7 +5,7 @@ Validates a pretrained image encoder by visualising its embedding space
 using UMAP.
 
 Produces a 2×2 figure:
-    Row 0 left:  Example synthetic images (after noise model if provided)
+    Row 0 left:  Example synthetic images
     Row 0 right: Example real images (if real MRC provided)
     Row 1 left:  Synthetic UMAP, coloured by conformation index
     Row 1 right: Synthetic + real UMAP; synthetic by conformation, real in orange
@@ -19,7 +19,6 @@ Usage:
         --n_synthetic 2000 \
         --real_data_mrc real_images.mrc \
         --n_real 2000 \
-        --noise_model noise_model.pt \
         --output embedding_validation.png
 """
 
@@ -34,7 +33,6 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -57,91 +55,6 @@ from cryo_sbi.wpa_simulator.cryo_em_simulator import (
     cryo_em_simulator,
     create_simulation_param,
 )
-
-
-# ============================================================================
-# NOISE MODEL (minimal copy for inference — weights loaded from checkpoint)
-# ============================================================================
-
-class _UNetBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int):
-        super().__init__()
-        self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-class StochasticResidualUNet(torch.nn.Module):
-    """
-    Stochastic residual U-Net for adding realistic noise/background.
-    Samples a latent noise vector internally; optionally accepts an external z
-    for reproducible evaluation.
-
-    Input and output are [B, H, W]. Requires image_size divisible by 4.
-    """
-    def __init__(self, base: int = 32, noise_dim: int = 16):
-        super().__init__()
-        self.noise_dim = noise_dim
-
-        self.enc1 = _UNetBlock(1, base)
-        self.pool1 = torch.nn.MaxPool2d(2)
-        self.enc2 = _UNetBlock(base, base * 2)
-        self.pool2 = torch.nn.MaxPool2d(2)
-        self.bottleneck = _UNetBlock(base * 2, base * 4)
-
-        # Project latent noise into bottleneck feature space
-        self.noise_proj = torch.nn.Sequential(
-            torch.nn.Linear(noise_dim, base * 4),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(base * 4, base * 4),
-        )
-
-        self.up2 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec2 = _UNetBlock(base * 4 + base * 2, base * 2)
-        self.up1 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec1 = _UNetBlock(base * 2 + base, base)
-        self.outc = torch.nn.Conv2d(base, 1, 1)
-
-    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
-        input_x = x
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-
-        # Sample noise internally if not provided
-        if z is None:
-            z = torch.randn(
-                x.size(0), self.noise_dim,
-                device=x.device, dtype=x.dtype
-            )
-
-        # Encode
-        x1 = self.enc1(x)
-        x2 = self.enc2(self.pool1(x1))
-        x3 = self.bottleneck(self.pool2(x2))
-
-        # Inject noise at bottleneck; broadcasts over spatial dims
-        z_feat = self.noise_proj(z).view(x.size(0), -1, 1, 1)
-        x3 = x3 + z_feat
-
-        # Decode
-        x = self.up2(x3)
-        x = self.dec2(torch.cat([x, x2], dim=1))
-        x = self.up1(x)
-        x = self.dec1(torch.cat([x, x1], dim=1))
-
-        out = input_x + self.outc(x).squeeze(1)
-
-        # Per-image z-score normalization
-        mean = out.mean(dim=(-2, -1), keepdim=True)
-        std = out.std(dim=(-2, -1), keepdim=True)
-        return (out - mean) / (std + 1e-8)
 
 
 # ============================================================================
@@ -168,7 +81,7 @@ def validate_mrc_data(data):
         if np.std(test_data) == 0: return False, "Zero variance"
         return True, "Valid"
     except Exception as e:
-        return False, f"Error: {str(e)}"
+        return False, f"Error: {str(e)[:100]}"
 
 
 def read_mrc_header_raw(filepath):
@@ -298,9 +211,7 @@ def generate_and_encode_synthetic(
     simulation_batch_size: int,
     encode_batch_size: int,
     simulation_param: dict,
-    noise_model: Optional[nn.Module] = None,
     n_example_images: int = 8,
-    use_noiseless_images: bool = False
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Generate synthetic cryo-EM images and encode them.
@@ -334,7 +245,7 @@ def generate_and_encode_synthetic(
 
             indices, quaternions, shift, defocus, b_factor, amp, snr = parameters
 
-            noisy_images, clean_images = cryo_em_simulator(
+            images, _ = cryo_em_simulator(
                 models,
                 indices.to(device,     non_blocking=True),
                 quaternions.to(device, non_blocking=True),
@@ -346,11 +257,6 @@ def generate_and_encode_synthetic(
                 simulation_param,
                 simulation_param["noise"],
             )
-
-            images = clean_images if use_noiseless_images else noisy_images
-
-            if noise_model is not None:
-                images = noise_model(images)
 
             # Collect example images from the first batch only
             if len(example_buf) < n_example_images:
@@ -541,9 +447,7 @@ def validate_embedding(
     umap_n_neighbors:      int = 15,
     umap_min_dist:         float = 0.1,
     output_path:           str = "embedding_validation.png",
-    noise_model_path:      Optional[str] = None,
     n_example_images:      int = 8,
-    use_noiseless_images:  bool = False
 ):
     print("\n" + "=" * 70)
     print("EMBEDDING VALIDATION")
@@ -578,34 +482,13 @@ def validate_embedding(
     print(f"✅ Encoder loaded — embedding: z = encoder(d)  (mu_head inside)")
 
     # ------------------------------------------------------------------
-    # Load noise model (optional)
-    # ------------------------------------------------------------------
-    noise_model = None
-    if noise_model_path is not None:
-        print(f"\nLoading noise model from: {noise_model_path}")
-        noise_model = StochasticResidualUNet(base=32).to(device)
-        noise_model.load_state_dict(torch.load(noise_model_path, map_location=device))
-        noise_model.eval()
-        for p in noise_model.parameters():
-            p.requires_grad = False
-        print("✅ Noise model loaded — applying to clean synthetic images")
-    else:
-        print("\nNo noise model provided — using simulator output directly")
-
-    if use_noiseless_images:
-        print("Using NOISELESS synthetic images (second simulator output).")
-    else:
-        print("Using NOISY synthetic images (first simulator output).")
-
-    # ------------------------------------------------------------------
     # Generate and encode synthetic images
     # ------------------------------------------------------------------
     print(f"\nGenerating {n_synthetic:,} synthetic images...")
     synth_embeddings, synth_indices, synth_examples = generate_and_encode_synthetic(
         model, image_config, models, device,
         n_synthetic, simulation_batch_size, encode_batch_size,
-        simulation_param, noise_model, n_example_images,
-        use_noiseless_images
+        simulation_param, n_example_images,
     )
 
     print(f"  Embedding shape:    {synth_embeddings.shape}")
@@ -691,9 +574,7 @@ if __name__ == "__main__":
     parser.add_argument("--umap_n_neighbors",      type=int,   default=15,                 help="UMAP n_neighbors")
     parser.add_argument("--umap_min_dist",         type=float, default=0.1,                help="UMAP min_dist")
     parser.add_argument("--output",                default="embedding_validation.png",     help="Output figure path")
-    parser.add_argument("--noise_model",           default=None,                           help="Path to trained noise model weights (.pt); if omitted, uses noisy simulator output")
     parser.add_argument("--n_example_images",      type=int,   default=8,                  help="Number of example images to show per panel (displayed as 2×4 grid)")
-    parser.add_argument("--use_noiseless_images",  action="store_true",                    help="Use the noiseless simulator output instead of the noisy one")
 
     args = parser.parse_args()
 
@@ -711,7 +592,5 @@ if __name__ == "__main__":
         umap_n_neighbors      = args.umap_n_neighbors,
         umap_min_dist         = args.umap_min_dist,
         output_path           = args.output,
-        noise_model_path      = args.noise_model,
         n_example_images      = args.n_example_images,
-        use_noiseless_images  = args.use_noiseless_images
     )

@@ -255,6 +255,45 @@ class QuaternionTestPrior:
         return quats
 
 
+class RadialShiftPrior:
+    """
+    Uniform radial shift prior over a disk of radius Rmax.
+
+    Samples 2D shift vectors uniformly from a circle of radius Rmax
+    by sampling the angle uniformly in [0, 2π) and the radius using
+    r = Rmax * sqrt(u), which yields a uniform area density over the disk.
+    """
+
+    def __init__(self, rmax: float, device: str = 'cpu'):
+        self.rmax = float(rmax)
+        self.device = device
+
+    def sample(self, shape: tuple) -> torch.Tensor:
+        """
+        Sample shifts uniformly within a circle of radius Rmax.
+
+        Args:
+            shape: tuple, batch shape, e.g., (batch_size,)
+
+        Returns:
+            torch tensor of shape [batch_size, 2] with columns [x, y]
+        """
+        batch_size = shape[0]
+
+        # Sample angle uniformly in [0, 2π)
+        theta = torch.rand(batch_size, device=self.device) * 2.0 * np.pi
+
+        # Sample radius for uniform area density over the disk
+        u = torch.rand(batch_size, device=self.device)
+        r = self.rmax * torch.sqrt(u)
+
+        # Convert polar coordinates to cartesian
+        x = r * torch.cos(theta)
+        y = r * torch.sin(theta)
+
+        return torch.stack([x, y], dim=-1)
+
+
 class ImagePrior:
     def __init__(
         self,
@@ -314,10 +353,15 @@ def get_image_priors(
 
     # Shift prior
     shift = image_config["SHIFT"]
-    lower=torch.tensor([-shift, -shift], dtype=torch.float32, device=device) 
-    upper=torch.tensor([+shift, +shift], dtype=torch.float32, device=device)
-    # Uniform prior
-    shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
+    use_radial_shift = image_config.get("USE_UNIFORM_RADIAL_SHIFT", False)
+
+    if use_radial_shift:
+        shift_prior = RadialShiftPrior(rmax=shift, device=device)
+    else:
+        lower=torch.tensor([-shift, -shift], dtype=torch.float32, device=device)
+        upper=torch.tensor([+shift, +shift], dtype=torch.float32, device=device)
+        # Uniform prior
+        shift_prior = zuko.distributions.BoxUniform(lower, upper, ndims=1)
 
     # Defocus prior
     defocus = image_config["DEFOCUS"]
@@ -416,9 +460,13 @@ def get_image_priors(
         print(f"    Type: Uniform Random (SO(3))")
 
     # Shifts
-    print(f"  Shift prior (pixels):")
-    print(f"    Type: Uniform")
-    print(f"    Range: [{-shift:.2f}, {+shift:.2f}]")
+    print(f"  Shift prior (Angstrom):")
+    if isinstance(shift_prior, RadialShiftPrior):
+        print(f"    Type: Uniform Radial (disk)")
+        print(f"    Radius: [0.0, {shift_prior.rmax:.2f}]")
+    else:
+        print(f"    Type: Uniform")
+        print(f"    Range: [{-shift:.2f}, {+shift:.2f}]")
 
     # Defocus
     print(f"  Defocus prior (μm):")

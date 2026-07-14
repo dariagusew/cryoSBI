@@ -439,6 +439,9 @@ def pretrain_image_embed(
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
+    # Simple cosine Annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+
     print("\nTraining configuration:")
     print(f"  Embedding:         {embedding_name}")
     print(f"  Embedding dim:     {embedding_dim}")
@@ -473,6 +476,8 @@ def pretrain_image_embed(
                 pred_weights=pred_weights,
                 normalizer=normalizer,
             )
+
+            scheduler.step()
 
             history["loss"].append(avg_loss)
             history["pred_loss"].append(avg_pred_loss)

@@ -93,11 +93,11 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
     estimator = estimator_models.NLEWithEmbedding(
         embedding_net=embedding,
         output_embedding_dim=config["OUT_DIM"],
-        num_models=config["NUM_MODELS"],
         num_transforms=config["NUM_TRANSFORM"],
         num_hidden_flow=config["NUM_HIDDEN_FLOW"],
         hidden_flow_dim=config["HIDDEN_DIM_FLOW"],
         flow=model,
+        num_models=config["NUM_MODELS"],
         **{"activation": partial(nn.LeakyReLU, 0.1)},
     )
 

@@ -107,12 +107,22 @@ def cl_nle_train_no_saving_with_finetuning():
         required=False,
         default=2048,
     )
-    cl_parser.add_argument(
+
+    # Mutually exclusive: must provide either encoder-only or full pretrained model
+    pretrained_group = cl_parser.add_mutually_exclusive_group(required=True)
+    pretrained_group.add_argument(
         "--pretrained_embedding_path",
         action="store",
         type=str,
-        required=True,
         default=None,
+        help="Path to pretrained encoder weights only.",
+    )
+    pretrained_group.add_argument(
+        "--pretrained_full_model_path",
+        action="store",
+        type=str,
+        default=None,
+        help="Path to full pretrained model (encoder + predictor). Required for real-data fine-tuning.",
     )
 
     cl_parser.add_argument(
@@ -122,7 +132,6 @@ def cl_nle_train_no_saving_with_finetuning():
         required=False,
         default=False,
     )
-
     cl_parser.add_argument(
         "--use_differential_lr",
         action="store",
@@ -130,7 +139,6 @@ def cl_nle_train_no_saving_with_finetuning():
         required=False,
         default=False,
     )
-
     cl_parser.add_argument(
         "--embedding_lr_factor",
         action="store",
@@ -138,12 +146,32 @@ def cl_nle_train_no_saving_with_finetuning():
         required=False,
         default=0.01,
     )
-
     cl_parser.add_argument(
         "--n_batches_per_epoch",
         type=int,
         default=100,
         help="Number of simulation batches to generate per epoch (default: 100)",
+    )
+    cl_parser.add_argument(
+        "--real_data_fraction",
+        action="store",
+        type=float,
+        required=False,
+        default=0.0,
+        help="Fraction of final epochs to fine-tune on real data (default: 0.0).",
+    )
+    cl_parser.add_argument(
+        "--real_data_mrc",
+        action="store",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to .mrc stack of real images for fine-tuning at the end.",
+    )
+    cl_parser.add_argument(
+        "--stochastic",
+        action="store_true",
+        help="Sample pseudo-labels from predictor probabilities instead of argmax.",
     )
 
     args = cl_parser.parse_args()
@@ -162,9 +190,12 @@ def cl_nle_train_no_saving_with_finetuning():
         simulation_batch_size=args.simulation_batch_size,
         n_batches_per_epoch=args.n_batches_per_epoch,
         pretrained_embedding_path=args.pretrained_embedding_path,
+        pretrained_full_model_path=args.pretrained_full_model_path,
         freeze_embedding=args.freeze_embedding,
         use_differential_lr=args.use_differential_lr,
         embedding_lr_factor=args.embedding_lr_factor,
+        real_data_mrc=args.real_data_mrc,
+        real_data_finetune_fraction=args.real_data_fraction,
+        stochastic=args.stochastic,
     )
-
 

@@ -114,7 +114,7 @@ def cl_nle_train_no_saving_with_finetuning():
         required=True,
         default=None,
     )
-    
+
     cl_parser.add_argument(
         "--freeze_embedding",
         action="store",
@@ -140,35 +140,10 @@ def cl_nle_train_no_saving_with_finetuning():
     )
 
     cl_parser.add_argument(
-        "--real_data_fraction",
-        action="store",
-        type=float,
-        required=False,
-        default=0.0,
-    )
-
-    cl_parser.add_argument("--validation_mrc_path", action="store", type=str, required=False, default=None)
-
-    cl_parser.add_argument('--sample_indices', action='store_true')
-
-    cl_parser.add_argument('--n_batches_per_epoch', type=int, default=100,
-                       help='Number of simulation batches to generate per epoch (default: 100)')
-
-    cl_parser.add_argument(
-        "--noise_model_path",
-        action="store",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to trained ResidualUNet noise model. "
-             "If provided, synthetic images are passed through it before the encoder.",
-    )
-
-    cl_parser.add_argument(
-        "--use_noiseless_images",
-        action="store_true",
-        help="Use the noiseless simulator output (second output of cryo_em_simulator) "
-             "instead of the noisy output.",
+        "--n_batches_per_epoch",
+        type=int,
+        default=100,
+        help="Number of simulation batches to generate per epoch (default: 100)",
     )
 
     args = cl_parser.parse_args()
@@ -190,10 +165,6 @@ def cl_nle_train_no_saving_with_finetuning():
         freeze_embedding=args.freeze_embedding,
         use_differential_lr=args.use_differential_lr,
         embedding_lr_factor=args.embedding_lr_factor,
-        validation_mrc_path=args.validation_mrc_path,
-        real_data_finetune_fraction=args.real_data_fraction,
-        sample_indices=args.sample_indices,
-        noise_model_path=args.noise_model_path,
-        use_noiseless_images=args.use_noiseless_images
     )
+
 

@@ -24,432 +24,6 @@ from cryo_sbi.wpa_simulator.cryo_em_simulator import cryo_em_simulator, create_s
 from cryo_sbi.wpa_simulator.validate_image_config import check_image_params
 import cryo_sbi.utils.image_utils as img_utils
 
-try:
-    import mrcfile
-    MRCFILE_AVAILABLE = True
-except ImportError:
-    MRCFILE_AVAILABLE = False
-    print("Warning: mrcfile not installed. Real image loading for validation disabled.")
-
-# =======================================================================================
-# ROBUST MRC FILE HANDLING
-# =======================================================================================
-
-def check_mrc_file_size(filepath):
-    """Check MRC file size in bytes and GB."""
-    filepath = Path(filepath)
-    file_size = filepath.stat().st_size
-    return file_size, file_size / (1024**3)
-
-def validate_mrc_data(data):
-    """
-    Validate MRC data after reading. This version is 'memmap-aware' to avoid
-    loading entire large files into memory for validation.
-    """
-    if data is None or data.size == 0 or data.ndim not in [2, 3]:
-        return False, f"Invalid data shape or type: {data.shape if hasattr(data, 'shape') else 'None'}"
-    try:
-        # For memmap, only check the first particle to avoid loading all data.
-        if isinstance(data, np.memmap):
-            test_data = data[0] if data.ndim == 3 else data
-        else:
-            test_data = data
-        if np.all(test_data == 0): return False, "All data is zero"
-        if np.any(np.isnan(test_data)): return False, "Data contains NaN"
-        if np.any(np.isinf(test_data)): return False, "Data contains inf"
-        if np.std(test_data) == 0: return False, "Zero variance"
-        return True, "Valid"
-    except Exception as e:
-        return False, f"Error: {str(e)}"
-
-def read_mrc_header_raw(filepath):
-    """Read MRC header manually if standard methods fail."""
-    try:
-        with open(filepath, 'rb') as f:
-            header_bytes = f.read(1024)
-            if len(header_bytes) < 1024: return None
-            import struct
-            nx, ny, nz = struct.unpack('iii', header_bytes[0:12])
-            mode = struct.unpack('i', header_bytes[12:16])[0]
-            return {'nx': nx, 'ny': ny, 'nz': nz, 'mode': mode}
-    except:
-        return None
-
-def get_dtype_from_mode(mode):
-    """Convert MRC mode to numpy dtype."""
-    dtype_map = {0: np.int8, 1: np.int16, 2: np.float32, 6: np.uint16}
-    return dtype_map.get(mode, np.float32)
-
-def validate_mrc_dimensions(nx, ny, nz):
-    """Check if dimensions are reasonable."""
-    if nx <= 0 or ny <= 0 or nz <= 0: return False, f"Non-positive: {nz}×{ny}×{nx}"
-    if nx > 8192 or ny > 8192: return False, f"Too large: {ny}×{nx}"
-    if nz > 50000000: return False, f"Stack too large: {nz}"
-    return True, "Valid"
-
-def open_mrc_robust(filepath, max_size_gb=None):
-    """
-    Robustly open MRC file with fallback methods, prioritizing memory-mapping
-    to avoid loading large files into RAM.
-    """
-    filepath = Path(filepath)
-    if not filepath.exists():
-        return None, False, "File not found"
-
-    file_size, file_size_gb = check_mrc_file_size(filepath)
-    if max_size_gb is not None and file_size_gb > max_size_gb:
-        return None, False, f"Too large: {file_size_gb:.2f} GB"
-
-    try:
-        header_info = read_mrc_header_raw(filepath)
-        if header_info is not None:
-            nx, ny, nz, mode = header_info['nx'], header_info['ny'], header_info['nz'], header_info['mode']
-            is_valid, msg = validate_mrc_dimensions(nx, ny, nz)
-            if not is_valid:
-                return None, False, msg
-
-            dtype = get_dtype_from_mode(mode)
-            data = np.memmap(filepath, dtype=dtype, mode='r', offset=1024, shape=(nz, ny, nx))
-
-            is_valid, msg = validate_mrc_data(data)
-            if is_valid:
-                return data, True, f"Memmap via manual header read"
-    except Exception as e:
-        return None, False, f"Failed: {str(e)[:100]}"
-
-    return None, False, "All MRC opening methods failed"
-
-
-class RealImageMRCDataset(Dataset):
-    """
-    Dataset for loading real images from MRC stack
-    Efficient streaming without loading all into memory
-    """
-    def __init__(self, mrc_path, cache_size=10000):
-        if not MRCFILE_AVAILABLE:
-            raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
-        
-        self.mrc_path = mrc_path
-        self.cache_size = cache_size
-        
-        print(f"  Opening MRC file: {mrc_path}")
-        # Call the new function directly
-        self.mrc_data, success, method = open_mrc_robust(mrc_path)
-
-        if not success:
-            raise RuntimeError(f"Failed to open MRC file: {method}")
-        
-        self.n_images = self.mrc_data.shape[0]
-        self.image_shape = self.mrc_data.shape[1:]
-        
-        print(f"  Loaded MRC: {self.n_images} images of shape {self.image_shape}")
-        print(f"  Loading method: {method}")
-        
-        self.cache = {}
-        self.cache_order = []
-    
-    def __len__(self):
-        return self.n_images
-    
-    def __getitem__(self, idx):
-        if idx in self.cache:
-            return self.cache[idx]
-        
-        img = self.mrc_data[idx].astype(np.float32)
-        img = (img - img.mean()) / (img.std() + 1e-8)
-        
-        if len(self.cache) >= self.cache_size:
-            oldest = self.cache_order.pop(0)
-            del self.cache[oldest]
-        
-        # Use torch.from_numpy and .copy() for safety with multiprocessing
-        self.cache[idx] = torch.from_numpy(img.copy())
-        self.cache_order.append(idx)
-        
-        return self.cache[idx]
-    
-
-class _UNetBlock(torch.nn.Module):
-    def __init__(self, in_ch: int, out_ch: int):
-        super().__init__()
-        self.conv = torch.nn.Sequential(
-            torch.nn.Conv2d(in_ch, out_ch, 3, padding=1),
-            torch.nn.BatchNorm2d(out_ch),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Conv2d(out_ch, out_ch, 3, padding=1),
-            torch.nn.BatchNorm2d(out_ch),
-            torch.nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-class StochasticResidualUNet(torch.nn.Module):
-    """
-    Stochastic residual U-Net for adding realistic noise/background.
-    Samples a latent noise vector internally; optionally accepts an external z
-    for reproducible evaluation.
-
-    Input and output are [B, H, W]. Requires image_size divisible by 4.
-    """
-    def __init__(self, base: int = 32, noise_dim: int = 16):
-        super().__init__()
-        self.noise_dim = noise_dim
-
-        self.enc1 = _UNetBlock(1, base)
-        self.pool1 = torch.nn.MaxPool2d(2)
-        self.enc2 = _UNetBlock(base, base * 2)
-        self.pool2 = torch.nn.MaxPool2d(2)
-        self.bottleneck = _UNetBlock(base * 2, base * 4)
-
-        # Project latent noise into bottleneck feature space
-        self.noise_proj = torch.nn.Sequential(
-            torch.nn.Linear(noise_dim, base * 4),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(base * 4, base * 4),
-        )
-
-        self.up2 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec2 = _UNetBlock(base * 4 + base * 2, base * 2)
-        self.up1 = torch.nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False)
-        self.dec1 = _UNetBlock(base * 2 + base, base)
-        self.outc = torch.nn.Conv2d(base, 1, 1)
-
-    def forward(self, x: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
-        input_x = x
-        if x.ndim == 3:
-            x = x.unsqueeze(1)
-
-        # Sample noise internally if not provided
-        if z is None:
-            z = torch.randn(
-                x.size(0), self.noise_dim,
-                device=x.device, dtype=x.dtype
-            )
-
-        # Encode
-        x1 = self.enc1(x)
-        x2 = self.enc2(self.pool1(x1))
-        x3 = self.bottleneck(self.pool2(x2))
-
-        # Inject noise at bottleneck; broadcasts over spatial dims
-        z_feat = self.noise_proj(z).view(x.size(0), -1, 1, 1)
-        x3 = x3 + z_feat
-
-        # Decode
-        x = self.up2(x3)
-        x = self.dec2(torch.cat([x, x2], dim=1))
-        x = self.up1(x)
-        x = self.dec1(torch.cat([x, x1], dim=1))
-
-        out = input_x + self.outc(x).squeeze(1)
-
-        # Per-image z-score normalization
-        mean = out.mean(dim=(-2, -1), keepdim=True)
-        std = out.std(dim=(-2, -1), keepdim=True)
-        return (out - mean) / (std + 1e-8)
-
-
-def generate_real_validation_set(mrc_path: str, val_size: int, device):
-    """
-    Extract a fixed set of real validation images.
-    """
-    print(f"\nExtracting {val_size} real validation images...")
- 
-    dataset = RealImageMRCDataset(mrc_path)
-
-    if val_size > len(dataset):
-        print(f"  Warning: Requested {val_size} images, but only {len(dataset)} are available. Using {len(dataset)}.")
-        val_size = len(dataset)
-
-    dataloader = DataLoader(
-        dataset, batch_size=val_size, shuffle=True,
-        num_workers=0, pin_memory=True, drop_last=True
-    )
-    print(f"  Extracting one batch of {val_size} real images for validation.")
- 
-    real_images = next(iter(dataloader)).to(device, non_blocking=True)
-
-    val_mem_gb = real_images.nelement() * real_images.element_size() / 1024**3
-
-    print(f"✅ Validation set created with {len(real_images)} real images, consuming {val_mem_gb:.2f} GB of VRAM.")
-    return real_images
-
-
-def generate_synthetic_validation_set(
-    prior_loader, models, simulation_param, val_size, device,
-    noise_model: Optional[torch.nn.Module] = None,
-    use_noiseless_images: bool = False
-):
-    """
-    Generates a fixed set of synthetic validation images.
-    """
-    print(f"\nGenerating {val_size} synthetic validation images...")
-    
-    val_images = []
-    generated_count = 0
-    val_iter = iter(prior_loader)
-
-    with tqdm(total=val_size, desc="  Generating val set") as pbar:
-        while generated_count < val_size:
-            try:
-                parameters = next(val_iter)
-            except StopIteration:
-                val_iter = iter(prior_loader) # Reset if we run out
-                parameters = next(val_iter)
-            
-            (indices, quaternions, shift, defocus, b_factor, amp, snr) = parameters
-
-            noisy_images, clean_images = cryo_em_simulator(
-                models,
-                indices.to(device, non_blocking=True),
-                quaternions.to(device, non_blocking=True),
-                shift.to(device, non_blocking=True),
-                defocus.to(device, non_blocking=True),
-                b_factor.to(device, non_blocking=True),
-                amp.to(device, non_blocking=True),
-                snr.to(device, non_blocking=True),
-                simulation_param,
-                simulation_param["noise"]
-            )
-
-            # Select noisy or noiseless simulator output
-            images = clean_images if use_noiseless_images else noisy_images
-
-            # Apply frozen noise model on top of synthetic images
-            if noise_model is not None:
-                with torch.no_grad():
-                    images = noise_model(images)
-
-            val_images.append(images)
-            generated_count += len(images)
-            pbar.update(len(images))
-
-    all_images = torch.cat(val_images, dim=0)[:val_size]
-    val_mem_gb = all_images.nelement() * all_images.element_size() / 1024**3
-
-    print(f"✅ Validation set created with {len(all_images)} synthetic images, consuming {val_mem_gb:.2f} GB of VRAM.")
-    return all_images
-
-
-# =======================================================================================
-# VALIDATION METRICS
-# =======================================================================================
-
-@torch.no_grad()
-def get_per_image_scores(
-    estimator: torch.nn.Module,
-    images: torch.Tensor,
-    n_models: int,
-    batch_size: int = 256
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Helper function to get per-image predictions, APE, and NAMLL scores.
-    """
-    all_preds, all_apes, all_namlls = [], [], []
-    # batch images
-    for batch in images.split(batch_size):
-        # Get log-likelihoods
-        log_probs = []
-        for i in range(n_models):
-            indices_i = torch.full((batch.shape[0], 1), i, device=batch.device)
-            log_probs.append(estimator(batch, indices_i).unsqueeze(-1))
-        log_probs = torch.cat(log_probs, dim=-1)
-
-        # Calculate NAMLL per image
-        namlls = -torch.logsumexp(log_probs, dim=-1)
-        all_namlls.append(namlls)
-
-        # Calculate APE per image
-        log_posterior = torch.log_softmax(log_probs, dim=-1)
-        apes = -torch.sum(torch.exp(log_posterior) * log_posterior, dim=-1)
-        all_apes.append(apes)
-
-    return torch.cat(all_apes), torch.cat(all_namlls)
-
-
-@torch.no_grad()
-def calculate_raw_metrics(
-    estimator: torch.nn.Module,
-    real_images: torch.Tensor,
-    sim_images: torch.Tensor,
-    n_models: int,
-    batch_size: int = 256
-) -> Dict[str, float]:
-    """
-    Calculates the raw APE and NAMLL scores for both real and synthetic domains.
-
-    Returns a dictionary with four key metrics:
-    - ape_real: Average Posterior Entropy on Real data.
-    - ape_sim: Average Posterior Entropy on Synthetic data.
-    - namll_real: Negative AMLL on Real data.
-    - namll_sim: Negative AMLL on Synthetic data.
-    """
-
-    print("\nCalculating raw validation metrics...")
-    # Step 1: Get per-image scores for all images
-    print("  Processing real images...")
-    real_apes, real_namlls = get_per_image_scores(estimator, real_images, n_models, batch_size)
-    print("  Processing synthetic images...")
-    sim_apes, sim_namlls = get_per_image_scores(estimator, sim_images, n_models, batch_size)
-
-    # Step 2: Calculate averages
-    ape_real   = torch.mean(real_apes).item()
-    ape_sim    = torch.mean(sim_apes).item()
-    namll_real = torch.mean(real_namlls).item()
-    namll_sim  = torch.mean(sim_namlls).item()
-
-    metrics = {
-        'ape_R':  ape_real,
-        'ape_S':  ape_sim,
-        'amll_R': namll_real,
-        'amll_S': namll_sim
-    }
-    return metrics
-
-@torch.no_grad()
-def calculate_apes(
-    estimator: torch.nn.Module,
-    images: torch.Tensor,
-    n_models: int
-) -> torch.Tensor:
-    """
-    Efficiently calculates the Average Posterior Entropy (APE) for a batch of 2D images.
-
-    Args:
-        estimator (torch.nn.Module): The trained NLE model.
-        images (torch.Tensor): A batch of 2D images, of shape
-                               (batch_size, height, width).
-        n_models (int): The total number of conformational classes.
-
-    Returns:
-        torch.Tensor: A 1D tensor of APE scores of shape (batch_size,),
-                      moved to the CPU.
-    """
-    batch_size = images.shape[0]
-    device = images.device
-
-    # 1. Prepare inputs for a single, vectorized forward pass.
-    repeated_images = images.repeat_interleave(n_models, dim=0)
-
-    # Create a corresponding tensor of model indices.
-    repeated_indices = torch.arange(n_models, device=device).repeat(batch_size).unsqueeze(-1)
-
-    # 2. Perform a single forward pass to get log-likelihoods for all pairs.
-    # The output `log_probs_flat` will have shape (batch_size * n_models,).
-    log_probs_flat = estimator(repeated_images, repeated_indices)
-
-    # 3. Reshape the log-likelihoods to group them by the original image.
-    # Shape becomes: (batch_size, n_models)
-    log_probs = log_probs_flat.view(batch_size, n_models)
-
-    # 4. Calculate APE directly from the log-likelihoods.
-    log_posterior = torch.log_softmax(log_probs, dim=-1)
-    apes = -torch.sum(torch.exp(log_posterior) * log_posterior, dim=-1)
-
-    return apes
-
 
 def load_model(
     train_config: str,
@@ -536,17 +110,11 @@ def nle_train_no_saving_with_finetuning(
     pretrained_embedding_path: Optional[str] = None,
     freeze_embedding: bool = True,
     use_differential_lr: bool = False,
-    embedding_lr_factor: float = 0.01,
-    validation_mrc_path: Optional[str] = None,
-    validation_log_file: str = 'validation_scores.pt',
-    n_validation_images: int = 10240,
-    real_data_finetune_fraction: float = 0.0,
-    sample_indices: bool = False,
-    noise_model_path: Optional[str] = None,
-    use_noiseless_images: bool = False
+    embedding_lr_factor: float = 0.01
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
+
     Args:
         image_config (str): path to image config file
         train_config (str): path to train config file
@@ -555,19 +123,15 @@ def nle_train_no_saving_with_finetuning(
         loss_file (str): path to loss file
         train_from_checkpoint (bool, optional): train from checkpoint. Defaults to False.
         model_state_dict (str, optional): path to pretrained model state dict. Defaults to None.
-        n_workers (int, optional): number of workers. Defaults to 1.
-        device (str, optional): training device. Defaults to "cpu".
-        saving_frequency (int, optional): frequency of saving model. Defaults to 20.
-        pretrained_embedding_path: Path to pretrained ResNet18 weights
-        freeze_embedding: If True, freeze embedding during training
-        use_differential_lr: If True, use lower LR for embedding
-        embedding_lr_factor: LR multiplier for embedding (if not frozen)
-        validation_mrc_path (str, optional): Path to .mrc file for validation.
-        validation_log_file (str, optional): Path to save validation loss history.
-        n_validation_images (int, optional): Number of real images for validation loss.
-        real_data_finetune_fraction (float, optional): Fraction of final epochs to fine-tune on real data. Defaults to 0.0 (disabled).
-        noise_model_path (str, optional): Path to trained noise model weights.
-        use_noiseless_images (bool, optional): Use the noiseless simulator output instead of the noisy one.
+        n_workers (int, optional): number of workers. Defaults to 4.
+        device (str, optional): training device. Defaults to "cuda".
+        saving_frequency (int, optional): frequency of saving model. Defaults to 100.
+        simulation_batch_size (int, optional): images generated per simulator call
+        n_batches_per_epoch (int, optional): simulation calls per epoch
+        pretrained_embedding_path (str, optional): Path to pretrained image embedding weights
+        freeze_embedding (bool, optional): If True, freeze embedding during training
+        use_differential_lr (bool, optional): If True, use lower LR for embedding
+        embedding_lr_factor (float, optional): LR multiplier for embedding (if not frozen)
     """
     train_config = json.load(open(train_config))
     check_train_params(train_config)
@@ -575,11 +139,6 @@ def nle_train_no_saving_with_finetuning(
 
     assert simulation_batch_size >= train_config["BATCH_SIZE"]
     assert simulation_batch_size % train_config["BATCH_SIZE"] == 0
-
-    if real_data_finetune_fraction > 0 and not validation_mrc_path:
-        raise ValueError("A `validation_mrc_path` must be provided to use real data fine-tuning.")
-    
-    split_epoch = int(epochs * (1.0 - real_data_finetune_fraction))
 
     if image_config["MODEL_FILE"].endswith("npy"):
         models = (
@@ -608,61 +167,26 @@ def nle_train_no_saving_with_finetuning(
         train_from_checkpoint,
         pretrained_embedding_path=pretrained_embedding_path,
         freeze_embedding=freeze_embedding,
-        image_size = image_config["N_PIXELS"]
+        image_size=image_config["N_PIXELS"]
     )
-
-    noise_model = None
-    if noise_model_path is not None and noise_model_path != "":
-        print(f"\n{'='*70}")
-        print("LOADING NOISE MODEL")
-        print(f"{'='*70}")
-        print(f"Loading from: {noise_model_path}")
-        noise_model = StochasticResidualUNet(base=32).to(device)
-        noise_model.load_state_dict(
-            torch.load(noise_model_path, map_location=device, weights_only=True)
-        )
-        noise_model.eval()
-        for param in noise_model.parameters():
-            param.requires_grad = False
-        print("✅ Noise model loaded and frozen")
-        print(f"{'='*70}\n")
-
-    if use_noiseless_images:
-        print("Using NOISELESS synthetic images (second simulator output).")
-    else:
-        print("Using NOISY synthetic images (first simulator output).")
-
-    if validation_mrc_path:
-        print("\n--- Setting up validation ---")
-        try:
-            real_val_images = generate_real_validation_set(
-                validation_mrc_path, n_validation_images, device
-            )
-            syn_val_images = generate_synthetic_validation_set(
-                prior_loader, models, simulation_param, n_validation_images,
-                device, noise_model=noise_model,
-                use_noiseless_images=use_noiseless_images
-            )
-        except Exception as e:
-            print(f"Warning: Could not create validation set: {e}. Training without validation.")
-            validation_mrc_path = None
-        print("---------------------------\n")
 
     loss = NPELoss(estimator)
 
     if freeze_embedding:
-        # Only train flow
         print("\n" + "="*70)
-        print("OPTIMIZER: TRAINING FLOW ONLY (EMBEDDING FROZEN)")
+        print("OPTIMIZER: TRAINING FLOW ONLY")
         print("="*70)
         print(f"Flow learning rate: {train_config['LEARNING_RATE']:.2e}")
         print("="*70 + "\n")
 
-        optimizer = optim.AdamW(
-            estimator.nle.parameters(),
-            lr=train_config["LEARNING_RATE"],
-            weight_decay=0.001
-        )
+        optimizer = optim.AdamW([
+            {
+                'params': estimator.nle.parameters(),
+                'lr': train_config["LEARNING_RATE"],
+                'weight_decay': 0.001,
+                'name': 'flow'
+            }
+        ])
 
     elif use_differential_lr and pretrained_embedding_path is not None:
         flow_lr = train_config["LEARNING_RATE"]
@@ -702,32 +226,10 @@ def nle_train_no_saving_with_finetuning(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
-    # Store all validation metrics for later analysis
-    validation_scores = {'ape_R': [], 'amll_R': [], 'ape_S': [], 'amll_S': []}
-
-    # set up scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
-
-    # loader for real images
-    real_train_loader = None
-    if real_data_finetune_fraction > 0.0:
-        print(f"\n--- Setting up real data loader for fine-tuning phase (starting epoch {split_epoch}) ---")
-        if sample_indices:
-          print(f"  With probabilitic model assignment")
-        # define dataset from MRC
-        real_train_dataset = RealImageMRCDataset(validation_mrc_path)
-        # define loader
-        real_train_loader = DataLoader(
-            real_train_dataset,
-            batch_size=train_config["BATCH_SIZE"],
-            shuffle=True,
-            num_workers=0,
-            pin_memory=True,
-            drop_last=True
-        )
-        # initialize iter
-        real_train_iter = iter(real_train_loader)
-        print("------------------------------------------------------------------------------------\n")
+    # Simple cosine annealing
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=1e-6
+    )
 
     print("Training neural network:")
     estimator.train()
@@ -735,147 +237,47 @@ def nle_train_no_saving_with_finetuning(
         for epoch in tq:
             losses = []
 
-            if epoch >= split_epoch and real_data_finetune_fraction > 0.0:
-                # PHASE 2: Fine-tuning on real data with pseudo-labels
-                tq.set_description("Fine-tuning (Real Data)")
+            for parameters in islice(prior_loader, n_batches_per_epoch):
+                (
+                    indices, quaternions, shift, defocus,
+                    b_factor, amp, snr,
+                ) = parameters
+                
+                noisy_images, _ = cryo_em_simulator(
+                    models,
+                    indices.to(device, non_blocking=True),
+                    quaternions.to(device, non_blocking=True),
+                    shift.to(device, non_blocking=True),
+                    defocus.to(device, non_blocking=True),
+                    b_factor.to(device, non_blocking=True),
+                    amp.to(device, non_blocking=True),
+                    snr.to(device, non_blocking=True),
+                    simulation_param,
+                    simulation_param["noise"] 
+                )
 
-                # First fine-tuning epoch, create a frozen teacher
-                if epoch == split_epoch:
-                   print("\nFreezing conformational embedding parameters...")
-                   for param in estimator.theta_embedding.parameters():
-                        param.requires_grad = False
-
-                   print("\nCreating and freezing a static Teacher model for pseudo-labeling")
-                   estimator_teacher = copy.deepcopy(estimator)
-                   # Teacher is always in eval mode
-                   estimator_teacher.eval()
-                   # Explicitly disable gradient tracking for all teacher parameters
-                   for param in estimator_teacher.parameters():
-                       param.requires_grad = False
-
-                # loop on mini-batches
-                for _ in range(4*n_batches_per_epoch):
-                    try:
-                        real_images_batch = next(real_train_iter)
-                    except StopIteration:
-                        real_train_iter = iter(real_train_loader)
-                        real_images_batch = next(real_train_iter)
-                    
-                    real_images_batch = real_images_batch.to(device, non_blocking=True)
-
-                    # Find the class X that maximizes p(image | X)
-                    with torch.no_grad():
-                        log_probs = []
-                        for i in range(n_models):
-                            indices_i = torch.full((real_images_batch.shape[0], 1), float(i), device=device)
-                            log_probs.append(estimator_teacher(real_images_batch, indices_i).unsqueeze(-1))
-                        
-                        log_probs_cat = torch.cat(log_probs, dim=-1)
-
-                        # random assignment
-                        if sample_indices:
-                           probs = torch.softmax(log_probs_cat, dim=-1)
-                           # Sample a class for each image based on the probability distribution
-                           inferred_indices = torch.multinomial(probs, num_samples=1)
-                        else:
-                           # The inferred indices become our pseudo-labels
-                           inferred_indices = torch.argmax(log_probs_cat, dim=-1).unsqueeze(-1)
-
-                    # Calculate loss using real images and their pseudo-labels
+                for _indices, _images in zip(
+                    indices.split(train_config["BATCH_SIZE"]),
+                    noisy_images.split(train_config["BATCH_SIZE"]),
+                ):  
                     losses.append(
                         step(
-                           loss(real_images_batch, inferred_indices)
-                        )
-                    )
-            else:
-                # PHASE 1: Standard training on simulated data
-                tq.set_description("Training (Simulated Data)")
-                for parameters in islice(prior_loader, n_batches_per_epoch):
-                    (
-                        indices, quaternions, shift, defocus,
-                        b_factor, amp, snr,
-                    ) = parameters
-                    
-                    noisy_images, clean_images = cryo_em_simulator(
-                        models,
-                        indices.to(device, non_blocking=True),
-                        quaternions.to(device, non_blocking=True),
-                        shift.to(device, non_blocking=True),
-                        defocus.to(device, non_blocking=True),
-                        b_factor.to(device, non_blocking=True),
-                        amp.to(device, non_blocking=True),
-                        snr.to(device, non_blocking=True),
-                        simulation_param,
-                        simulation_param["noise"] 
-                    )
-
-                    # Select noisy or noiseless simulator output
-                    images = clean_images if use_noiseless_images else noisy_images
-
-                    # Apply frozen noise model on top of synthetic simulator output
-                    if noise_model is not None:
-                        with torch.no_grad():
-                            images = noise_model(images)
-
-                    for _indices, _images in zip(
-                        indices.split(train_config["BATCH_SIZE"]),
-                        images.split(train_config["BATCH_SIZE"]),
-                    ):  
-                        losses.append(
-                            step(
-                                loss(
-                                    _images.to(device, non_blocking=True),
-                                   _indices.to(device, non_blocking=True)
-                                )
+                            loss(
+                                _images.to(device, non_blocking=True),
+                                _indices.to(device, non_blocking=True)
                             )
                         )
-
+                    )
 
             # calculate mean loss across mini-batches
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
-            # add to list
             mean_loss.append(mean_train_loss)
-            # add to postfix
-            postfix_dict = {'loss': mean_train_loss}
-            # add current learning rate
-            postfix_dict['lr'] = scheduler.get_last_lr()[0]
 
-            # Validation metrics
-            if validation_mrc_path and (epoch % saving_frequency == 0 or epoch == epochs - 1):
-                # Set model to eval mode for validation
-                estimator.eval()
-
-                # Get all validation metrics
-                metrics = calculate_raw_metrics(
-                    estimator,
-                    real_val_images,
-                    syn_val_images,
-                    n_models
-                )
-                # Append each metric to its corresponding list
-                for key, value in metrics.items():
-                    validation_scores[key].append(value)
-
-                # Define variables for easy printout
-                ape_R_score = metrics['ape_R']
-                ape_S_score = metrics['ape_S']
-                amll_R_score = metrics['amll_R']
-                amll_S_score = metrics['amll_S']
-
-                print(f"\nEpoch {epoch} | APE_R score: {ape_R_score:.4f} APE_S score: {ape_S_score:.4f} AMLL_R score: {amll_R_score:.4f} AMLL_S score: {amll_S_score:.4f}")
-                
-                # Set model back to train mode
-                estimator.train()
-
-                # define postfix_dict for this epoch
-                postfix_dict['ape_R'] = ape_R_score
-                postfix_dict['ape_S'] = ape_S_score
-                postfix_dict['amll_R'] = amll_R_score
-                postfix_dict['amll_S'] = amll_S_score
-
-            # set postfix
-            tq.set_postfix(postfix_dict)
+            tq.set_postfix({
+                'loss': mean_train_loss,
+                'lr': scheduler.get_last_lr()[0],
+            })
 
             # save model checkpoint
             if epoch % saving_frequency == 0:
@@ -887,9 +289,3 @@ def nle_train_no_saving_with_finetuning(
     # save final stuff
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
-
-    # save validation scores - in case
-    if validation_mrc_path:
-        # Save the whole dictionary for detailed analysis
-        torch.save(validation_scores, validation_log_file)
-        print(f"\nValidation scores saved to {validation_log_file}")

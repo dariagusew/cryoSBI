@@ -13,6 +13,7 @@ from tqdm import tqdm
 from lampe.inference import NPELoss
 from lampe.utils import GDStep
 from itertools import islice
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.build_models import build_nle_flow_model
 from cryo_sbi.inference.validate_train_config import check_train_params
@@ -431,10 +432,14 @@ def nle_train_no_saving_with_finetuning(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
+    # Initial warmup
+    warmup_epochs = max(1, epochs // 10)
+    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
     # Simple cosine annealing
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=1e-6
-    )
+    cosine = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
+
+    # Define scheduler
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     print("Training neural network:")
     estimator.train()

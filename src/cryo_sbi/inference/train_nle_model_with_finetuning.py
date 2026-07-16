@@ -264,6 +264,7 @@ def nle_train_no_saving_with_finetuning(
     real_data_mrc: Optional[str] = None,
     real_data_finetune_fraction: float = 0.0,
     stochastic: bool = False,
+    entropy_threshold: Optional[float] = None,
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -293,6 +294,10 @@ def nle_train_no_saving_with_finetuning(
                                                        on real data. Defaults to 0.0 (disabled).
         stochastic (bool, optional): If True, sample pseudo-labels from predictor probabilities.
                                      If False, use argmax.
+        entropy_threshold (float, optional): Maximum entropy threshold for accepting pseudo-labels
+                                            in non-stochastic mode. Only samples with entropy below
+                                            this threshold will be used for fine-tuning. If None,
+                                            all samples are used. Ignored if stochastic=True.
     """
     assert 0.0 <= real_data_finetune_fraction <= 1.0, "real_data_finetune_fraction must be in [0, 1]"
 
@@ -363,6 +368,10 @@ def nle_train_no_saving_with_finetuning(
         print(f"  Fine-tuning epochs:  {epochs - split_epoch}")
         print(f"  Starts at epoch:     {split_epoch}")
         print(f"  Stochastic labels:   {stochastic}")
+        if not stochastic and entropy_threshold is not None:
+            print(f"  Entropy threshold:   {entropy_threshold:.4f} (quality filtering enabled)")
+        elif not stochastic:
+            print(f"  Entropy threshold:   None (all samples used)")
         print(f"{'='*70}\n")
 
         real_dataset = RealImageMRCDataset(real_data_mrc)
@@ -431,6 +440,10 @@ def nle_train_no_saving_with_finetuning(
 
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
+    
+    # Statistics for entropy filtering
+    total_real_samples = 0
+    accepted_real_samples = 0
 
     # Initial warmup
     warmup_epochs = max(1, epochs // 10)
@@ -469,19 +482,43 @@ def nle_train_no_saving_with_finetuning(
                         real_logits = pred_dict["conf"]
 
                         if stochastic:
+                            # Stochastic mode: sample from distribution (no filtering)
                             probs = F.softmax(real_logits, dim=-1)
                             inferred_indices = torch.multinomial(probs, num_samples=1)
+                            mask = torch.ones(len(real_images_batch), dtype=torch.bool, device=device)
                         else:
+                            # Deterministic mode: use argmax with optional entropy filtering
+                            probs = F.softmax(real_logits, dim=-1)
                             inferred_indices = torch.argmax(real_logits, dim=-1).unsqueeze(-1)
+                            
+                            if entropy_threshold is not None:
+                                # Calculate entropy: H = -sum(p * log(p))
+                                entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=-1)
+                                mask = entropy < entropy_threshold
+                                
+                                # Track statistics
+                                total_real_samples += len(real_images_batch)
+                                accepted_real_samples += mask.sum().item()
+                            else:
+                                mask = torch.ones(len(real_images_batch), dtype=torch.bool, device=device)
 
-                    losses.append(
-                        step(
-                            loss(
-                                real_images_batch,
-                                inferred_indices.to(device, non_blocking=True)
+                    # Only train on samples that pass the quality filter
+                    if mask.any():
+                        filtered_images = real_images_batch[mask]
+                        filtered_indices = inferred_indices[mask]
+                        
+                        losses.append(
+                            step(
+                                loss(
+                                    filtered_images,
+                                    filtered_indices.to(device, non_blocking=True)
+                                )
                             )
                         )
-                    )
+                    else:
+                        # If no samples pass filter, skip this batch (still need a loss for tracking)
+                        # We'll just append a zero tensor that won't affect the mean meaningfully
+                        losses.append(torch.tensor(0.0, device=device))
 
             else:
                 # ----------------------------------------------------------
@@ -532,6 +569,12 @@ def nle_train_no_saving_with_finetuning(
             }
             if real_data_finetune_fraction > 0:
                 postfix_dict['phase'] = 'real' if epoch >= split_epoch else 'syn'
+                
+                # Add acceptance rate for entropy-filtered fine-tuning
+                if epoch >= split_epoch and not stochastic and entropy_threshold is not None:
+                    if total_real_samples > 0:
+                        acceptance_rate = 100.0 * accepted_real_samples / total_real_samples
+                        postfix_dict['accept%'] = f"{acceptance_rate:.1f}"
 
             tq.set_postfix(postfix_dict)
 
@@ -545,3 +588,16 @@ def nle_train_no_saving_with_finetuning(
     # save final stuff
     torch.save(estimator.state_dict(), estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
+    
+    # Print final statistics for entropy filtering
+    if real_data_finetune_fraction > 0 and not stochastic and entropy_threshold is not None:
+        if total_real_samples > 0:
+            final_acceptance_rate = 100.0 * accepted_real_samples / total_real_samples
+            print(f"\n{'='*70}")
+            print("FINE-TUNING STATISTICS")
+            print(f"{'='*70}")
+            print(f"  Total real samples processed:  {total_real_samples}")
+            print(f"  Accepted samples (low entropy): {accepted_real_samples}")
+            print(f"  Acceptance rate:                {final_acceptance_rate:.2f}%")
+            print(f"  Entropy threshold:              {entropy_threshold:.4f}")
+            print(f"{'='*70}\n")

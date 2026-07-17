@@ -622,7 +622,7 @@ def run_inference_real_data(args):
     print(f"Likelihood matrix evaluation complete. Shape: {log_probs_matrix.shape}")
 
     # 5b. Optionally save the likelihood matrix
-    log_likelihood_file = getattr(args, "log_likelihood_file", None)
+    log_likelihood_file = args.output_ll_matrix
     if log_likelihood_file is not None:
         print(f"Saving likelihood matrix to {log_likelihood_file}")
         torch.save(log_probs_matrix, log_likelihood_file)

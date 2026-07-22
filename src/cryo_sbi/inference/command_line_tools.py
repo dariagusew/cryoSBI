@@ -174,6 +174,34 @@ def cl_nle_train_no_saving_with_finetuning():
         help="Sample pseudo-labels from predictor probabilities instead of argmax.",
     )
 
+    # EMA arguments
+    cl_parser.add_argument(
+        "--use_ema",
+        action="store_true",
+        help="Enable exponential moving average of model weights.",
+    )
+    cl_parser.add_argument(
+        "--ema_decay",
+        action="store",
+        type=float,
+        required=False,
+        default=0.999,
+        help="EMA decay coefficient (default: 0.999).",
+    )
+    cl_parser.add_argument(
+        "--ema_start_step",
+        action="store",
+        type=int,
+        required=False,
+        default=0,
+        help="Number of optimizer steps before EMA averaging starts (default: 0).",
+    )
+    cl_parser.add_argument(
+        "--ema_save_both",
+        action="store_true",
+        help="If set, also save a non-EMA checkpoint alongside the EMA checkpoint.",
+    )
+
     args = cl_parser.parse_args()
 
     nle_train_no_saving_with_finetuning(
@@ -197,5 +225,8 @@ def cl_nle_train_no_saving_with_finetuning():
         real_data_mrc=args.real_data_mrc,
         real_data_finetune_fraction=args.real_data_fraction,
         stochastic=args.stochastic,
+        use_ema=args.use_ema,
+        ema_decay=args.ema_decay,
+        ema_start_step=args.ema_start_step,
+        ema_save_both=args.ema_save_both,
     )
-

@@ -1,4 +1,5 @@
 # "train_nle_model_with_finetuning.py"
+# "train_nle_model_with_finetuning.py"
 from typing import Tuple, Dict, Union, Optional
 import json
 import math
@@ -115,6 +116,72 @@ class FullParamPredictor(nn.Module):
             "bfactor": self.bfactor_head(h).squeeze(-1),
             "snr":     self.snr_head(h).squeeze(-1),
         }
+
+
+# =======================================================================================
+# EXPONENTIAL MOVING AVERAGE
+# =======================================================================================
+
+class EMA:
+    """
+    Exponential moving average of model parameters.
+    Only trainable parameters are shadowed; buffers are left unchanged.
+    """
+    def __init__(
+        self,
+        model: nn.Module,
+        decay: float = 0.999,
+        start_step: int = 0,
+    ):
+        self.decay = decay
+        self.start_step = start_step
+        self.num_updates = 0
+
+        self.shadow: Dict[str, torch.Tensor] = {}
+        self.backup: Dict[str, torch.Tensor] = {}
+
+        for name, param in model.named_parameters():
+            self.shadow[name] = param.data.clone()
+
+    def update(self, model: nn.Module) -> None:
+        self.num_updates += 1
+
+        # Warmup: just shadow current weights until we reach start_step
+        if self.num_updates < self.start_step:
+            for name, param in model.named_parameters():
+                self.shadow[name].copy_(param.data)
+            return
+
+        decay = self.decay
+        for name, param in model.named_parameters():
+            self.shadow[name].mul_(decay).add_(param.data, alpha=1.0 - decay)
+
+    def apply_shadow(self, model: nn.Module) -> None:
+        """Replace model parameters with their EMA shadow values."""
+        for name, param in model.named_parameters():
+            self.backup[name] = param.data.clone()
+            param.data.copy_(self.shadow[name])
+
+    def restore(self, model: nn.Module) -> None:
+        """Restore the original (non-EMA) parameters."""
+        for name, param in model.named_parameters():
+            if name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup.clear()
+
+    def state_dict(self) -> Dict[str, object]:
+        return {
+            "decay": self.decay,
+            "start_step": self.start_step,
+            "num_updates": self.num_updates,
+            "shadow": self.shadow,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, object]) -> None:
+        self.decay = state_dict["decay"]
+        self.start_step = state_dict.get("start_step", 0)
+        self.num_updates = state_dict["num_updates"]
+        self.shadow = state_dict["shadow"]
 
 
 # =======================================================================================
@@ -264,6 +331,10 @@ def nle_train_no_saving_with_finetuning(
     real_data_mrc: Optional[str] = None,
     real_data_finetune_fraction: float = 0.0,
     stochastic: bool = False,
+    use_ema: bool = False,
+    ema_decay: float = 0.999,
+    ema_start_step: int = 0,
+    ema_save_both: bool = False,
 ) -> None:
     """
     Train NLE model by simulating training data on the fly.
@@ -293,6 +364,10 @@ def nle_train_no_saving_with_finetuning(
                                                        on real data. Defaults to 0.0 (disabled).
         stochastic (bool, optional): If True, sample pseudo-labels from predictor probabilities.
                                      If False, use argmax.
+        use_ema (bool, optional): If True, maintain an EMA of the model weights.
+        ema_decay (float, optional): EMA decay coefficient. Defaults to 0.999.
+        ema_start_step (int, optional): Number of optimizer steps before EMA averaging starts.
+        ema_save_both (bool, optional): If True, also save a non-EMA checkpoint.
     """
     assert 0.0 <= real_data_finetune_fraction <= 1.0, "real_data_finetune_fraction must be in [0, 1]"
 
@@ -441,6 +516,50 @@ def nle_train_no_saving_with_finetuning(
     # Define scheduler
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
+    # ------------------------------------------------------------------
+    # EMA setup
+    # ------------------------------------------------------------------
+    ema = None
+    if use_ema:
+        ema = EMA(
+            estimator,
+            decay=ema_decay,
+            start_step=ema_start_step,
+        )
+        print("\n" + "="*70)
+        print("EMA ENABLED")
+        print("="*70)
+        print(f"  Decay:       {ema_decay}")
+        print(f"  Start step:  {ema_start_step}")
+        print(f"  Save both:   {ema_save_both}")
+        print("="*70 + "\n")
+
+        if train_from_checkpoint and model_state_dict is not None:
+            ema_path = str(Path(model_state_dict).with_suffix('.ema'))
+            if Path(ema_path).is_file():
+                ema.load_state_dict(torch.load(ema_path, map_location='cpu'))
+                for name, param in estimator.named_parameters():
+                    if name in ema.shadow:
+                        ema.shadow[name] = ema.shadow[name].to(param.device)
+                print(f"  Resumed EMA state from {ema_path}")
+
+    # ------------------------------------------------------------------
+    # Checkpoint saving helper
+    # ------------------------------------------------------------------
+    def _save_checkpoint(path: str) -> None:
+        """Save model. If EMA is enabled, save EMA-averaged weights."""
+        if ema is not None:
+            ema.apply_shadow(estimator)
+            torch.save(estimator.state_dict(), path)
+            torch.save(ema.state_dict(), path + ".ema")
+            if ema_save_both:
+                ema.restore(estimator)
+                torch.save(estimator.state_dict(), path + "_non_ema")
+            else:
+                ema.restore(estimator)
+        else:
+            torch.save(estimator.state_dict(), path)
+
     print("Training neural network:")
     estimator.train()
     with tqdm(range(epochs), unit="epoch") as tq:
@@ -482,6 +601,8 @@ def nle_train_no_saving_with_finetuning(
                             )
                         )
                     )
+                    if ema is not None:
+                        ema.update(estimator)
 
             else:
                 # ----------------------------------------------------------
@@ -520,6 +641,8 @@ def nle_train_no_saving_with_finetuning(
                                 )
                             )
                         )
+                        if ema is not None:
+                            ema.update(estimator)
 
             # calculate mean loss across mini-batches
             losses = torch.stack(losses)
@@ -530,6 +653,8 @@ def nle_train_no_saving_with_finetuning(
                 'loss': mean_train_loss,
                 'lr': scheduler.get_last_lr()[0],
             }
+            if ema is not None:
+                postfix_dict['ema_updates'] = ema.num_updates
             if real_data_finetune_fraction > 0:
                 postfix_dict['phase'] = 'real' if epoch >= split_epoch else 'syn'
 
@@ -537,11 +662,11 @@ def nle_train_no_saving_with_finetuning(
 
             # save model checkpoint
             if epoch % saving_frequency == 0:
-                torch.save(estimator.state_dict(), estimator_file + f"_epoch={epoch}")
+                _save_checkpoint(estimator_file + f"_epoch={epoch}")
 
             # scheduler step
             scheduler.step()
 
     # save final stuff
-    torch.save(estimator.state_dict(), estimator_file)
+    _save_checkpoint(estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)

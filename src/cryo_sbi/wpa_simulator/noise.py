@@ -191,3 +191,48 @@ def add_noise_from_nps(
     final_image = image + scaled_noise
 
     return final_image
+
+def add_GAN_noise(
+    image:           torch.Tensor,
+    noise_generator: "NoiseGenerator",
+    snr:             torch.Tensor,
+    mask:            torch.Tensor,
+) -> torch.Tensor:
+    """
+    Adds GAN-generated structured ice noise to images based on power SNR.
+
+    The GAN generator produces noise patches that are already normalised
+    (mean=0, std=1 per patch).  These are rescaled to match the target
+    noise power derived from the SNR, following the same convention as
+    add_Gaussian_noise so the two functions are drop-in replacements.
+
+    SNR definition: SNR = signal_variance / noise_variance
+    Therefore:      noise_std = signal_std / sqrt(SNR)
+
+    Args:
+        image           (torch.Tensor) : clean image, shape (batch, H, W)
+        noise_generator (NoiseGenerator): trained GAN noise generator
+        snr             (torch.Tensor) : power SNR, shape (batch,) or scalar
+        mask            (torch.Tensor) : boolean signal mask, shape (H, W)
+
+    Returns:
+        torch.Tensor: noisy image, same shape and device as *image*
+    """
+    batch, H, W = image.shape
+
+    # ── signal statistics within mask
+    signal_std = torch.std(image[:, mask], dim=[-1])          # (batch,)
+
+    # SNR = σ²_signal / σ²_noise  →  σ_noise = σ_signal / √SNR
+    noise_std = signal_std.reshape(-1, 1, 1) / torch.sqrt(snr)  # (batch,1,1)
+
+    # ── GAN noise generation ───────────────────────────────────────────────
+    # sample() returns (batch, H, W) float32 on noise_generator.device
+    # Each patch has mean=0, std=1 by construction (_normalise in sample())
+    noise = noise_generator.sample(n=batch, box_size=H)
+
+    # ── rescale to target noise power ─────────────────────────────────────
+    # noise has std=1  →  noise * noise_std has std=noise_std
+    noise = noise * noise_std
+
+    return image + noise

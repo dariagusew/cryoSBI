@@ -3,11 +3,13 @@ import numpy as np
 import torch
 import mrcfile
 import random
+from pathlib import Path
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
-from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise
+from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise, add_GAN_noise
 from cryo_sbi.wpa_simulator.noise import add_noise_from_nps
+from cryo_sbi.wpa_simulator.noise_generator import NoiseGenerator
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
 from cryo_sbi.wpa_simulator.image_tools import circular_mask, make_fft_k2_grid
 from cryo_sbi.inference.priors import get_image_priors
@@ -84,8 +86,8 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        simulation_param["mixed_noise"] = False
 
     # check if noise model is supported
-    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed"]:
-       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed")
+    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed", "GAN"]:
+       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed, GAN")
 
     # check parameters for Poisson noise
     if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
@@ -117,6 +119,20 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        # We need the amplitude spectrum to color the noise: sqrt(Power)
        # Clamp at zero to handle potential floating point inaccuracies.
        simulation_param["nps"] = torch.sqrt(torch.clamp(nps_torch, min=0))
+
+    # check parameters for GAN-learned noise
+    if simulation_param["noise"] in ["GAN"]:
+       # get path to checkpoint
+       pt_file = image_config.get("NOISE_PT", None)
+       # check that noise_pt is not None
+       if pt_file == None:
+          raise ValueError("With GAN noise model you must specify NOISE_PT")
+       # Initialize model generator and load model
+       pt_file = Path(pt_file)
+       if not pt_file.exists():
+          raise FileNotFoundError(f"NOISE_PT file not found: {pt_file.resolve()}")
+       # initialize generator
+       simulation_param["noise_generator"] = NoiseGenerator(pt_file = pt_file, device = device)
 
     # precalculate signal mask (for all noise models)
     num_pixels = int(simulation_param["num_pixels"].item())
@@ -157,6 +173,8 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
     if simulation_param["noise"] in ["empirical", "mixed"]:
        print(f"  NPS noise file: {mrc_file}")
+    if simulation_param["noise"] in ["GAN"]:
+       print(f"  Noise GAN generator loaded from: {pt_file.name}  ")
     if isinstance(fluct_file, str):
        print(f"  Adding fluctuations from file: {fluct_file}")
 
@@ -240,6 +258,9 @@ def cryo_em_simulator(
 
        # Add Poisson + (optional MTF/DQE) + detector noise
        image = add_Poisson_noise(image, target_snr, simulation_param, mtf, nps)
+
+    elif noise_type == "GAN":
+       image = add_GAN_noise(image, simulation_param["noise_generator"], snr, simulation_param["mask"])
 
     else:
        image = add_noise_from_nps(image, snr, simulation_param["nps"], simulation_param["mask"])

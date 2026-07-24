@@ -1,6 +1,4 @@
-# "train_nle_model_with_finetuning.py"
-# "train_nle_model_with_finetuning.py"
-from typing import Tuple, Dict, Union, Optional
+from typing import Tuple, Dict, Union, Optional, List
 import json
 import math
 import torch
@@ -83,42 +81,6 @@ class RealImageMRCDataset(Dataset):
 
 
 # =======================================================================================
-# PREDICTOR HEAD (from pretraining)
-# =======================================================================================
-
-class FullParamPredictor(nn.Module):
-    """
-    Predicts all parameters (X, θ) from z.
-    Used here only as a frozen teacher for real-image pseudo-labeling.
-    """
-    def __init__(self, embedding_dim: int, n_conformations: int, hidden_dim: int = 128):
-        super().__init__()
-        self.trunk = nn.Sequential(
-            nn.Linear(embedding_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-        )
-        self.conf_head    = nn.Linear(hidden_dim, n_conformations)
-        self.orient_head  = nn.Linear(hidden_dim, 4)
-        self.shift_head   = nn.Linear(hidden_dim, 2)
-        self.defocus_head = nn.Linear(hidden_dim, 1)
-        self.bfactor_head = nn.Linear(hidden_dim, 1)
-        self.snr_head     = nn.Linear(hidden_dim, 1)
-
-    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
-        h = self.trunk(z)
-        return {
-            "conf":    self.conf_head(h),
-            "orient":  self.orient_head(h),
-            "shift":   self.shift_head(h),
-            "defocus": self.defocus_head(h).squeeze(-1),
-            "bfactor": self.bfactor_head(h).squeeze(-1),
-            "snr":     self.snr_head(h).squeeze(-1),
-        }
-
-
-# =======================================================================================
 # EXPONENTIAL MOVING AVERAGE
 # =======================================================================================
 
@@ -146,7 +108,6 @@ class EMA:
     def update(self, model: nn.Module) -> None:
         self.num_updates += 1
 
-        # Warmup: just shadow current weights until we reach start_step
         if self.num_updates < self.start_step:
             for name, param in model.named_parameters():
                 self.shadow[name].copy_(param.data)
@@ -157,13 +118,11 @@ class EMA:
             self.shadow[name].mul_(decay).add_(param.data, alpha=1.0 - decay)
 
     def apply_shadow(self, model: nn.Module) -> None:
-        """Replace model parameters with their EMA shadow values."""
         for name, param in model.named_parameters():
             self.backup[name] = param.data.clone()
             param.data.copy_(self.shadow[name])
 
     def restore(self, model: nn.Module) -> None:
-        """Restore the original (non-EMA) parameters."""
         for name, param in model.named_parameters():
             if name in self.backup:
                 param.data.copy_(self.backup[name])
@@ -194,31 +153,13 @@ def load_model(
     device: str,
     train_from_checkpoint: bool,
     pretrained_embedding_path: Optional[str] = None,
-    pretrained_full_model_path: Optional[str] = None,
     freeze_embedding: bool = False,
     image_size: int = 128,
-    n_conformations: Optional[int] = None,
-) -> Tuple[torch.nn.Module, Optional[nn.Module]]:
-    """
-    Load model from checkpoint or from scratch.
-    - If pretrained_embedding_path is given, load encoder weights only.
-    - If pretrained_full_model_path is given, load encoder + predictor.
-    The two options are mutually exclusive.
-    Returns (estimator, predictor). Predictor is None unless full model is loaded.
-    """
-
-    if pretrained_embedding_path is not None and pretrained_full_model_path is not None:
-        raise ValueError(
-            "pretrained_embedding_path and pretrained_full_model_path are mutually exclusive."
-        )
+) -> torch.nn.Module:
 
     check_train_params(train_config)
     estimator = build_nle_flow_model(train_config, image_size)
-    predictor = None
 
-    # ------------------------------------------------------------------
-    # Load pretrained encoder / full model
-    # ------------------------------------------------------------------
     if pretrained_embedding_path is not None:
         print(f"\n{'='*70}")
         print("LOADING PRETRAINED EMBEDDING")
@@ -233,47 +174,6 @@ def load_model(
             print(f"❌ Error loading pretrained embedding: {e}")
             raise
 
-    elif pretrained_full_model_path is not None:
-        if n_conformations is None:
-            raise ValueError(
-                "n_conformations must be provided when loading a full pretrained model."
-            )
-
-        print(f"\n{'='*70}")
-        print("LOADING FULL PRETRAINED MODEL (encoder + predictor)")
-        print(f"{'='*70}")
-        print(f"Loading from: {pretrained_full_model_path}")
-
-        full_state = torch.load(pretrained_full_model_path, map_location='cpu')
-
-        # Extract and load encoder state
-        encoder_state = {
-            k[len('encoder.'):]: v
-            for k, v in full_state.items()
-            if k.startswith('encoder.')
-        }
-        estimator.embedding.load_state_dict(encoder_state, strict=False)
-        print("✅ Pretrained embedding loaded successfully")
-
-        # Extract and load predictor state
-        predictor_state = {
-            k[len('predictor.'):]: v
-            for k, v in full_state.items()
-            if k.startswith('predictor.')
-        }
-        embedding_dim = encoder_state['mu_head.weight'].shape[0]
-        predictor = FullParamPredictor(embedding_dim, n_conformations).to(device)
-        predictor.load_state_dict(predictor_state, strict=True)
-        predictor.eval()
-        for param in predictor.parameters():
-            param.requires_grad = False
-
-        print("✅ Pretrained predictor loaded and frozen")
-
-    # ------------------------------------------------------------------
-    # Optionally freeze embedding
-    # ------------------------------------------------------------------
-    if pretrained_embedding_path is not None or pretrained_full_model_path is not None:
         if freeze_embedding:
             print("\nFreezing embedding parameters...")
             for param in estimator.embedding.parameters():
@@ -289,9 +189,6 @@ def load_model(
 
         print(f"{'='*70}\n")
 
-    # ------------------------------------------------------------------
-    # Load training checkpoint if resuming
-    # ------------------------------------------------------------------
     if train_from_checkpoint:
         if not isinstance(model_state_dict, str):
             raise Warning("No model state dict specified! --model_state_dict is empty")
@@ -299,11 +196,10 @@ def load_model(
         estimator.load_state_dict(torch.load(model_state_dict))
 
     estimator.to(device=device)
-
     estimator.train()
     print(f"✅ Model in training mode: {estimator.training}")
 
-    return estimator, predictor
+    return estimator
 
 
 # =======================================================================================
@@ -316,6 +212,7 @@ def nle_train_no_saving_with_finetuning(
     epochs: int,
     estimator_file: str,
     loss_file: str,
+    log_file: str,
     train_from_checkpoint: bool = False,
     model_state_dict: Union[str, None] = None,
     n_workers: int = 4,
@@ -324,67 +221,26 @@ def nle_train_no_saving_with_finetuning(
     simulation_batch_size: int = 2048,
     n_batches_per_epoch: int = 100,
     pretrained_embedding_path: Optional[str] = None,
-    pretrained_full_model_path: Optional[str] = None,
     freeze_embedding: bool = True,
     use_differential_lr: bool = False,
     embedding_lr_factor: float = 0.01,
     real_data_mrc: Optional[str] = None,
-    real_data_finetune_fraction: float = 0.0,
-    stochastic: bool = False,
+    beta_real: float = 0.0,
     use_ema: bool = False,
     ema_decay: float = 0.999,
     ema_start_step: int = 0,
     ema_save_both: bool = False,
 ) -> None:
-    """
-    Train NLE model by simulating training data on the fly.
-    Optionally fine-tune on real data at the end using pseudo-labels
-    from a frozen pretrained predictor.
-
-    Args:
-        image_config (str): path to image config file
-        train_config (str): path to train config file
-        epochs (int): number of epochs
-        estimator_file (str): path to estimator file
-        loss_file (str): path to loss file
-        train_from_checkpoint (bool, optional): train from checkpoint. Defaults to False.
-        model_state_dict (str, optional): path to pretrained model state dict. Defaults to None.
-        n_workers (int, optional): number of workers. Defaults to 4.
-        device (str, optional): training device. Defaults to "cuda".
-        saving_frequency (int, optional): frequency of saving model. Defaults to 100.
-        simulation_batch_size (int, optional): images generated per simulator call
-        n_batches_per_epoch (int, optional): simulation calls per epoch
-        pretrained_embedding_path (str, optional): Path to pretrained encoder weights
-        pretrained_full_model_path (str, optional): Path to full pretrained model (encoder + predictor)
-        freeze_embedding (bool, optional): If True, freeze embedding during training
-        use_differential_lr (bool, optional): If True, use lower LR for embedding
-        embedding_lr_factor (float, optional): LR multiplier for embedding (if not frozen)
-        real_data_mrc (str, optional): Path to .mrc stack of real images
-        real_data_finetune_fraction (float, optional): Fraction of final epochs to fine-tune
-                                                       on real data. Defaults to 0.0 (disabled).
-        stochastic (bool, optional): If True, sample pseudo-labels from predictor probabilities.
-                                     If False, use argmax.
-        use_ema (bool, optional): If True, maintain an EMA of the model weights.
-        ema_decay (float, optional): EMA decay coefficient. Defaults to 0.999.
-        ema_start_step (int, optional): Number of optimizer steps before EMA averaging starts.
-        ema_save_both (bool, optional): If True, also save a non-EMA checkpoint.
-    """
-    assert 0.0 <= real_data_finetune_fraction <= 1.0, "real_data_finetune_fraction must be in [0, 1]"
 
     train_config = json.load(open(train_config))
     check_train_params(train_config)
     image_config = json.load(open(image_config))
 
-    split_epoch = int(epochs * (1.0 - real_data_finetune_fraction))
-
     assert simulation_batch_size >= train_config["BATCH_SIZE"]
     assert simulation_batch_size % train_config["BATCH_SIZE"] == 0
-    assert split_epoch >= 0, "real_data_finetune_fraction cannot exceed 1.0"
 
-    if real_data_finetune_fraction > 0 and real_data_mrc is None:
-        raise ValueError(
-            "real_data_mrc must be provided when real_data_finetune_fraction > 0."
-        )
+    if beta_real > 0 and real_data_mrc is None:
+        raise ValueError("real_data_mrc must be provided when beta_real > 0.")
 
     if image_config["MODEL_FILE"].endswith("npy"):
         models = (
@@ -406,38 +262,28 @@ def nle_train_no_saving_with_finetuning(
 
     simulation_param = create_simulation_param(image_config, models, device=device)
 
-    estimator, predictor = load_model(
+    estimator = load_model(
         train_config,
         model_state_dict,
         device,
         train_from_checkpoint,
         pretrained_embedding_path=pretrained_embedding_path,
-        pretrained_full_model_path=pretrained_full_model_path,
         freeze_embedding=freeze_embedding,
         image_size=image_config["N_PIXELS"],
-        n_conformations=n_models,
     )
 
-    if real_data_finetune_fraction > 0 and predictor is None:
-        raise ValueError(
-            "Real-data fine-tuning requires a full pretrained model containing a predictor. "
-            "Use --pretrained_full_model_path."
-        )
-
     # ------------------------------------------------------------------
-    # Real data loader for fine-tuning phase
+    # Real data loader for marginal likelihood regularization
     # ------------------------------------------------------------------
     real_data_loader = None
     real_data_iter = None
 
-    if real_data_finetune_fraction > 0:
+    if beta_real > 0:
         print(f"\n{'='*70}")
-        print("SETTING UP REAL DATA FINE-TUNING")
+        print("SETTING UP REAL DATA REGULARIZATION")
         print(f"{'='*70}")
-        print(f"  Real data MRC:       {real_data_mrc}")
-        print(f"  Fine-tuning epochs:  {epochs - split_epoch}")
-        print(f"  Starts at epoch:     {split_epoch}")
-        print(f"  Stochastic labels:   {stochastic}")
+        print(f"  Real data MRC:  {real_data_mrc}")
+        print(f"  beta_real:      {beta_real}")
         print(f"{'='*70}\n")
 
         real_dataset = RealImageMRCDataset(real_data_mrc)
@@ -469,7 +315,7 @@ def nle_train_no_saving_with_finetuning(
             }
         ])
 
-    elif use_differential_lr and (pretrained_embedding_path is not None or pretrained_full_model_path is not None):
+    elif use_differential_lr and pretrained_embedding_path is not None:
         flow_lr = train_config["LEARNING_RATE"]
         embedding_lr = flow_lr * embedding_lr_factor
 
@@ -507,13 +353,9 @@ def nle_train_no_saving_with_finetuning(
     step = GDStep(optimizer, clip=train_config["CLIP_GRADIENT"])
     mean_loss = []
 
-    # Initial warmup
     warmup_epochs = max(1, epochs // 10)
     warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
-    # Simple cosine annealing
     cosine = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
-
-    # Define scheduler
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     # ------------------------------------------------------------------
@@ -547,7 +389,6 @@ def nle_train_no_saving_with_finetuning(
     # Checkpoint saving helper
     # ------------------------------------------------------------------
     def _save_checkpoint(path: str) -> None:
-        """Save model. If EMA is enabled, save EMA-averaged weights."""
         if ema is not None:
             ema.apply_shadow(estimator)
             torch.save(estimator.state_dict(), path)
@@ -560,113 +401,155 @@ def nle_train_no_saving_with_finetuning(
         else:
             torch.save(estimator.state_dict(), path)
 
+    # ------------------------------------------------------------------
+    # Log writing helper
+    # ------------------------------------------------------------------
+    def _write_log_entry(
+        epoch: int,
+        lr: float,
+        mean_total: float,
+        mean_synthetic: float,
+        mean_real: Optional[float],
+    ) -> None:
+        with open(log_file, 'a') as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"Epoch {epoch:>6d} | LR: {lr:.6e}\n")
+            f.write(f"  Total loss:     {mean_total:.6f}\n")
+            f.write(f"  Synthetic loss: {mean_synthetic:.6f}\n")
+            if mean_real is not None:
+                f.write(f"  Real loss:      {mean_real:.6f}\n")
+            f.write(f"{'='*60}\n")
+
+    # Initialise log file with a header
+    with open(log_file, 'w') as f:
+        f.write("="*60 + "\n")
+        f.write("TRAINING LOG\n")
+        f.write(f"  epochs:            {epochs}\n")
+        f.write(f"  beta_real:         {beta_real}\n")
+        f.write(f"  real_data_mrc:     {real_data_mrc}\n")
+        f.write(f"  freeze_embedding:  {freeze_embedding}\n")
+        f.write(f"  use_ema:           {use_ema}\n")
+        f.write("="*60 + "\n")
+
+    # ------------------------------------------------------------------
+    # Loss history
+    # ------------------------------------------------------------------
+    history: Dict[str, List] = {
+        'epoch':           [],
+        'total_loss':      [],
+        'synthetic_loss':  [],
+        'real_loss':       [],   # None entries when beta_real == 0
+        'lr':              [],
+    }
+
     print("Training neural network:")
     estimator.train()
     with tqdm(range(epochs), unit="epoch") as tq:
         for epoch in tq:
             losses = []
+            synthetic_losses_epoch: List[float] = []
+            real_losses_epoch: List[float] = []
+            tq.set_description("Training")
 
-            if epoch >= split_epoch and real_data_finetune_fraction > 0:
-                # ----------------------------------------------------------
-                # FINE-TUNING PHASE: real data with pseudo-labels
-                # ----------------------------------------------------------
-                tq.set_description("Fine-tuning (Real Data)")
+            for parameters in islice(prior_loader, n_batches_per_epoch):
+                (
+                    indices, quaternions, shift, defocus,
+                    b_factor, amp, snr,
+                ) = parameters
 
-                for _ in range(n_batches_per_epoch):
-                    try:
-                        real_images_batch = next(real_data_iter)
-                    except StopIteration:
-                        real_data_iter = iter(real_data_loader)
-                        real_images_batch = next(real_data_iter)
+                noisy_images, _ = cryo_em_simulator(
+                    models,
+                    indices.to(device, non_blocking=True),
+                    quaternions.to(device, non_blocking=True),
+                    shift.to(device, non_blocking=True),
+                    defocus.to(device, non_blocking=True),
+                    b_factor.to(device, non_blocking=True),
+                    amp.to(device, non_blocking=True),
+                    snr.to(device, non_blocking=True),
+                    simulation_param,
+                    simulation_param["noise"]
+                )
 
-                    real_images_batch = real_images_batch.to(device, non_blocking=True)
-
-                    # Assign pseudo-labels with frozen predictor
-                    with torch.no_grad():
-                        embeddings = estimator.embedding(real_images_batch)
-                        pred_dict = predictor(embeddings)
-                        real_logits = pred_dict["conf"]
-
-                        if stochastic:
-                            probs = F.softmax(real_logits, dim=-1)
-                            inferred_indices = torch.multinomial(probs, num_samples=1)
-                        else:
-                            inferred_indices = torch.argmax(real_logits, dim=-1).unsqueeze(-1)
-
-                    losses.append(
-                        step(
-                            loss(
-                                real_images_batch,
-                                inferred_indices.to(device, non_blocking=True)
-                            )
-                        )
+                for _indices, _images in zip(
+                    indices.split(train_config["BATCH_SIZE"]),
+                    noisy_images.split(train_config["BATCH_SIZE"]),
+                ):
+                    synthetic_nll = loss(
+                        _images.to(device, non_blocking=True),
+                        _indices.to(device, non_blocking=True)
                     )
+                    synthetic_losses_epoch.append(synthetic_nll.item())
+
+                    if beta_real > 0 and real_data_iter is not None:
+                        try:
+                            real_batch = next(real_data_iter)
+                        except StopIteration:
+                            real_data_iter = iter(real_data_loader)
+                            real_batch = next(real_data_iter)
+
+                        real_batch = real_batch.to(device, non_blocking=True)
+                        B = real_batch.shape[0]
+
+                        # each real image repeated n_models times: [B*n_models, H, W]
+                        real_exp = real_batch.repeat_interleave(n_models, dim=0)
+                        # conformation indices 0..n_models-1 for each image: [B*n_models]
+                        conf_idx = torch.arange(n_models, device=device).repeat(B)
+
+                        # log p(d_real | X_i) for all i and all images in batch
+                        log_p = estimator(real_exp, conf_idx)
+                        # log sum_i p(d_real | X_i) per image, then mean over batch
+                        log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1)
+                        real_reg = -log_marginal.mean()
+                        real_losses_epoch.append(real_reg.item())
+
+                        total_loss = synthetic_nll + beta_real * real_reg
+                    else:
+                        total_loss = synthetic_nll
+
+                    losses.append(step(total_loss))
                     if ema is not None:
                         ema.update(estimator)
 
-            else:
-                # ----------------------------------------------------------
-                # STANDARD PHASE: synthetic data only
-                # ----------------------------------------------------------
-                tq.set_description("Training (Simulated Data)")
-
-                for parameters in islice(prior_loader, n_batches_per_epoch):
-                    (
-                        indices, quaternions, shift, defocus,
-                        b_factor, amp, snr,
-                    ) = parameters
-
-                    noisy_images, _ = cryo_em_simulator(
-                        models,
-                        indices.to(device, non_blocking=True),
-                        quaternions.to(device, non_blocking=True),
-                        shift.to(device, non_blocking=True),
-                        defocus.to(device, non_blocking=True),
-                        b_factor.to(device, non_blocking=True),
-                        amp.to(device, non_blocking=True),
-                        snr.to(device, non_blocking=True),
-                        simulation_param,
-                        simulation_param["noise"]
-                    )
-
-                    for _indices, _images in zip(
-                        indices.split(train_config["BATCH_SIZE"]),
-                        noisy_images.split(train_config["BATCH_SIZE"]),
-                    ):
-                        losses.append(
-                            step(
-                                loss(
-                                    _images.to(device, non_blocking=True),
-                                    _indices.to(device, non_blocking=True)
-                                )
-                            )
-                        )
-                        if ema is not None:
-                            ema.update(estimator)
-
-            # calculate mean loss across mini-batches
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
             mean_loss.append(mean_train_loss)
 
+            mean_synthetic = float(np.mean(synthetic_losses_epoch))
+            mean_real = float(np.mean(real_losses_epoch)) if real_losses_epoch else None
+            current_lr = scheduler.get_last_lr()[0]
+
+            # Update history
+            history['epoch'].append(epoch)
+            history['total_loss'].append(mean_train_loss)
+            history['synthetic_loss'].append(mean_synthetic)
+            history['real_loss'].append(mean_real)
+            history['lr'].append(current_lr)
+
             postfix_dict = {
                 'loss': mean_train_loss,
-                'lr': scheduler.get_last_lr()[0],
+                'syn':  mean_synthetic,
+                'lr':   current_lr,
             }
+            if mean_real is not None:
+                postfix_dict['real'] = mean_real
             if ema is not None:
                 postfix_dict['ema_updates'] = ema.num_updates
-            if real_data_finetune_fraction > 0:
-                postfix_dict['phase'] = 'real' if epoch >= split_epoch else 'syn'
 
             tq.set_postfix(postfix_dict)
 
-            # save model checkpoint
             if epoch % saving_frequency == 0:
                 _save_checkpoint(estimator_file + f"_epoch={epoch}")
+                _write_log_entry(epoch, current_lr, mean_train_loss, mean_synthetic, mean_real)
 
-            # scheduler step
             scheduler.step()
 
-    # save final stuff
     _save_checkpoint(estimator_file)
     torch.save(torch.tensor(mean_loss), loss_file)
+
+    # Write full history to log file
+    with open(log_file, 'a') as f:
+        f.write("\n\n" + "="*60 + "\n")
+        f.write("TRAINING COMPLETE - FULL HISTORY\n")
+        f.write("="*60 + "\n")
+        json.dump(history, f, indent=2)
+        f.write("\n")

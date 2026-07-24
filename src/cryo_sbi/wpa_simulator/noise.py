@@ -254,7 +254,7 @@ class MRCNoiseDataLoader:
         cache_size    (int): Number of particles to hold in RAM at once.
     """
 
-    def __init__(self, mrc_file_path: str, cache_size: int = 10_000):
+    def __init__(self, mrc_file_path: str, cache_size: int = 10240):
         self.mrc_file_path = mrc_file_path
         self.cache_size    = cache_size
 

@@ -28,21 +28,41 @@ except ImportError:
 
 
 # =======================================================================================
-# REAL IMAGE DATASET
+# REAL IMAGE LOADER
 # =======================================================================================
 
-class RealImageMRCDataset(Dataset):
+class RealImageMRCLoader:
     """
-    Dataset for loading real images from an MRC stack.
-    Uses memory-mapping so the full file is not loaded into RAM.
-    Applies per-image z-score normalization and keeps a small in-memory cache.
+    Memory-efficient loader for real cryo-EM image MRC stacks.
+
+    Uses mrcfile.mmap() to memory-map the file. A cache of `cache_size`
+    randomly sampled images is kept on `device` and served as sequential
+    batches. When the cache is exhausted a fresh random cache is loaded
+    from disk and transferred to device in one shot, amortising both the
+    cost of scattered disk reads and the CPU→device transfer.
+
+    Per-image z-score normalisation is applied vectorized at cache-fill
+    time, so no per-image work is done at batch-serving time.
+
+    Args:
+        mrc_path   (str)          : Path to the MRC stack file.
+        cache_size (int)          : Number of images to hold on device at once.
+        device     (torch.device) : Target device for the cache.
+                                    Defaults to CPU if not specified.
     """
-    def __init__(self, mrc_path, cache_size=10000):
+
+    def __init__(
+        self,
+        mrc_path: str,
+        cache_size: int = 10240,
+        device: Optional[torch.device] = None,
+    ):
         if not MRCFILE_AVAILABLE:
             raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
 
-        self.mrc_path = Path(mrc_path)
+        self.mrc_path   = Path(mrc_path)
         self.cache_size = cache_size
+        self.device     = device or torch.device("cpu")
 
         if not self.mrc_path.exists():
             raise FileNotFoundError(f"MRC file not found: {mrc_path}")
@@ -51,33 +71,62 @@ class RealImageMRCDataset(Dataset):
         self.mrc_file = mrcfile.mmap(str(self.mrc_path), mode='r')
         self.mrc_data = self.mrc_file.data
 
-        self.n_images = self.mrc_data.shape[0]
+        self.n_images    = self.mrc_data.shape[0]
         self.image_shape = self.mrc_data.shape[1:]
 
-        print(f"  Loaded MRC: {self.n_images} images of shape {self.image_shape}")
-        print(f"  Loading method: mrcfile mmap")
+        h, w        = self.image_shape
+        cache_bytes = cache_size * h * w * 4          # float32
+        cache_gb    = cache_bytes / (1024 ** 3)
 
-        self.cache = {}
-        self.cache_order = []
+        print(f"  Loaded MRC          : {self.n_images} images of shape {self.image_shape}")
+        print(f"  Loading method      : mrcfile mmap")
+        print(f"  Cache device        : {self.device}")
+        print(f"  Cache size          : {cache_size:,} images  ({cache_gb:.2f} GB)")
 
-    def __len__(self):
-        return self.n_images
+        self.cache     = None
+        self.cache_idx = 0
+        self._fill_cache()
 
-    def __getitem__(self, idx):
-        if idx in self.cache:
-            return self.cache[idx]
+    def _fill_cache(self):
+        """
+        Sample cache_size random images from disk, transfer to device in one
+        contiguous copy, then z-score normalise vectorized using torch operations
+        directly on device.
+        """
+        indices  = np.random.randint(0, self.n_images, size=self.cache_size)
+        cache_np = np.array(self.mrc_data[indices], dtype=np.float32)  # (cache_size, H, W)
+    
+        # One single CPU → device transfer per cache refill
+        cache = torch.from_numpy(cache_np).to(self.device)
+    
+        # Per-image z-score normalisation — fully vectorized torch ops on device
+        mean = cache.mean(dim=(1, 2), keepdim=True)   # (cache_size, 1, 1)
+        std  = cache.std( dim=(1, 2), keepdim=True) + 1e-8
+        self.cache     = (cache - mean) / std
+        self.cache_idx = 0
+   
+    def get_batch(self, batch_size: int) -> torch.Tensor:
+        """
+        Return batch_size images from the on-device cache.
+        Refills the cache automatically when exhausted.
 
-        img = np.asarray(self.mrc_data[idx], dtype=np.float32)
-        img = (img - img.mean()) / (img.std() + 1e-8)
+        Args:
+            batch_size (int): Number of images to retrieve.
 
-        if len(self.cache) >= self.cache_size:
-            oldest = self.cache_order.pop(0)
-            del self.cache[oldest]
+        Returns:
+            torch.Tensor: shape (batch_size, H, W), dtype float32,
+                          already on self.device.
+        """
+        if self.cache_idx + batch_size > self.cache_size:
+            self._fill_cache()
 
-        self.cache[idx] = torch.from_numpy(img.copy())
-        self.cache_order.append(idx)
+        batch = self.cache[self.cache_idx : self.cache_idx + batch_size]
+        self.cache_idx += batch_size
+        return batch
 
-        return self.cache[idx]
+    def __del__(self):
+        if hasattr(self, "mrc_file"):
+            self.mrc_file.close()
 
 
 # =======================================================================================
@@ -276,7 +325,6 @@ def nle_train_no_saving_with_finetuning(
     # Real data loader for marginal likelihood regularization
     # ------------------------------------------------------------------
     real_data_loader = None
-    real_data_iter = None
 
     if beta_real > 0:
         print(f"\n{'='*70}")
@@ -286,16 +334,10 @@ def nle_train_no_saving_with_finetuning(
         print(f"  beta_real:      {beta_real}")
         print(f"{'='*70}\n")
 
-        real_dataset = RealImageMRCDataset(real_data_mrc)
-        real_data_loader = DataLoader(
-            real_dataset,
-            batch_size=train_config["BATCH_SIZE"],
-            shuffle=True,
-            num_workers=0,
-            pin_memory=True,
-            drop_last=True,
+        real_data_loader = RealImageMRCLoader(
+            real_data_mrc,
+            device=torch.device(device),
         )
-        real_data_iter = iter(real_data_loader)
 
     loss = NPELoss(estimator)
 
@@ -480,14 +522,8 @@ def nle_train_no_saving_with_finetuning(
                     )
                     synthetic_losses_epoch.append(synthetic_nll.item())
 
-                    if beta_real > 0 and real_data_iter is not None:
-                        try:
-                            real_batch = next(real_data_iter)
-                        except StopIteration:
-                            real_data_iter = iter(real_data_loader)
-                            real_batch = next(real_data_iter)
-
-                        real_batch = real_batch.to(device, non_blocking=True)
+                    if beta_real > 0 and real_data_loader is not None:
+                        real_batch = real_data_loader.get_batch(train_config["BATCH_SIZE"])
                         B = real_batch.shape[0]
 
                         # each real image repeated n_models times: [B*n_models, H, W]

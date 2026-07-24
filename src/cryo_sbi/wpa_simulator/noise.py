@@ -245,18 +245,27 @@ class MRCNoiseDataLoader:
     Memory-efficient dataloader for large MRC noise files.
 
     Uses mrcfile.mmap() to memory-map the file. A cache of `cache_size`
-    randomly sampled particles is kept in RAM and served as sequential
+    randomly sampled particles is kept on `device` and served as sequential
     batches. When the cache is exhausted a fresh random cache is loaded
-    from disk, amortising the cost of scattered disk reads.
+    from disk and transferred to the device in one shot, amortising both
+    the cost of scattered disk reads and the CPU→device transfer.
 
     Args:
-        mrc_file_path (str): Path to the MRC file containing noise data.
-        cache_size    (int): Number of particles to hold in RAM at once.
+        mrc_file_path (str)          : Path to the MRC file containing noise data.
+        cache_size    (int)          : Number of particles to hold on device at once.
+        device        (torch.device) : Target device for the cache (cpu or cuda).
+                                       Defaults to CPU if not specified.
     """
 
-    def __init__(self, mrc_file_path: str, cache_size: int = 10240):
+    def __init__(
+        self,
+        mrc_file_path: str,
+        cache_size: int = 10240,
+        device: Optional[torch.device] = None,
+    ):
         self.mrc_file_path = mrc_file_path
         self.cache_size    = cache_size
+        self.device        = device or torch.device("cpu")
 
         self.mrc       = mrcfile.mmap(mrc_file_path, mode="r")
         self.mmap_data = self.mrc.data          # numpy memmap (N, H, W)
@@ -270,29 +279,41 @@ class MRCNoiseDataLoader:
         self.cache_idx = 0
         self._fill_cache()
 
+        # Estimate cache memory footprint
+        cache_bytes = self.cache_size * self.height * self.width * 4
+        cache_gb    = cache_bytes / (1024 ** 3)
+
         print(f"  MRC Noise DataLoader initialized:")
         print(f"    Total particles in file : {self.num_particles:,}")
         print(f"    Particle shape          : {self.particle_shape}")
         print(f"    Dtype                   : {self.mmap_data.dtype}")
         print(f"    Cache size              : {self.cache_size:,}")
+        print(f"    Cache device            : {self.device}")
+        print(f"    Cache memory footprint  : {cache_gb:.2f} GB")
         print(f"    Memory-mapped access    : True")
 
     def _fill_cache(self):
-        """Sample cache_size random particles from disk into RAM."""
-        indices    = np.random.randint(0, self.num_particles, size=self.cache_size)
-        self.cache = np.array(self.mmap_data[indices], dtype=np.float32)
+        """
+        Sample cache_size random particles from disk and transfer to device in
+        one contiguous copy, amortising both scattered disk reads and the
+        CPU→device transfer over the entire cache.
+        """
+        indices  = np.random.randint(0, self.num_particles, size=self.cache_size)
+        cache_np = np.array(self.mmap_data[indices], dtype=np.float32)
+        self.cache     = torch.from_numpy(cache_np).to(self.device)
         self.cache_idx = 0
 
-    def get_batch(self, batch_size: int) -> np.ndarray:
+    def get_batch(self, batch_size: int) -> torch.Tensor:
         """
-        Return batch_size particles from the in-RAM cache.
+        Return batch_size particles from the on-device cache.
         Refills the cache automatically when exhausted.
 
         Args:
             batch_size (int): Number of particles to retrieve.
 
         Returns:
-            np.ndarray: shape (batch_size, height, width), dtype float32.
+            torch.Tensor: shape (batch_size, height, width), dtype float32,
+                          already on self.device.
         """
         if self.cache_idx + batch_size > self.cache_size:
             self._fill_cache()
@@ -317,7 +338,7 @@ def add_real_noise(
 
     All operations (augmentation, normalisation, SNR scaling) are applied
     across the full batch dimension in parallel. Noise particles are fetched
-    via memmap fancy indexing so only *batch_size* particles are in RAM at once.
+    from the on-device cache so no CPU→device transfer occurs at call time.
 
     After Z-score normalisation the noise variance is exactly 1, so the
     scaling factor simplifies to sqrt(signal_var / snr).
@@ -340,9 +361,8 @@ def add_real_noise(
     # Calculate signal standard deviation within mask
     signal_std = torch.std(image[:, mask], dim=[-1])    # (B,)
 
-    # Load noise particles — only batch_size rows leave the memmap
-    noise_np    = noise_dataloader.get_batch(batch_size) # (B, H, W) float32
-    noise_batch = torch.from_numpy(noise_np).to(device)  # (B, H, W)
+    # Fetch noise particles — already on device, no transfer cost
+    noise_batch = noise_dataloader.get_batch(batch_size)  # (B, H, W)
 
     # Random D4 augmentation: independent transpose + vertical flip + horizontal flip
     # covers all 8 square symmetries uniformly

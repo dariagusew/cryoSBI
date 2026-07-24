@@ -149,7 +149,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         # Initialize the memory-efficient noise dataloader
         print(f"  Initializing real noise dataloader...")
         print(f"  Real noise MRC file: {mrc_noise_file}")
-        simulation_param["noise_dataloader"] = MRCNoiseDataLoader(mrc_noise_file)
+        simulation_param["noise_dataloader"] = MRCNoiseDataLoader(mrc_noise_file, device=device)
 
     # precalculate signal mask (for all noise models)
     num_pixels = int(simulation_param["num_pixels"].item())

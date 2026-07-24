@@ -498,7 +498,7 @@ def nle_train_no_saving_with_finetuning(
                         # log p(d_real | X_i) for all i and all images in batch
                         log_p = estimator(real_exp, conf_idx)
                         # log sum_i p(d_real | X_i) per image, then mean over batch
-                        log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1)
+                        log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1) - math.log(n_models)
                         real_reg = -log_marginal.mean()
                         real_losses_epoch.append(real_reg.item())
 

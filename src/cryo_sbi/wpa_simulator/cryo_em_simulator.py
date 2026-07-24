@@ -8,7 +8,7 @@ from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
 from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise, add_GAN_noise
-from cryo_sbi.wpa_simulator.noise import add_noise_from_nps
+from cryo_sbi.wpa_simulator.noise import add_noise_from_nps, add_real_noise, MRCNoiseDataLoader
 from cryo_sbi.wpa_simulator.noise_generator import NoiseGenerator
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
 from cryo_sbi.wpa_simulator.image_tools import circular_mask, make_fft_k2_grid
@@ -86,8 +86,8 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        simulation_param["mixed_noise"] = False
 
     # check if noise model is supported
-    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed", "GAN"]:
-       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed, GAN")
+    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed", "GAN", "real"]:
+       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed, GAN, real")
 
     # check parameters for Poisson noise
     if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
@@ -133,6 +133,23 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
           raise FileNotFoundError(f"NOISE_PT file not found: {pt_file.resolve()}")
        # initialize generator
        simulation_param["noise_generator"] = NoiseGenerator(pt_file = pt_file, device = device)
+
+    # check parameters for real noise
+    if simulation_param["noise"] in ["real", "mixed"]:
+        # get path to mrc file
+        mrc_noise_file = image_config.get("MRC_NOISE_FILE", None)
+        # check that MRC_NOISE_FILE is not None
+        if mrc_noise_file == None:
+            raise ValueError("With real and mixed noise models you must specify MRC_NOISE_FILE")
+        # Store the MRC file path and verify it exists
+        import os
+        if not os.path.exists(mrc_noise_file):
+            raise ValueError(f"MRC_NOISE_FILE does not exist: {mrc_noise_file}")
+
+        # Initialize the memory-efficient noise dataloader
+        print(f"  Initializing real noise dataloader...")
+        print(f"  Real noise MRC file: {mrc_noise_file}")
+        simulation_param["noise_dataloader"] = MRCNoiseDataLoader(mrc_noise_file)
 
     # precalculate signal mask (for all noise models)
     num_pixels = int(simulation_param["num_pixels"].item())
@@ -262,6 +279,9 @@ def cryo_em_simulator(
     elif noise_type == "GAN":
        image = add_GAN_noise(image, simulation_param["noise_generator"], snr, simulation_param["mask"])
 
+    elif noise_type == "real":
+        image = add_real_noise(image, snr, simulation_param["noise_dataloader"],
+                              simulation_param["mask"])
     else:
        image = add_noise_from_nps(image, snr, simulation_param["nps"], simulation_param["mask"])
 

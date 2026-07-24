@@ -1,5 +1,7 @@
 import torch
-from typing import Optional
+import mrcfile
+import numpy as np
+from typing import Optional, Tuple
 
 
 def add_Gaussian_noise(
@@ -236,3 +238,134 @@ def add_GAN_noise(
     noise = noise * noise_std
 
     return image + noise
+
+
+class MRCNoiseDataLoader:
+    """
+    Memory-efficient dataloader for large MRC noise files.
+
+    Uses mrcfile.mmap() to memory-map the file. A cache of `cache_size`
+    randomly sampled particles is kept in RAM and served as sequential
+    batches. When the cache is exhausted a fresh random cache is loaded
+    from disk, amortising the cost of scattered disk reads.
+
+    Args:
+        mrc_file_path (str): Path to the MRC file containing noise data.
+        cache_size    (int): Number of particles to hold in RAM at once.
+    """
+
+    def __init__(self, mrc_file_path: str, cache_size: int = 10_000):
+        self.mrc_file_path = mrc_file_path
+        self.cache_size    = cache_size
+
+        self.mrc       = mrcfile.mmap(mrc_file_path, mode="r")
+        self.mmap_data = self.mrc.data          # numpy memmap (N, H, W)
+
+        self.num_particles  = self.mmap_data.shape[0]
+        self.height         = self.mmap_data.shape[1]
+        self.width          = self.mmap_data.shape[2]
+        self.particle_shape = (self.height, self.width)
+
+        self.cache     = None
+        self.cache_idx = 0
+        self._fill_cache()
+
+        print(f"  MRC Noise DataLoader initialized:")
+        print(f"    Total particles in file : {self.num_particles:,}")
+        print(f"    Particle shape          : {self.particle_shape}")
+        print(f"    Dtype                   : {self.mmap_data.dtype}")
+        print(f"    Cache size              : {self.cache_size:,}")
+        print(f"    Memory-mapped access    : True")
+
+    def _fill_cache(self):
+        """Sample cache_size random particles from disk into RAM."""
+        indices    = np.random.randint(0, self.num_particles, size=self.cache_size)
+        self.cache = np.array(self.mmap_data[indices], dtype=np.float32)
+        self.cache_idx = 0
+
+    def get_batch(self, batch_size: int) -> np.ndarray:
+        """
+        Return batch_size particles from the in-RAM cache.
+        Refills the cache automatically when exhausted.
+
+        Args:
+            batch_size (int): Number of particles to retrieve.
+
+        Returns:
+            np.ndarray: shape (batch_size, height, width), dtype float32.
+        """
+        if self.cache_idx + batch_size > self.cache_size:
+            self._fill_cache()
+
+        batch = self.cache[self.cache_idx : self.cache_idx + batch_size]
+        self.cache_idx += batch_size
+        return batch
+
+    def __del__(self):
+        if hasattr(self, "mrc"):
+            self.mrc.close()
+
+
+def add_real_noise(
+    image: torch.Tensor,
+    snr: torch.Tensor,
+    noise_dataloader: MRCNoiseDataLoader,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Add real cryo-EM ice noise to a batch of images — no Python loops.
+
+    All operations (augmentation, normalisation, SNR scaling) are applied
+    across the full batch dimension in parallel. Noise particles are fetched
+    via memmap fancy indexing so only *batch_size* particles are in RAM at once.
+
+    After Z-score normalisation the noise variance is exactly 1, so the
+    scaling factor simplifies to sqrt(signal_var / snr).
+
+    Random D4 augmentation (all 8 square symmetries) is applied via three
+    independent binary choices: transpose, vertical flip, horizontal flip.
+
+    Args:
+        image            (B, H, W): Input image batch.
+        snr              scalar / (1,) / (B,) / (B,1): Power signal-to-noise ratio.
+        noise_dataloader           : MRCNoiseDataLoader instance.
+        mask             (H, W) bool: Mask selecting signal pixels.
+
+    Returns:
+        torch.Tensor: Noisy batch, shape (B, H, W).
+    """
+    batch_size = image.shape[0]
+    device     = image.device
+
+    # Calculate signal standard deviation within mask
+    signal_std = torch.std(image[:, mask], dim=[-1])    # (B,)
+
+    # Load noise particles — only batch_size rows leave the memmap
+    noise_np    = noise_dataloader.get_batch(batch_size) # (B, H, W) float32
+    noise_batch = torch.from_numpy(noise_np).to(device)  # (B, H, W)
+
+    # Random D4 augmentation: independent transpose + vertical flip + horizontal flip
+    # covers all 8 square symmetries uniformly
+    do_T  = (torch.rand(batch_size, device=device) > 0.5).view(batch_size, 1, 1)
+    do_ud = (torch.rand(batch_size, device=device) > 0.5).view(batch_size, 1, 1)
+    do_lr = (torch.rand(batch_size, device=device) > 0.5).view(batch_size, 1, 1)
+
+    noise_batch = torch.where(do_T,  noise_batch.transpose(1, 2),       noise_batch)
+    noise_batch = torch.where(do_ud, torch.flip(noise_batch, dims=[1]), noise_batch)
+    noise_batch = torch.where(do_lr, torch.flip(noise_batch, dims=[2]), noise_batch)
+
+    # Per-sample Z-score normalisation (noise variance is exactly 1 after this)
+    noise_mean = noise_batch.mean(dim=(1, 2), keepdim=True)             # (B, 1, 1)
+    noise_std  = noise_batch.std( dim=(1, 2), keepdim=True)             # (B, 1, 1)
+    noise_batch = torch.where(
+        noise_std > 0,
+        (noise_batch - noise_mean) / noise_std,
+        noise_batch,
+    )
+
+    # Calculate noise standard deviation from power SNR
+    # SNR = σ²_signal / σ²_noise → σ_noise = σ_signal / sqrt(SNR)
+    noise_std = signal_std.reshape(-1, 1, 1) / torch.sqrt(snr)          # (B, 1, 1)
+
+    # Scale and add
+    return image + noise_batch * noise_std

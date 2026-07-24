@@ -492,8 +492,8 @@ def nle_train_no_saving_with_finetuning(
 
                         # each real image repeated n_models times: [B*n_models, H, W]
                         real_exp = real_batch.repeat_interleave(n_models, dim=0)
-                        # conformation indices 0..n_models-1 for each image: [B*n_models]
-                        conf_idx = torch.arange(n_models, device=device).repeat(B)
+                        # conformation indices 0..n_models-1 for each image: [B*n_models, 1]
+                        conf_idx = torch.arange(n_models, device=device).repeat(B).unsqueeze(-1)
 
                         # log p(d_real | X_i) for all i and all images in batch
                         log_p = estimator(real_exp, conf_idx)

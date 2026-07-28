@@ -298,8 +298,8 @@ def cryo_em_simulator(
        image = add_GAN_HPF_noise(image, simulation_param["noise_generator_hpf"], snr, simulation_param)
 
     elif noise_type == "real":
-        image = add_real_noise(image, snr, simulation_param["noise_dataloader"],
-                              simulation_param["mask"])
+        image = add_real_noise(image, snr, simulation_param["noise_dataloader"], simulation_param["mask"])
+
     else:
        image = add_noise_from_nps(image, snr, simulation_param["nps"], simulation_param["mask"])
 

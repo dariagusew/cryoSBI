@@ -194,16 +194,16 @@ def add_noise_from_nps(
 
     return final_image
 
-def add_GAN_noise(
+def add_GAN_ICE_noise(
     image:           torch.Tensor,
-    noise_generator: "NoiseGenerator",
+    noise_generator: "NoiseGeneratorICE",
     snr:             torch.Tensor,
     mask:            torch.Tensor,
 ) -> torch.Tensor:
     """
     Adds GAN-generated structured ice noise to images based on power SNR.
 
-    The GAN generator produces noise patches that are already normalised
+    The GAN-ICE generator produces noise patches that are already normalised
     (mean=0, std=1 per patch).  These are rescaled to match the target
     noise power derived from the SNR, following the same convention as
     add_Gaussian_noise so the two functions are drop-in replacements.
@@ -240,14 +240,14 @@ def add_GAN_noise(
     return image + noise
 
 
-def add_GAN_real_noise(
+def add_GAN_HPF_noise(
     image: torch.Tensor,
-    noise_generator: "NoiseGeneratorReal",
+    noise_generator: "NoiseGeneratorHPF",
     snr: torch.Tensor,
     simulation_param: dict
 ) -> torch.Tensor:
     """
-    Adds GAN-REAL noise by generating base Gaussian shot-noise, normalising it, 
+    Adds GAN-HPF noise by generating base Gaussian shot-noise, normalising it,
     and adding the ML-generated structural residual (ice, MTF).
     
     Args:
@@ -264,7 +264,7 @@ def add_GAN_real_noise(
     
     mask = simulation_param["mask"]
     
-    # 1. Generate the base noisy image physically (Gaussian only)
+    # 1. Generate the base noisy image physically
     noisy_base_image = add_Gaussian_noise(image, snr, mask)
 
     # 2. Normalize base image exactly as done during GAN training

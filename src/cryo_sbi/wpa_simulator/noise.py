@@ -240,51 +240,6 @@ def add_GAN_ICE_noise(
     return image + noise
 
 
-def add_GAN_HPF_noise(
-    image: torch.Tensor,
-    noise_generator: "NoiseGeneratorHPF",
-    snr: torch.Tensor,
-    simulation_param: dict
-) -> torch.Tensor:
-    """
-    Adds GAN-HPF noise by generating base Gaussian shot-noise, normalising it,
-    and adding the ML-generated structural residual (ice, MTF).
-    
-    Args:
-        image (torch.Tensor): Clean signal image [Batch, H, W]
-        noise_generator (NoiseGeneratorReal): The trained spatial ML noise model
-        snr (torch.Tensor): Signal-to-noise ratio
-        simulation_param (dict): Full simulation config dictionary
-        
-    Returns:
-        torch.Tensor: Noisy image [Batch, H, W] ready for downstream scaling.
-    """
-    # Local import to prevent circular dependency
-    from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
-    
-    mask = simulation_param["mask"]
-    
-    # 1. Generate the base noisy image physically
-    noisy_base_image = add_Gaussian_noise(image, snr, mask)
-
-    # 2. Normalize base image exactly as done during GAN training
-    noisy_base_norm = gaussian_normalize_image(noisy_base_image)
-    
-    # 3. Shape for Generator [B, 1, H, W]
-    noisy_base_norm_4d = noisy_base_norm.unsqueeze(1)
-    
-    # 4. Generate spatial white noise and apply ML residual
-    spatial_noise = torch.randn_like(noisy_base_norm_4d)
-    ml_residual = noise_generator.sample(spatial_noise)
-    
-    # 5. Composite 
-    final_image = noisy_base_norm_4d + ml_residual
-    
-    # Return to 3D [B, H, W]
-    # (Final Normalization will be handled automatically by cryo_em_simulator.py)
-    return final_image.squeeze(1)
-
-
 class MRCNoiseDataLoader:
     """
     Memory-efficient dataloader for large MRC noise files.

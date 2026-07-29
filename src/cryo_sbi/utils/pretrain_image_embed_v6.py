@@ -299,6 +299,7 @@ def _run_vib_epoch(
     epoch_loss = 0.0
     epoch_pred_loss = 0.0
     epoch_kl_loss = 0.0
+    epoch_cons_loss = 0.0
     n_steps = 0
     last_mu: Optional[torch.Tensor] = None
 
@@ -362,6 +363,7 @@ def _run_vib_epoch(
             if weight_cons > 0.0:
                 mu_B, _, _, _ = model(noisy_images_B[sl])
                 L_cons = F.mse_loss(mu, mu_B)
+                epoch_cons_loss += L_cons.item()
                 loss = loss + weight_cons * L_cons
 
             loss.backward()
@@ -377,7 +379,8 @@ def _run_vib_epoch(
     avg_loss      = epoch_loss      / max(n_steps, 1)
     avg_pred_loss = epoch_pred_loss / max(n_steps, 1)
     avg_kl_loss   = epoch_kl_loss   / max(n_steps, 1)
-    return avg_loss, avg_pred_loss, avg_kl_loss, last_mu, synthetic_iter
+    avg_cons_loss = epoch_cons_loss / max(n_steps, 1)
+    return avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, last_mu, synthetic_iter
 
 
 # ============================================================================
@@ -425,6 +428,10 @@ def pretrain_image_embed(
     print("\nPrediction loss weights:")
     for key, val in pred_weights.items():
         print(f"  {key:10s}: {val:.2f}")
+    if weight_cons > 0.0:
+        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled)")
+    else:
+        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Disabled)")
 
     # ------------------------------------------------------------------
     # Config and conformational models
@@ -577,7 +584,7 @@ def pretrain_image_embed(
     print("=" * 70)
 
     history: Dict = {
-        "loss": [], "pred_loss": [], "kl_loss": [],
+        "loss": [], "pred_loss": [], "kl_loss": [], "cons_loss": [],
         "emb_std": [], "emb_dist": [],
         "val_coverage_pct": [], "val_med_dist": [], "val_p90_dist": [],
     }
@@ -586,7 +593,7 @@ def pretrain_image_embed(
 
     with tqdm(range(epochs), desc="Stage 1: VIB pretraining") as tq:
         for epoch in tq:
-            avg_loss, avg_pred_loss, avg_kl_loss, last_mu, synthetic_iter = _run_vib_epoch(
+            avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, last_mu, synthetic_iter = _run_vib_epoch(
                 model=model,
                 optimizer=optimizer,
                 synthetic_iter=synthetic_iter,
@@ -607,12 +614,16 @@ def pretrain_image_embed(
             history["loss"].append(avg_loss)
             history["pred_loss"].append(avg_pred_loss)
             history["kl_loss"].append(avg_kl_loss)
+            history["cons_loss"].append(avg_cons_loss)
 
-            tq.set_postfix({
+            postfix_dict = {
                 "loss": f"{avg_loss:.4f}",
                 "pred": f"{avg_pred_loss:.4f}",
                 "kl":   f"{avg_kl_loss:.4f}",
-            })
+            }
+            if weight_cons > 0.0:
+                postfix_dict["cons"] = f"{avg_cons_loss:.4f}"
+            tq.set_postfix(postfix_dict)
 
             if epoch % check_frequency == 0 and last_mu is not None:
                 emb_std, emb_dist = check_embedding_health(last_mu, device)
@@ -623,6 +634,8 @@ def pretrain_image_embed(
                 print(f"    Total loss:     {avg_loss:.6f}")
                 print(f"    Pred loss:      {avg_pred_loss:.6f}")
                 print(f"    KL loss:        {avg_kl_loss:.6f}")
+                if weight_cons > 0.0:
+                    print(f"    Cons loss:      {avg_cons_loss:.6f}")
                 print(f"    Embedding std:  {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
 
@@ -676,6 +689,8 @@ def pretrain_image_embed(
     print(f"  Total loss:     {final_loss:.6f}")
     print(f"  Pred loss:      {final_pred_loss:.6f}")
     print(f"  KL loss:        {final_kl_loss:.6f}")
+    if weight_cons > 0.0:
+        print(f"  Cons loss:      {history['cons_loss'][-1]:.6f}")
     print(f"  Embedding std:  {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
 
@@ -724,6 +739,7 @@ def pretrain_image_embed(
         "log_var_head_params": params["log_var_head"],
         "beta":           beta,
         "pred_weights":   pred_weights,
+        "weight_cons":    weight_cons,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)

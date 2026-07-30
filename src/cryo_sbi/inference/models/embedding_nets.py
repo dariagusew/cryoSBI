@@ -639,16 +639,25 @@ class SpatialCryoEncoder(nn.Module):
         z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
         return mu, log_var, z
 
-    def forward(self, x: torch.Tensor) -> tuple:
+    #def forward(self, x: torch.Tensor) -> tuple:
+    #    """
+    #    Flow Training Interface - stochastic, z output.
+    #    Returns: z  each [B, output_dim]
+    #    """
+    #    h       = self.trunk(x)
+    #    mu      = self.mu_head(h)
+    #    log_var = self.log_var_head(h).clamp(-4, 4)
+    #    z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
+    #    return z
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Flow Training Interface - stochastic, z output.
-        Returns: z  each [B, output_dim]
+        Flow Training Interface - deterministic. 
+        Returns: mu [B, output_dim]
         """
-        h       = self.trunk(x)
-        mu      = self.mu_head(h)
-        log_var = self.log_var_head(h).clamp(-4, 4)
-        z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
-        return z
+        h   = self.trunk(x)
+        mu  = self.mu_head(h)
+        return mu
 
 
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")

@@ -207,8 +207,8 @@ def evaluate_likelihood_pairwise(
             batch_images =  images[img_idx.cpu()]
             batch_indices = model_indices[mod_idx].unsqueeze(-1) # [batch_size, 1]
             
-            # Single forward pass!
-            log_p = estimator(batch_images.to(device), batch_indices)  # [batch_size]
+            # Single forward pass - deterministic!
+            log_p = estimator.forward_inference(batch_images.to(device), batch_indices)  # [batch_size]
             del batch_images  # free GPU memory
             torch.cuda.empty_cache()
             

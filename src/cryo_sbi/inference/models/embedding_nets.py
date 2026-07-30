@@ -569,8 +569,6 @@ class ConvEncoder(nn.Module):
 class SpatialCryoEncoder(nn.Module):
     """
     Shared-trunk encoder for cryo-EM images.
-    Public interface: encoder(x) -> mu   (used by the flow at inference)
-    Training interface: encoder.forward_vib(x) -> mu, log_var, z
     """
 
     def __init__(self, output_dimension: int, D: int = 128):
@@ -621,9 +619,9 @@ class SpatialCryoEncoder(nn.Module):
         h = self.output_norm(h)         # [B, output_dim]
         return h
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_inference(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Inference interface.
+        Final Inference Interface - deterministic.
         Returns: mu [B, output_dim]
         """
         h   = self.trunk(x)
@@ -632,7 +630,7 @@ class SpatialCryoEncoder(nn.Module):
 
     def forward_vib(self, x: torch.Tensor) -> tuple:
         """
-        Training interface.
+        Embedding Training Interface - stochastic, full output.
         Returns: mu, log_var, z  each [B, output_dim]
         """
         h       = self.trunk(x)
@@ -640,6 +638,17 @@ class SpatialCryoEncoder(nn.Module):
         log_var = self.log_var_head(h).clamp(-4, 4)
         z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
         return mu, log_var, z
+
+    def forward(self, x: torch.Tensor) -> tuple:
+        """
+        Flow Training Interface - stochastic, z output.
+        Returns: z  each [B, output_dim]
+        """
+        h       = self.trunk(x)
+        mu      = self.mu_head(h)
+        log_var = self.log_var_head(h).clamp(-4, 4)
+        z       = mu + torch.randn_like(mu) * (0.5 * log_var).exp()
+        return z
 
 
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")

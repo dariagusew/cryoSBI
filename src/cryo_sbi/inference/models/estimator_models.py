@@ -208,7 +208,7 @@ class NLEWithEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the NLE model
+        Forward pass of the NLE model - for flow training - stochastic
 
         Args:
             x (torch.Tensor): Image whose likelihood we model.
@@ -219,6 +219,21 @@ class NLEWithEmbedding(nn.Module):
         """
 
         return self.nle(self.embedding(x), self.standardize(theta))
+
+    def forward_inference(self, x: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the NLE model for inference - deterministic
+
+        Args:
+            x (torch.Tensor): Image whose likelihood we model.
+            theta (torch.Tensor): Conformational parameters (conditioning variable).
+
+        Returns:
+            torch.Tensor: Log-likelihood
+        """
+
+        return self.nle(self.embedding.forward_inference(x), self.standardize(theta))
+
 
     def flow(self, theta: torch.Tensor):
         """

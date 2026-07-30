@@ -162,7 +162,8 @@ class NLEWithEmbedding(nn.Module):
         num_transforms: int = 4,
         num_hidden_flow: int = 2,
         hidden_flow_dim: int = 128,
-        flow: nn.Module = zuko.flows.MAF,
+        bins: int = 8,
+        flow: nn.Module = zuko.flows.NSF,
         num_models: int = 1,
         **kwargs,
     ) -> None:
@@ -191,6 +192,7 @@ class NLEWithEmbedding(nn.Module):
             transforms=num_transforms,
             build=flow,
             hidden_features=[*[hidden_flow_dim] * num_hidden_flow, 128, 64],
+            bins=bins,
             **kwargs,
         )
 

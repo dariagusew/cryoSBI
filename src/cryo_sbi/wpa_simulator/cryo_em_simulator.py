@@ -278,7 +278,7 @@ def cryo_em_simulator(
        # Add Poisson + (optional MTF/DQE) + detector noise
        image = add_Poisson_noise(image, target_snr, simulation_param, mtf, nps)
 
-    elif noise_type == "GAN_ICE":
+    elif noise_type == "GAN-ICE":
        image = add_GAN_ICE_noise(image, simulation_param["noise_generator_ice"], snr, simulation_param["mask"])
 
     elif noise_type == "real":

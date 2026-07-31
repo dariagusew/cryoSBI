@@ -237,7 +237,7 @@ def get_embeddings_in_batches(encoder, images: torch.Tensor, batch_size: int) ->
     z_list = []
     with torch.no_grad():
         for i in range(0, len(images), batch_size):
-            out = encoder(images[i:i+batch_size])
+            out = encoder.forward_inference(images[i:i+batch_size])
             z = out[0] if isinstance(out, tuple) else out
             z_list.append(z)
     return torch.cat(z_list, dim=0)
@@ -294,6 +294,7 @@ def _run_vib_epoch(
     pred_weights: Dict[str, float],
     normalizer: FixedTargetNormalizer,
     weight_cons: float,
+    use_gaussian_consistency_loss: bool = False,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
     epoch_loss = 0.0
@@ -328,6 +329,7 @@ def _run_vib_epoch(
             )
 
             if weight_cons > 0.0:
+                noise_type_B = "Gaussian" if use_gaussian_consistency_loss else simulation_param["noise"]
                 noisy_images_B, _ = cryo_em_simulator(
                     models,
                     indices.to(device,     non_blocking=True),
@@ -338,7 +340,7 @@ def _run_vib_epoch(
                     amp.to(device,         non_blocking=True),
                     snr.to(device,         non_blocking=True),
                     simulation_param,
-                    simulation_param["noise"],
+                    noise_type_B,
                 )
 
         n_full = (len(noisy_images) // batch_size) * batch_size
@@ -406,6 +408,7 @@ def pretrain_image_embed(
     val_size: int = 2048,
     val_k: int = 3,
     weight_cons: float = 0.0,
+    use_gaussian_consistency_loss: bool = False,
 ):
     print("\n" + "=" * 70)
     print(f"PRETRAINING: {embedding_name}")
@@ -429,7 +432,8 @@ def pretrain_image_embed(
     for key, val in pred_weights.items():
         print(f"  {key:10s}: {val:.2f}")
     if weight_cons > 0.0:
-        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled)")
+        cons_noise_str = "Gaussian" if use_gaussian_consistency_loss else "Config Noise"
+        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str})")
     else:
         print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Disabled)")
 
@@ -607,6 +611,7 @@ def pretrain_image_embed(
                 pred_weights=pred_weights,
                 normalizer=normalizer,
                 weight_cons=weight_cons,
+                use_gaussian_consistency_loss=use_gaussian_consistency_loss,
             )
 
             scheduler.step()
@@ -740,6 +745,7 @@ def pretrain_image_embed(
         "beta":           beta,
         "pred_weights":   pred_weights,
         "weight_cons":    weight_cons,
+        "use_gaussian_consistency_loss": use_gaussian_consistency_loss,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)
@@ -758,20 +764,21 @@ if __name__ == "__main__":
         description="VIB pretraining of cryo-EM image encoder"
     )
 
-    parser.add_argument("--image_config",          required=True,                       help="Path to image config JSON")
-    parser.add_argument("--embedding",             default="SPATIAL_CRYO",              help="Embedding architecture name")
-    parser.add_argument("--embedding_dim",         type=int,   default=16,              help="Encoder output dimension")
-    parser.add_argument("--epochs",                type=int,   default=100,             help="Stage 1 epochs")
-    parser.add_argument("--batch_size",            type=int,   default=256,             help="Mini-batch size")
-    parser.add_argument("--lr",                    type=float, default=2e-4,            help="Stage 1 learning rate")
-    parser.add_argument("--simulation_batch_size", type=int,   default=1024,            help="Images generated per simulator call")
-    parser.add_argument("--n_batches_per_epoch",   type=int,   default=100,             help="Simulation calls per epoch")
-    parser.add_argument("--save_path",             default="pretrained_image_embed.pt", help="Output path for encoder weights")
-    parser.add_argument("--check_frequency",       type=int,   default=5,               help="Epoch interval for detailed stats")
-    parser.add_argument("--resume_from",           default=None,                        help="Checkpoint path to resume from")
-    parser.add_argument("--device",                default="cuda",                      help="Compute device (cuda / cpu)")
-    parser.add_argument("--beta",                  type=float, default=1e-5,            help="KL weight")
-    parser.add_argument("--beta_cons",             type=float, default=0.0,             help="Noise consistency loss weight")
+    parser.add_argument("--image_config",                  required=True,                       help="Path to image config JSON")
+    parser.add_argument("--embedding",                     default="SPATIAL_CRYO",              help="Embedding architecture name")
+    parser.add_argument("--embedding_dim",                 type=int,   default=16,              help="Encoder output dimension")
+    parser.add_argument("--epochs",                        type=int,   default=100,             help="Stage 1 epochs")
+    parser.add_argument("--batch_size",                    type=int,   default=256,             help="Mini-batch size")
+    parser.add_argument("--lr",                            type=float, default=2e-4,            help="Stage 1 learning rate")
+    parser.add_argument("--simulation_batch_size",         type=int,   default=1024,            help="Images generated per simulator call")
+    parser.add_argument("--n_batches_per_epoch",           type=int,   default=100,             help="Simulation calls per epoch")
+    parser.add_argument("--save_path",                     default="pretrained_image_embed.pt", help="Output path for encoder weights")
+    parser.add_argument("--check_frequency",               type=int,   default=5,               help="Epoch interval for detailed stats")
+    parser.add_argument("--resume_from",                   default=None,                        help="Checkpoint path to resume from")
+    parser.add_argument("--device",                        default="cuda",                      help="Compute device (cuda / cpu)")
+    parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
+    parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
+    parser.add_argument("--use_Gaussian_consitency_loss",  action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -787,20 +794,20 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     pretrain_image_embed(
-        image_config_path     = args.image_config,
-        resume_from           = args.resume_from,
-        embedding_name        = args.embedding,
-        device                = args.device,
-        embedding_dim         = args.embedding_dim,
-        epochs                = args.epochs,
-        batch_size            = args.batch_size,
-        lr                    = args.lr,
-        simulation_batch_size = args.simulation_batch_size,
-        save_path             = args.save_path,
-        check_frequency       = args.check_frequency,
-        n_batches_per_epoch   = args.n_batches_per_epoch,
-        beta                  = args.beta,
-        pred_weights          = {
+        image_config_path             = args.image_config,
+        resume_from                   = args.resume_from,
+        embedding_name                = args.embedding,
+        device                        = args.device,
+        embedding_dim                 = args.embedding_dim,
+        epochs                        = args.epochs,
+        batch_size                    = args.batch_size,
+        lr                            = args.lr,
+        simulation_batch_size         = args.simulation_batch_size,
+        save_path                     = args.save_path,
+        check_frequency               = args.check_frequency,
+        n_batches_per_epoch           = args.n_batches_per_epoch,
+        beta                          = args.beta,
+        pred_weights                  = {
             "conf":    args.weight_conf,
             "orient":  args.weight_orient,
             "shift":   args.weight_shift,
@@ -808,8 +815,9 @@ if __name__ == "__main__":
             "bfactor": args.weight_bfactor,
             "snr":     args.weight_snr,
         },
-        real_data_mrc         = args.real_data_mrc,
-        val_size              = args.val_size,
-        val_k                 = args.val_k,
-        weight_cons           = args.beta_cons
+        real_data_mrc                 = args.real_data_mrc,
+        val_size                      = args.val_size,
+        val_k                         = args.val_k,
+        weight_cons                   = args.beta_cons,
+        use_gaussian_consistency_loss = args.use_Gaussian_consitency_loss,
     )

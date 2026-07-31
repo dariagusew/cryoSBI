@@ -265,7 +265,7 @@ def generate_and_encode_synthetic(
 
             batch_embs = []
             for i in range(0, len(images), encode_batch_size):
-                emb = model(images[i:i + encode_batch_size])
+                emb = model.forward_inference(images[i:i + encode_batch_size])
                 batch_embs.append(emb.cpu())
             batch_embs = torch.cat(batch_embs, dim=0)
 
@@ -316,7 +316,7 @@ def load_and_encode_real(
         for i in tqdm(range(0, n_to_use, encode_batch_size), desc="Encoding real images"):
             batch_idx = sample_idx[i:i + encode_batch_size]
             batch = torch.stack([dataset[int(j)] for j in batch_idx]).to(device)
-            emb = model(batch)
+            emb = model.forward_inference(batch)
             all_embeddings.append(emb.cpu())
 
     return torch.cat(all_embeddings, dim=0).numpy(), example_images

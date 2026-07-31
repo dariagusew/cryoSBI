@@ -1,3 +1,4 @@
+# "infer_populations.py"
 import torch 
 import numpy as np 
 from tqdm.auto import tqdm
@@ -630,9 +631,10 @@ def run_inference_real_data(args):
 
     # 6. Optimize Weights (use two different optimizers)
     print("Initializing weight optimizer...")
+    theta = getattr(args, 'theta', 0.0)
 
-    adam_optimizer  = WeightOptimizer(log_probs_matrix, device=device)
-    lbfgs_optimizer = WeightOptimizerLBFGS(log_probs_matrix, device=device)
+    adam_optimizer  = WeightOptimizer(log_probs_matrix, theta=theta, device=device)
+    lbfgs_optimizer = WeightOptimizerLBFGS(log_probs_matrix, theta=theta, device=device)
 
     print("Optimizing weights to maximize the posterior...")
 

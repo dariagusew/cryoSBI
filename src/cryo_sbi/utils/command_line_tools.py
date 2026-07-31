@@ -1,3 +1,4 @@
+# "command_line_tools.py"
 import argparse
 from modulefinder import Module
 import sys
@@ -459,6 +460,11 @@ def cl_run_inference_real_data():
 
     parser.add_argument("--log-likelihood-file", type=str, required=False, default=None,
                         help="Path to save the inferenced log-likelihood matrix (.pt file).")
+
+    # --- Regularization ---
+    parser.add_argument("--theta", type=float, default=0.0,
+                        help="Regularization parameter for KL penalty term (default: 0.0).")
+
     # --- Performance and Hardware ---
     parser.add_argument("--device", type=str, default="cuda",
                         help="Device to run the computation on (e.g., 'cuda:0' or 'cpu').")

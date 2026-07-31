@@ -293,6 +293,7 @@ def _run_vib_epoch(
     beta: float,
     pred_weights: Dict[str, float],
     normalizer: FixedTargetNormalizer,
+    epoch: int,
     weight_cons: float,
     use_gaussian_consistency_loss: bool = False,
 ) -> tuple:
@@ -364,9 +365,11 @@ def _run_vib_epoch(
 
             if weight_cons > 0.0:
                 mu_B, _, _, _ = model(noisy_images_B[sl])
-                L_cons = F.mse_loss(mu, mu_B)
+                L_cons = F.mse_loss(mu, mu_B.detach())
                 epoch_cons_loss += L_cons.item()
-                loss = loss + weight_cons * L_cons
+                # Warmup weight_cons over first 10 epochs
+                current_weight_cons = weight_cons * min(1.0, epoch / 10.0)
+                loss = loss + current_weight_cons * L_cons
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -610,6 +613,7 @@ def pretrain_image_embed(
                 beta=beta,
                 pred_weights=pred_weights,
                 normalizer=normalizer,
+                epoch=epoch,
                 weight_cons=weight_cons,
                 use_gaussian_consistency_loss=use_gaussian_consistency_loss,
             )

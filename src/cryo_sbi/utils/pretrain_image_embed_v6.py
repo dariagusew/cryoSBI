@@ -778,7 +778,7 @@ if __name__ == "__main__":
     parser.add_argument("--device",                        default="cuda",                      help="Compute device (cuda / cpu)")
     parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
     parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
-    parser.add_argument("--use_Gaussian_consitency_loss",  action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
+    parser.add_argument("--use_Gaussian_consistency_loss", action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -819,5 +819,5 @@ if __name__ == "__main__":
         val_size                      = args.val_size,
         val_k                         = args.val_k,
         weight_cons                   = args.beta_cons,
-        use_gaussian_consistency_loss = args.use_Gaussian_consitency_loss,
+        use_gaussian_consistency_loss = args.use_Gaussian_consistency_loss,
     )

@@ -34,7 +34,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 from cryo_sbi.wpa_simulator.cryo_em_simulator import (
@@ -573,10 +573,12 @@ def pretrain_image_embed(
     print(f"    log_var_head:       {params['log_var_head']:,}")
     print(f"  Predictor parameters: {params['predictor']:,}")
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.001)
 
-    # Simple cosine Annealing
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    warmup_epochs = max(1, epochs // 10)
+    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+    cosine = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     print("\nTraining configuration:")
     print(f"  Embedding:         {embedding_name}")

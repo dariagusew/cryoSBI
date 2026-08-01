@@ -246,7 +246,8 @@ def get_embeddings_in_batches(encoder, images: torch.Tensor, batch_size: int) ->
     z_list = []
     with torch.no_grad():
         for i in range(0, len(images), batch_size):
-            out = encoder.forward_inference(images[i:i+batch_size])
+            end_idx = min(i + batch_size, len(images))
+            out = encoder.forward_inference(images[i:end_idx])
             z = out[0] if isinstance(out, tuple) else out
             z_list.append(z)
     return torch.cat(z_list, dim=0)
@@ -255,7 +256,8 @@ def get_synth_embeddings_vib(encoder, images: torch.Tensor, batch_size: int) -> 
     mu_list, z_list, sigma_list = [], [], []
     with torch.no_grad():
         for i in range(0, len(images), batch_size):
-            batch = images[i:i+batch_size]
+            end_idx = min(i + batch_size, len(images))
+            batch = images[i:end_idx]
             mu, log_var, z = encoder.forward_vib(batch)
             sigma = (0.5 * log_var).exp()
             mu_list.append(mu)

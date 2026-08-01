@@ -251,6 +251,25 @@ def get_embeddings_in_batches(encoder, images: torch.Tensor, batch_size: int) ->
             z_list.append(z)
     return torch.cat(z_list, dim=0)
 
+def get_synth_embeddings_vib(encoder, images: torch.Tensor, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, float]:
+    mu_list, z_list, sigma_list = [], [], []
+    with torch.no_grad():
+        for i in range(0, len(images), batch_size):
+            batch = images[i:i+batch_size]
+            mu, log_var, z = encoder.forward_vib(batch)
+            sigma = (0.5 * log_var).exp()
+            mu_list.append(mu)
+            z_list.append(z)
+            sigma_list.append(sigma)
+    mu_synth = torch.cat(mu_list, dim=0)
+    z_synth  = torch.cat(z_list, dim=0)
+    sigma_synth = torch.cat(sigma_list, dim=0)
+
+    emb_std = mu_synth.std(dim=0).mean().item()
+    noise_std = sigma_synth.mean().item()
+    nsr = (noise_std / (emb_std + 1e-8)) * 100.0
+    return mu_synth, z_synth, nsr
+
 
 # ============================================================================
 # UTILITIES
@@ -627,6 +646,8 @@ def pretrain_image_embed(
         "loss": [], "pred_loss": [], "kl_loss": [], "cons_loss": [],
         "emb_std": [], "emb_dist": [],
         "val_coverage_pct": [], "val_med_dist": [], "val_p90_dist": [],
+        "val_mu_coverage_pct": [], "val_mu_med_dist": [], "val_mu_p90_dist": [],
+        "val_nsr": [],
     }
     last_mu: Optional[torch.Tensor] = None
     save_path_obj = Path(save_path)
@@ -691,18 +712,29 @@ def pretrain_image_embed(
 
                 if val_real_tensor is not None and val_synth_tensor is not None:
                     model.eval()
-                    z_synth = get_embeddings_in_batches(model.encoder, val_synth_tensor, batch_size)
-                    z_real  = get_embeddings_in_batches(model.encoder, val_real_tensor, batch_size)
+                    mu_synth, z_synth, nsr = get_synth_embeddings_vib(model.encoder, val_synth_tensor, batch_size)
+                    mu_real = get_embeddings_in_batches(model.encoder, val_real_tensor, batch_size)
                     model.train()
                     
-                    cov_pct, med_dist, p90_dist = compute_manifold_overlap(z_synth, z_real, k=val_k)
-                    history["val_coverage_pct"].append(cov_pct)
-                    history["val_med_dist"].append(med_dist)
-                    history["val_p90_dist"].append(p90_dist)
+                    cov_pct_z, med_dist_z, p90_dist_z = compute_manifold_overlap(z_synth, mu_real, k=val_k)
+                    cov_pct_mu, med_dist_mu, p90_dist_mu = compute_manifold_overlap(mu_synth, mu_real, k=val_k)
+
+                    history["val_coverage_pct"].append(cov_pct_z)
+                    history["val_med_dist"].append(med_dist_z)
+                    history["val_p90_dist"].append(p90_dist_z)
+                    history["val_mu_coverage_pct"].append(cov_pct_mu)
+                    history["val_mu_med_dist"].append(med_dist_mu)
+                    history["val_mu_p90_dist"].append(p90_dist_mu)
+                    history["val_nsr"].append(nsr)
                     
                     print(f"    Validation (Sim2Real Overlap):")
-                    print(f"      Coverage (% in manifold): {cov_pct:.2f}%")
-                    print(f"      Distance (Med / p90):     {med_dist:.4f} / {p90_dist:.4f}")
+                    print(f"      Noise-to-Signal Ratio:    {nsr:.2f}%")
+                    print(f"      Using z_synth (stochastic):")
+                    print(f"        Coverage (% in manifold): {cov_pct_z:.2f}%")
+                    print(f"        Distance (Med / p90):     {med_dist_z:.4f} / {p90_dist_z:.4f}")
+                    print(f"      Using mu_synth (deterministic):")
+                    print(f"        Coverage (% in manifold): {cov_pct_mu:.2f}%")
+                    print(f"        Distance (Med / p90):     {med_dist_mu:.4f} / {p90_dist_mu:.4f}")
                 
                 ep_stem = save_path_obj.stem
                 ep_suffix = save_path_obj.suffix
@@ -743,6 +775,24 @@ def pretrain_image_embed(
         print(f"  Cons loss:      {history['cons_loss'][-1]:.6f}")
     print(f"  Embedding std:  {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
+
+    if val_real_tensor is not None and val_synth_tensor is not None:
+        model.eval()
+        f_mu_synth, f_z_synth, f_nsr = get_synth_embeddings_vib(model.encoder, val_synth_tensor, batch_size)
+        f_mu_real = get_embeddings_in_batches(model.encoder, val_real_tensor, batch_size)
+        model.train()
+
+        f_cov_z, f_med_z, f_p90_z = compute_manifold_overlap(f_z_synth, f_mu_real, k=val_k)
+        f_cov_mu, f_med_mu, f_p90_mu = compute_manifold_overlap(f_mu_synth, f_mu_real, k=val_k)
+
+        print(f"\n  Final Validation (Sim2Real Overlap):")
+        print(f"    Noise-to-Signal Ratio:    {f_nsr:.2f}%")
+        print(f"    Using z_synth (stochastic):")
+        print(f"      Coverage (% in manifold): {f_cov_z:.2f}%")
+        print(f"      Distance (Med / p90):     {f_med_z:.4f} / {f_p90_z:.4f}")
+        print(f"    Using mu_synth (deterministic):")
+        print(f"      Coverage (% in manifold): {f_cov_mu:.2f}%")
+        print(f"      Distance (Med / p90):     {f_med_mu:.4f} / {f_p90_mu:.4f}")
 
     print("\nQuality assessment:")
 

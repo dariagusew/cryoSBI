@@ -98,7 +98,6 @@ The following embeddings are implemented : {[key for key in EMBEDDING_NETS.keys(
         hidden_flow_dim=config["HIDDEN_DIM_FLOW"],
         flow=model,
         bins=config.get("NUM_BINS", 8),
-        slope=config.get("SLOPE", 0.001),
         num_models=config["NUM_MODELS"],
         **{"activation": partial(nn.LeakyReLU, 0.1)},
     )

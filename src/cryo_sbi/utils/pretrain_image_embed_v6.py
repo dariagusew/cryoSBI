@@ -296,6 +296,7 @@ def _run_vib_epoch(
     epoch: int,
     weight_cons: float,
     use_gaussian_consistency_loss: bool = False,
+    randomize_snr: bool = False,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
     epoch_loss = 0.0
@@ -330,7 +331,22 @@ def _run_vib_epoch(
             )
 
             if weight_cons > 0.0:
+                if randomize_snr:
+                    # 1. Sample a fresh parameter tuple to get an independent random SNR
+                    try:
+                        params_B = next(synthetic_iter)
+                    except StopIteration:
+                        synthetic_iter = iter(synthetic_loader)
+                        params_B = next(synthetic_iter)
+
+                    snr_B = params_B[6]  # 7th element in parameter tuple is SNR
+                else:
+                    snr_B = snr
+
+                # 2. Select noise type for Set B
                 noise_type_B = "Gaussian" if use_gaussian_consistency_loss else simulation_param["noise"]
+
+                # 3. Simulate noisy_images_B with shared geometry/CTF, but new SNR and Noise Type
                 noisy_images_B, _ = cryo_em_simulator(
                     models,
                     indices.to(device,     non_blocking=True),
@@ -339,9 +355,9 @@ def _run_vib_epoch(
                     defocus.to(device,     non_blocking=True),
                     b_factor.to(device,    non_blocking=True),
                     amp.to(device,         non_blocking=True),
-                    snr.to(device,         non_blocking=True),
+                    snr_B.to(device,       non_blocking=True), # Random SNR
                     simulation_param,
-                    noise_type_B,
+                    noise_type_B,                              # Random Noise Type
                 )
 
         n_full = (len(noisy_images) // batch_size) * batch_size
@@ -412,6 +428,7 @@ def pretrain_image_embed(
     val_k: int = 3,
     weight_cons: float = 0.0,
     use_gaussian_consistency_loss: bool = False,
+    randomize_snr: bool = False,
 ):
     print("\n" + "=" * 70)
     print(f"PRETRAINING: {embedding_name}")
@@ -436,7 +453,8 @@ def pretrain_image_embed(
         print(f"  {key:10s}: {val:.2f}")
     if weight_cons > 0.0:
         cons_noise_str = "Gaussian" if use_gaussian_consistency_loss else "Config Noise"
-        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str})")
+        snr_str = "Randomized" if randomize_snr else "Shared"
+        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str}, SNR B: {snr_str})")
     else:
         print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Disabled)")
 
@@ -618,6 +636,7 @@ def pretrain_image_embed(
                 epoch=epoch,
                 weight_cons=weight_cons,
                 use_gaussian_consistency_loss=use_gaussian_consistency_loss,
+                randomize_snr=randomize_snr,
             )
 
             scheduler.step()
@@ -752,6 +771,7 @@ def pretrain_image_embed(
         "pred_weights":   pred_weights,
         "weight_cons":    weight_cons,
         "use_gaussian_consistency_loss": use_gaussian_consistency_loss,
+        "randomize_snr":  randomize_snr,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)
@@ -785,6 +805,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
     parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
     parser.add_argument("--use_Gaussian_consistency_loss", action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
+    parser.add_argument("--randomize_SNR",                 action="store_true", default=False,  help="Draw a new SNR tensor for consistency loss target set B")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -826,4 +847,5 @@ if __name__ == "__main__":
         val_k                         = args.val_k,
         weight_cons                   = args.beta_cons,
         use_gaussian_consistency_loss = args.use_Gaussian_consistency_loss,
+        randomize_snr                 = args.randomize_SNR,
     )

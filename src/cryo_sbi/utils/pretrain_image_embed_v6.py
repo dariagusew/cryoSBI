@@ -458,7 +458,7 @@ def pretrain_image_embed(
     beta: float = 1e-3,
     pred_weights: Optional[Dict[str, float]] = None,
     real_data_mrc: Optional[str] = None,
-    val_size: int = 2048,
+    val_size: int = 3000,
     val_k: int = 3,
     weight_cons: float = 0.0,
     use_gaussian_consistency_loss: bool = False,

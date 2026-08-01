@@ -887,7 +887,7 @@ if __name__ == "__main__":
     parser.add_argument("--weight_snr",     type=float, default=0.0,  help="SNR prediction loss weight")
     
     parser.add_argument("--real_data_mrc",  default=None, help="Path to real .mrc images for Sim2Real validation")
-    parser.add_argument("--val_size",       type=int, default=3072, help="Number of images in fixed validation set")
+    parser.add_argument("--val_size",       type=int, default=3000, help="Number of images in fixed validation set")
     parser.add_argument("--val_k",          type=int, default=3, help="k value for Synthetic Manifold Radius check")
 
     args = parser.parse_args()

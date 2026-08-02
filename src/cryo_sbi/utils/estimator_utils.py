@@ -149,7 +149,8 @@ def load_estimator(
     estimator = flow_model(train_config, image_config["N_PIXELS"])
     #estimator = build_models.build_npe_flow_model(train_config)
     estimator.load_state_dict(
-        torch.load(estimator_path, map_location=torch.device(device))
+        torch.load(estimator_path, map_location=torch.device(device)),
+        strict=False
     )
     estimator.to(device)
     estimator.eval()

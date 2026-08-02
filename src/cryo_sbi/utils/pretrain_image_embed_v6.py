@@ -151,6 +151,18 @@ class FixedTargetNormalizer(nn.Module):
 # VIB LOSS HELPERS
 # ============================================================================
 
+def centered_cosine_consistency_loss(mu_A: torch.Tensor, mu_B: torch.Tensor) -> torch.Tensor:
+    """
+    Mean-centers embeddings per batch before computing cosine similarity.
+    Prevents the encoder from shifting embeddings away from origin (0,0).
+    Bounded in [0, 1].
+    """
+    mu_A_centered = mu_A - mu_A.mean(dim=0, keepdim=True)
+    mu_B_centered = mu_B - mu_B.mean(dim=0, keepdim=True)
+    cosine_sim = F.cosine_similarity(mu_A_centered, mu_B_centered, dim=-1)
+    return 0.5 * (1.0 - cosine_sim).mean()
+
+
 def _quaternion_loss(q_pred: torch.Tensor, q_target: torch.Tensor) -> torch.Tensor:
     q_pred   = F.normalize(q_pred, dim=1)
     q_target = F.normalize(q_target.float(), dim=1)
@@ -327,6 +339,7 @@ def _run_vib_epoch(
     weight_cons: float,
     use_gaussian_consistency_loss: bool = False,
     randomize_snr: bool = False,
+    use_cosine_consistency_loss: bool = False,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
     epoch_loss = 0.0
@@ -412,7 +425,11 @@ def _run_vib_epoch(
 
             if weight_cons > 0.0:
                 mu_B, _, _, _ = model(noisy_images_B[sl])
-                L_cons = F.mse_loss(mu, mu_B.detach())
+                if use_cosine_consistency_loss:
+                    L_cons = centered_cosine_consistency_loss(mu, mu_B.detach())
+                else:
+                    L_cons = F.mse_loss(mu, mu_B.detach())
+
                 epoch_cons_loss += L_cons.item()
                 # Warmup weight_cons over first 10 epochs
                 current_weight_cons = weight_cons * min(1.0, epoch / 10.0)
@@ -463,6 +480,7 @@ def pretrain_image_embed(
     weight_cons: float = 0.0,
     use_gaussian_consistency_loss: bool = False,
     randomize_snr: bool = False,
+    use_cosine_consistency_loss: bool = False,
 ):
     print("\n" + "=" * 70)
     print(f"PRETRAINING: {embedding_name}")
@@ -488,9 +506,10 @@ def pretrain_image_embed(
     if weight_cons > 0.0:
         cons_noise_str = "Gaussian" if use_gaussian_consistency_loss else "Config Noise"
         snr_str = "Randomized" if randomize_snr else "Shared"
-        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str}, SNR B: {snr_str})")
+        cons_metric_str = "Centered Cosine" if use_cosine_consistency_loss else "MSE"
+        print(f"  {'cons (' + cons_metric_str + ')':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str}, SNR B: {snr_str})")
     else:
-        print(f"  {'cons (MSE)':10s}: {weight_cons:.2f} (Consistency Loss Disabled)")
+        print(f"  {'cons':10s}: {weight_cons:.2f} (Consistency Loss Disabled)")
 
     # ------------------------------------------------------------------
     # Config and conformational models
@@ -673,6 +692,7 @@ def pretrain_image_embed(
                 weight_cons=weight_cons,
                 use_gaussian_consistency_loss=use_gaussian_consistency_loss,
                 randomize_snr=randomize_snr,
+                use_cosine_consistency_loss=use_cosine_consistency_loss,
             )
 
             scheduler.step()
@@ -844,6 +864,7 @@ def pretrain_image_embed(
         "weight_cons":    weight_cons,
         "use_gaussian_consistency_loss": use_gaussian_consistency_loss,
         "randomize_snr":  randomize_snr,
+        "use_cosine_consistency_loss": use_cosine_consistency_loss,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)
@@ -878,6 +899,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
     parser.add_argument("--use_Gaussian_consistency_loss", action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
     parser.add_argument("--randomize_SNR",                 action="store_true", default=False,  help="Draw a new SNR tensor for consistency loss target set B")
+    parser.add_argument("--use_Cosine_consistency_loss",   action="store_true", default=False,  help="Use mean-centered Cosine loss instead of MSE for consistency loss")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -920,4 +942,5 @@ if __name__ == "__main__":
         weight_cons                   = args.beta_cons,
         use_gaussian_consistency_loss = args.use_Gaussian_consistency_loss,
         randomize_snr                 = args.randomize_SNR,
+        use_cosine_consistency_loss   = args.use_Cosine_consistency_loss,
     )

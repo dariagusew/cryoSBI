@@ -259,7 +259,7 @@ def evaluate_real_validation_score(
             real_exp = batch.repeat_interleave(n_models, dim=0)
             conf_idx = torch.arange(n_models, device=batch.device).repeat(B).unsqueeze(-1)
 
-            log_p = estimator(real_exp, conf_idx)
+            log_p = estimator.forward_inference(real_exp, conf_idx)
             log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1) - math.log(n_models)
             total_log_marginal += log_marginal.sum().item()
 
@@ -552,7 +552,7 @@ def nle_train_no_saving_with_finetuning(
                     real_batch = val_real_tensor[i : i + bs]
 
                     with torch.no_grad():
-                        out = estimator.embedding(real_batch)
+                        out = estimator.embedding.forward_inference(real_batch)
                         z = out[0] if isinstance(out, tuple) else out
                         conf_logits = predictor(z)["conf"]
                         assigned_indices = torch.argmax(conf_logits, dim=-1, keepdim=True)

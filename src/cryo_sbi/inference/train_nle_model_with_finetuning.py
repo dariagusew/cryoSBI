@@ -181,9 +181,7 @@ def load_model(
     estimator = build_nle_flow_model(train_config, image_size)
     full_checkpoint_state = None
 
-    with open(train_config) as f:
-        train_cfg_dict = json.load(f)
-    add_jitter_scale = float(train_cfg_dict.get("ADD_JITTER", 0.0))
+    add_jitter_scale = float(train_config.get("ADD_JITTER", 0.0))
 
     if pretrained_embedding_path is not None:
         print(f"\n{'='*70}")

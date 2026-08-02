@@ -181,6 +181,10 @@ def load_model(
     estimator = build_nle_flow_model(train_config, image_size)
     full_checkpoint_state = None
 
+    with open(train_config) as f:
+        train_cfg_dict = json.load(f)
+    add_jitter = train_cfg_dict.get("ADD_JITTER", False)
+
     if pretrained_embedding_path is not None:
         print(f"\n{'='*70}")
         print("LOADING PRETRAINED EMBEDDING")
@@ -205,6 +209,24 @@ def load_model(
 
             estimator.embedding.load_state_dict(encoder_state, strict=False)
             print("✅ Pretrained embedding loaded successfully")
+
+            # Handle Jitter Configuration
+            if add_jitter:
+                # Check if sigma_jitter was loaded by load_state_dict or exists in pretrained state
+                if getattr(estimator.embedding, "sigma_jitter", None) is not None:
+                    print(f"  ✅ ADD_JITTER is TRUE: Active with mean sigma = {estimator.embedding.sigma_jitter.mean().item():.4f}")
+                elif "sigma_jitter" in pretrained_state or "encoder.sigma_jitter" in pretrained_state:
+                    j_tensor = pretrained_state.get("sigma_jitter", pretrained_state.get("encoder.sigma_jitter"))
+                    estimator.embedding.register_buffer("sigma_jitter", j_tensor)
+                    print(f"  ✅ ADD_JITTER is TRUE: Registered buffer with mean sigma = {j_tensor.mean().item():.4f}")
+                else:
+                    raise ValueError(
+                        "ADD_JITTER is set to true in train_config, but 'sigma_jitter' was not found in the pretrained checkpoint!"
+                    )
+            else:
+                estimator.embedding.sigma_jitter = None
+                print("  ℹ️  ADD_JITTER is FALSE: Latent jittering disabled during flow training.")
+
         except Exception as e:
             print(f"❌ Error loading pretrained embedding: {e}")
             raise
@@ -235,7 +257,6 @@ def load_model(
     print(f"✅ Model in training mode: {estimator.training}")
 
     return estimator, full_checkpoint_state
-
 
 # =======================================================================================
 # VALIDATION SCORE EVALUATOR

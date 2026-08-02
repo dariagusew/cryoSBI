@@ -149,15 +149,23 @@ def cl_nle_train_no_saving_with_finetuning():
         type=str,
         required=False,
         default=None,
-        help="Path to .mrc stack of real images for marginal likelihood regularization.",
+        help="Path to .mrc stack of real images.",
     )
     cl_parser.add_argument(
-        "--beta_real",
+        "--n_real_val",
+        action="store",
+        type=int,
+        required=False,
+        default=3000,
+        help="Number of real images to hold in GPU memory for validation (default: 3000).",
+    )
+    cl_parser.add_argument(
+        "--fraction_finetune_epochs",
         action="store",
         type=float,
         required=False,
         default=0.0,
-        help="Weight of the real-data marginal likelihood regularizer (default: 0.0, disabled).",
+        help="Fraction of final training epochs allocated to real-data fine-tuning (default: 0.0, disabled).",
     )
     cl_parser.add_argument(
         "--use_ema",
@@ -207,7 +215,8 @@ def cl_nle_train_no_saving_with_finetuning():
         use_differential_lr=args.use_differential_lr,
         embedding_lr_factor=args.embedding_lr_factor,
         real_data_mrc=args.real_data_mrc,
-        beta_real=args.beta_real,
+        n_real_val=args.n_real_val,
+        fraction_finetune_epochs=args.fraction_finetune_epochs,
         use_ema=args.use_ema,
         ema_decay=args.ema_decay,
         ema_start_step=args.ema_start_step,

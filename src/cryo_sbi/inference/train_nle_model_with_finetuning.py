@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from tqdm import tqdm
 from lampe.inference import NPELoss
@@ -28,105 +27,77 @@ except ImportError:
 
 
 # =======================================================================================
-# REAL IMAGE LOADER
+# FULL PARAM PREDICTOR
 # =======================================================================================
 
-class RealImageMRCLoader:
+class FullParamPredictor(nn.Module):
     """
-    Memory-efficient loader for real cryo-EM image MRC stacks.
-
-    Uses mrcfile.mmap() to memory-map the file. A cache of `cache_size`
-    randomly sampled images is kept on `device` and served as sequential
-    batches. When the cache is exhausted a fresh random cache is loaded
-    from disk and transferred to device in one shot, amortising both the
-    cost of scattered disk reads and the CPU→device transfer.
-
-    Per-image z-score normalisation is applied vectorized at cache-fill
-    time, so no per-image work is done at batch-serving time.
-
-    Args:
-        mrc_path   (str)          : Path to the MRC stack file.
-        cache_size (int)          : Number of images to hold on device at once.
-        device     (torch.device) : Target device for the cache.
-                                    Defaults to CPU if not specified.
+    Predicts all parameters (X, θ) from z.
     """
+    def __init__(self, embedding_dim: int, n_conformations: int, hidden_dim: int = 128):
+        super().__init__()
+        self.trunk = nn.Sequential(
+            nn.Linear(embedding_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.conf_head    = nn.Linear(hidden_dim, n_conformations)
+        self.orient_head  = nn.Linear(hidden_dim, 4)
+        self.shift_head   = nn.Linear(hidden_dim, 2)
+        self.defocus_head = nn.Linear(hidden_dim, 1)
+        self.bfactor_head = nn.Linear(hidden_dim, 1)
+        self.snr_head     = nn.Linear(hidden_dim, 1)
 
-    def __init__(
-        self,
-        mrc_path: str,
-        cache_size: int = 10240,
-        device: Optional[torch.device] = None,
-    ):
-        if not MRCFILE_AVAILABLE:
-            raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
+    def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        h = self.trunk(z)
+        return {
+            "conf":    self.conf_head(h),
+            "orient":  self.orient_head(h),
+            "shift":   self.shift_head(h),
+            "defocus": self.defocus_head(h).squeeze(-1),
+            "bfactor": self.bfactor_head(h).squeeze(-1),
+            "snr":     self.snr_head(h).squeeze(-1),
+        }
 
-        self.mrc_path   = Path(mrc_path)
-        self.cache_size = cache_size
-        self.device     = device or torch.device("cpu")
 
-        if not self.mrc_path.exists():
-            raise FileNotFoundError(f"MRC file not found: {mrc_path}")
+# =======================================================================================
+# GPU REAL IMAGE PRE-LOADER
+# =======================================================================================
 
-        print(f"  Opening MRC file: {mrc_path}")
-        self.mrc_file = mrcfile.mmap(str(self.mrc_path), mode='r')
-        self.mrc_data = self.mrc_file.data
+def load_real_images_to_gpu(
+    mrc_path: str,
+    n_images: int,
+    device: str,
+) -> torch.Tensor:
+    if not MRCFILE_AVAILABLE:
+        raise ImportError("mrcfile not installed. Install with: pip install mrcfile")
 
-        self.n_images    = self.mrc_data.shape[0]
-        self.image_shape = self.mrc_data.shape[1:]
+    mrc_p = Path(mrc_path)
+    if not mrc_p.exists():
+        raise FileNotFoundError(f"MRC file not found: {mrc_path}")
 
-        h, w        = self.image_shape
-        cache_bytes = cache_size * h * w * 4          # float32
-        cache_gb    = cache_bytes / (1024 ** 3)
+    print(f"  Opening MRC file: {mrc_path}")
+    with mrcfile.mmap(str(mrc_p), mode='r') as mrc:
+        total_available = mrc.data.shape[0]
+        actual_n = min(n_images, total_available)
+        indices = np.random.choice(total_available, size=actual_n, replace=False)
+        indices.sort()
+        imgs_np = np.array(mrc.data[indices], dtype=np.float32)
 
-        print(f"  Loaded MRC          : {self.n_images} images of shape {self.image_shape}")
-        print(f"  Loading method      : mrcfile mmap")
-        print(f"  Cache device        : {self.device}")
-        print(f"  Cache size          : {cache_size:,} images  ({cache_gb:.2f} GB)")
+    real_tensor = torch.from_numpy(imgs_np).to(device)
+    if real_tensor.ndim == 3:
+        real_tensor = real_tensor.unsqueeze(1)
 
-        self.cache     = None
-        self.cache_idx = 0
-        self._fill_cache()
+    mean = real_tensor.mean(dim=(-1, -2), keepdim=True)
+    std  = real_tensor.std(dim=(-1, -2), keepdim=True) + 1e-8
+    real_tensor = (real_tensor - mean) / std
 
-    def _fill_cache(self):
-        """
-        Sample cache_size random images from disk, transfer to device in one
-        contiguous copy, then z-score normalise vectorized using torch operations
-        directly on device.
-        """
-        indices  = np.random.randint(0, self.n_images, size=self.cache_size)
-        cache_np = np.array(self.mrc_data[indices], dtype=np.float32)  # (cache_size, H, W)
-    
-        # One single CPU → device transfer per cache refill
-        cache = torch.from_numpy(cache_np).to(self.device)
-    
-        # Per-image z-score normalisation — fully vectorized torch ops on device
-        mean = cache.mean(dim=(1, 2), keepdim=True)   # (cache_size, 1, 1)
-        std  = cache.std( dim=(1, 2), keepdim=True) + 1e-8
-        self.cache     = (cache - mean) / std
-        self.cache_idx = 0
-   
-    def get_batch(self, batch_size: int) -> torch.Tensor:
-        """
-        Return batch_size images from the on-device cache.
-        Refills the cache automatically when exhausted.
+    mem_gb = (real_tensor.element_size() * real_tensor.nelement()) / (1024 ** 3)
+    print(f"  Loaded MRC          : {actual_n} images of shape {tuple(real_tensor.shape[1:])}")
+    print(f"  Allocated on GPU    : {device} ({mem_gb:.2f} GB)")
 
-        Args:
-            batch_size (int): Number of images to retrieve.
-
-        Returns:
-            torch.Tensor: shape (batch_size, H, W), dtype float32,
-                          already on self.device.
-        """
-        if self.cache_idx + batch_size > self.cache_size:
-            self._fill_cache()
-
-        batch = self.cache[self.cache_idx : self.cache_idx + batch_size]
-        self.cache_idx += batch_size
-        return batch
-
-    def __del__(self):
-        if hasattr(self, "mrc_file"):
-            self.mrc_file.close()
+    return real_tensor
 
 
 # =======================================================================================
@@ -204,10 +175,11 @@ def load_model(
     pretrained_embedding_path: Optional[str] = None,
     freeze_embedding: bool = False,
     image_size: int = 128,
-) -> torch.nn.Module:
+) -> Tuple[torch.nn.Module, Optional[Dict[str, torch.Tensor]]]:
 
     check_train_params(train_config)
     estimator = build_nle_flow_model(train_config, image_size)
+    full_checkpoint_state = None
 
     if pretrained_embedding_path is not None:
         print(f"\n{'='*70}")
@@ -217,7 +189,21 @@ def load_model(
 
         try:
             pretrained_state = torch.load(pretrained_embedding_path, map_location='cpu')
-            estimator.embedding.load_state_dict(pretrained_state, strict=False)
+            full_checkpoint_state = pretrained_state
+
+            if any(k.startswith("encoder.") for k in pretrained_state.keys()):
+                encoder_state = {
+                    k.replace("encoder.", ""): v
+                    for k, v in pretrained_state.items()
+                    if k.startswith("encoder.")
+                }
+            else:
+                encoder_state = {
+                    k: v for k, v in pretrained_state.items()
+                    if not k.startswith("predictor.")
+                }
+
+            estimator.embedding.load_state_dict(encoder_state, strict=False)
             print("✅ Pretrained embedding loaded successfully")
         except Exception as e:
             print(f"❌ Error loading pretrained embedding: {e}")
@@ -248,7 +234,37 @@ def load_model(
     estimator.train()
     print(f"✅ Model in training mode: {estimator.training}")
 
-    return estimator
+    return estimator, full_checkpoint_state
+
+
+# =======================================================================================
+# VALIDATION SCORE EVALUATOR
+# =======================================================================================
+
+def evaluate_real_validation_score(
+    estimator: nn.Module,
+    real_images: torch.Tensor,
+    n_models: int,
+    batch_size: int,
+) -> float:
+    estimator.eval()
+    total_log_marginal = 0.0
+    n_images = len(real_images)
+
+    with torch.no_grad():
+        for i in range(0, n_images, batch_size):
+            batch = real_images[i : i + batch_size]
+            B = batch.shape[0]
+
+            real_exp = batch.repeat_interleave(n_models, dim=0)
+            conf_idx = torch.arange(n_models, device=batch.device).repeat(B).unsqueeze(-1)
+
+            log_p = estimator(real_exp, conf_idx)
+            log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1) - math.log(n_models)
+            total_log_marginal += log_marginal.sum().item()
+
+    estimator.train()
+    return total_log_marginal / n_images
 
 
 # =======================================================================================
@@ -274,7 +290,8 @@ def nle_train_no_saving_with_finetuning(
     use_differential_lr: bool = False,
     embedding_lr_factor: float = 0.01,
     real_data_mrc: Optional[str] = None,
-    beta_real: float = 0.0,
+    n_real_val: int = 3000,
+    fraction_finetune_epochs: float = 0.0,
     use_ema: bool = False,
     ema_decay: float = 0.999,
     ema_start_step: int = 0,
@@ -287,9 +304,6 @@ def nle_train_no_saving_with_finetuning(
 
     assert simulation_batch_size >= train_config["BATCH_SIZE"]
     assert simulation_batch_size % train_config["BATCH_SIZE"] == 0
-
-    if beta_real > 0 and real_data_mrc is None:
-        raise ValueError("real_data_mrc must be provided when beta_real > 0.")
 
     if image_config["MODEL_FILE"].endswith("npy"):
         models = (
@@ -311,7 +325,18 @@ def nle_train_no_saving_with_finetuning(
 
     simulation_param = create_simulation_param(image_config, models, device=device)
 
-    estimator = load_model(
+    # ------------------------------------------------------------------
+    # Pre-load real images to GPU if MRC provided
+    # ------------------------------------------------------------------
+    val_real_tensor: Optional[torch.Tensor] = None
+    if real_data_mrc is not None:
+        val_real_tensor = load_real_images_to_gpu(
+            mrc_path=real_data_mrc,
+            n_images=n_real_val,
+            device=device,
+        )
+
+    estimator, pretrained_state_dict = load_model(
         train_config,
         model_state_dict,
         device,
@@ -322,22 +347,49 @@ def nle_train_no_saving_with_finetuning(
     )
 
     # ------------------------------------------------------------------
-    # Real data loader for marginal likelihood regularization
+    # Predictor check for fine-tuning phase
     # ------------------------------------------------------------------
-    real_data_loader = None
+    finetune_start_epoch = epochs + 1
+    predictor: Optional[FullParamPredictor] = None
 
-    if beta_real > 0:
+    if fraction_finetune_epochs > 0.0:
+        if real_data_mrc is None or val_real_tensor is None:
+            raise ValueError("real_data_mrc must be provided when fraction_finetune_epochs > 0.")
+
+        if pretrained_embedding_path is None or pretrained_state_dict is None:
+            raise ValueError("Fine-tuning requires pretrained_embedding_path to be specified.")
+
+        predictor_keys = [k for k in pretrained_state_dict.keys() if k.startswith("predictor.")]
+        if not predictor_keys:
+            raise ValueError(
+                f"Pretrained checkpoint at '{pretrained_embedding_path}' does not contain predictor weights "
+                f"(e.g. 'predictor.conf_head...'). A full model checkpoint is required for fine-tuning."
+            )
+
         print(f"\n{'='*70}")
-        print("SETTING UP REAL DATA REGULARIZATION")
+        print("SETTING UP FINE-TUNING PHASE")
         print(f"{'='*70}")
-        print(f"  Real data MRC:  {real_data_mrc}")
-        print(f"  beta_real:      {beta_real}")
-        print(f"{'='*70}\n")
+        finetune_start_epoch = int(epochs * (1.0 - fraction_finetune_epochs))
+        print(f"  Fraction fine-tune epochs: {fraction_finetune_epochs:.2f}")
+        print(f"  Fine-tuning active from epoch {finetune_start_epoch} to {epochs - 1}")
 
-        real_data_loader = RealImageMRCLoader(
-            real_data_mrc,
-            device=torch.device(device),
-        )
+        predictor_state = {
+            k.replace("predictor.", ""): v
+            for k, v in pretrained_state_dict.items()
+            if k.startswith("predictor.")
+        }
+
+        emb_dim = predictor_state["trunk.0.weight"].shape[1]
+        n_conformations = predictor_state["conf_head.weight"].shape[0]
+
+        predictor = FullParamPredictor(embedding_dim=emb_dim, n_conformations=n_conformations).to(device)
+        predictor.load_state_dict(predictor_state)
+        predictor.eval()
+        for p in predictor.parameters():
+            p.requires_grad = False
+
+        print(f"  ✅ Predictor head successfully loaded (emb_dim={emb_dim}, n_conformations={n_conformations})")
+        print(f"{'='*70}\n")
 
     loss = NPELoss(estimator)
 
@@ -450,124 +502,141 @@ def nle_train_no_saving_with_finetuning(
         epoch: int,
         lr: float,
         mean_total: float,
-        mean_synthetic: float,
-        mean_real: Optional[float],
+        val_score: Optional[float],
+        is_finetuning: bool,
     ) -> None:
         with open(log_file, 'a') as f:
             f.write(f"\n{'='*60}\n")
-            f.write(f"Epoch {epoch:>6d} | LR: {lr:.6e}\n")
-            f.write(f"  Total loss:     {mean_total:.6f}\n")
-            f.write(f"  Synthetic loss: {mean_synthetic:.6f}\n")
-            if mean_real is not None:
-                f.write(f"  Real loss:      {mean_real:.6f}\n")
+            f.write(f"Epoch {epoch:>6d} | Mode: {'FINE-TUNING' if is_finetuning else 'STANDARD'} | LR: {lr:.6e}\n")
+            f.write(f"  Train loss:        {mean_total:.6f}\n")
+            if val_score is not None:
+                f.write(f"  Val marginal score: {val_score:.6f}\n")
             f.write(f"{'='*60}\n")
 
     # Initialise log file with a header
     with open(log_file, 'w') as f:
         f.write("="*60 + "\n")
         f.write("TRAINING LOG\n")
-        f.write(f"  epochs:            {epochs}\n")
-        f.write(f"  beta_real:         {beta_real}\n")
-        f.write(f"  real_data_mrc:     {real_data_mrc}\n")
-        f.write(f"  freeze_embedding:  {freeze_embedding}\n")
-        f.write(f"  use_ema:           {use_ema}\n")
+        f.write(f"  epochs:                   {epochs}\n")
+        f.write(f"  real_data_mrc:            {real_data_mrc}\n")
+        f.write(f"  fraction_finetune_epochs: {fraction_finetune_epochs}\n")
+        f.write(f"  finetune_start_epoch:     {finetune_start_epoch}\n")
+        f.write(f"  freeze_embedding:         {freeze_embedding}\n")
+        f.write(f"  use_ema:                  {use_ema}\n")
         f.write("="*60 + "\n")
 
     # ------------------------------------------------------------------
     # Loss history
     # ------------------------------------------------------------------
     history: Dict[str, List] = {
-        'epoch':           [],
-        'total_loss':      [],
-        'synthetic_loss':  [],
-        'real_loss':       [],   # None entries when beta_real == 0
-        'lr':              [],
+        'epoch':               [],
+        'train_loss':          [],
+        'val_marginal_score':  [],
+        'lr':                  [],
     }
 
     print("Training neural network:")
     estimator.train()
+    bs = train_config["BATCH_SIZE"]
+
     with tqdm(range(epochs), unit="epoch") as tq:
         for epoch in tq:
             losses = []
-            synthetic_losses_epoch: List[float] = []
-            real_losses_epoch: List[float] = []
-            tq.set_description("Training")
+            is_finetuning_epoch = epoch >= finetune_start_epoch
 
-            for parameters in islice(prior_loader, n_batches_per_epoch):
-                (
-                    indices, quaternions, shift, defocus,
-                    b_factor, amp, snr,
-                ) = parameters
+            if is_finetuning_epoch:
+                tq.set_description("Fine-tuning")
+                n_real_imgs = len(val_real_tensor)
 
-                noisy_images, _ = cryo_em_simulator(
-                    models,
-                    indices.to(device, non_blocking=True),
-                    quaternions.to(device, non_blocking=True),
-                    shift.to(device, non_blocking=True),
-                    defocus.to(device, non_blocking=True),
-                    b_factor.to(device, non_blocking=True),
-                    amp.to(device, non_blocking=True),
-                    snr.to(device, non_blocking=True),
-                    simulation_param,
-                    simulation_param["noise"]
-                )
+                for i in range(0, n_real_imgs, bs):
+                    real_batch = val_real_tensor[i : i + bs]
 
-                for _indices, _images in zip(
-                    indices.split(train_config["BATCH_SIZE"]),
-                    noisy_images.split(train_config["BATCH_SIZE"]),
-                ):
-                    synthetic_nll = loss(
-                        _images.to(device, non_blocking=True),
-                        _indices.to(device, non_blocking=True)
-                    )
-                    synthetic_losses_epoch.append(synthetic_nll.item())
+                    with torch.no_grad():
+                        out = estimator.embedding(real_batch)
+                        z = out[0] if isinstance(out, tuple) else out
+                        conf_logits = predictor(z)["conf"]
+                        assigned_indices = torch.argmax(conf_logits, dim=-1, keepdim=True)
 
-                    if beta_real > 0 and real_data_loader is not None:
-                        real_batch = real_data_loader.get_batch(train_config["BATCH_SIZE"])
-                        B = real_batch.shape[0]
+                    finetune_nll = loss(real_batch, assigned_indices)
+                    losses.append(step(finetune_nll))
 
-                        # each real image repeated n_models times: [B*n_models, H, W]
-                        real_exp = real_batch.repeat_interleave(n_models, dim=0)
-                        # conformation indices 0..n_models-1 for each image: [B*n_models, 1]
-                        conf_idx = torch.arange(n_models, device=device).repeat(B).unsqueeze(-1)
-
-                        # log p(d_real | X_i) for all i and all images in batch
-                        log_p = estimator(real_exp, conf_idx)
-                        # log sum_i p(d_real | X_i) per image, then mean over batch
-                        log_marginal = torch.logsumexp(log_p.reshape(B, n_models), dim=1) - math.log(n_models)
-                        real_reg = -log_marginal.mean()
-                        real_losses_epoch.append(real_reg.item())
-
-                        total_loss = synthetic_nll + beta_real * real_reg
-                    else:
-                        total_loss = synthetic_nll
-
-                    losses.append(step(total_loss))
                     if ema is not None:
                         ema.update(estimator)
+
+            else:
+                tq.set_description("Training")
+
+                for parameters in islice(prior_loader, n_batches_per_epoch):
+                    (
+                        indices, quaternions, shift, defocus,
+                        b_factor, amp, snr,
+                    ) = parameters
+
+                    noisy_images, _ = cryo_em_simulator(
+                        models,
+                        indices.to(device, non_blocking=True),
+                        quaternions.to(device, non_blocking=True),
+                        shift.to(device, non_blocking=True),
+                        defocus.to(device, non_blocking=True),
+                        b_factor.to(device, non_blocking=True),
+                        amp.to(device, non_blocking=True),
+                        snr.to(device, non_blocking=True),
+                        simulation_param,
+                        simulation_param["noise"]
+                    )
+
+                    for _indices, _images in zip(
+                        indices.split(bs),
+                        noisy_images.split(bs),
+                    ):
+                        synthetic_nll = loss(
+                            _images.to(device, non_blocking=True),
+                            _indices.to(device, non_blocking=True)
+                        )
+                        losses.append(step(synthetic_nll))
+
+                        if ema is not None:
+                            ema.update(estimator)
 
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()
             mean_loss.append(mean_train_loss)
 
-            mean_synthetic = float(np.mean(synthetic_losses_epoch))
-            mean_real = float(np.mean(real_losses_epoch)) if real_losses_epoch else None
             current_lr = scheduler.get_last_lr()[0]
+
+            # ----------------------------------------------------------
+            # Validation Score Calculation
+            # ----------------------------------------------------------
+            val_score: Optional[float] = None
+            if (epoch % saving_frequency == 0) or (epoch == epochs - 1) or (epoch == 0):
+                if val_real_tensor is not None:
+                    if ema is not None:
+                        ema.apply_shadow(estimator)
+
+                    val_score = evaluate_real_validation_score(
+                        estimator=estimator,
+                        real_images=val_real_tensor,
+                        n_models=n_models,
+                        batch_size=bs,
+                    )
+
+                    if ema is not None:
+                        ema.restore(estimator)
+
+                    print(f"\n  Epoch {epoch:3d} Validation Marginal Score: {val_score:.6f}")
 
             # Update history
             history['epoch'].append(epoch)
-            history['total_loss'].append(mean_train_loss)
-            history['synthetic_loss'].append(mean_synthetic)
-            history['real_loss'].append(mean_real)
+            history['train_loss'].append(mean_train_loss)
+            history['val_marginal_score'].append(val_score)
             history['lr'].append(current_lr)
 
             postfix_dict = {
                 'loss': mean_train_loss,
-                'syn':  mean_synthetic,
                 'lr':   current_lr,
             }
-            if mean_real is not None:
-                postfix_dict['real'] = mean_real
+            if val_score is not None:
+                postfix_dict['val_score'] = val_score
             if ema is not None:
                 postfix_dict['ema_updates'] = ema.num_updates
 
@@ -575,7 +644,7 @@ def nle_train_no_saving_with_finetuning(
 
             if epoch % saving_frequency == 0:
                 _save_checkpoint(estimator_file + f"_epoch={epoch}")
-                _write_log_entry(epoch, current_lr, mean_train_loss, mean_synthetic, mean_real)
+                _write_log_entry(epoch, current_lr, mean_train_loss, val_score, is_finetuning_epoch)
 
             scheduler.step()
 

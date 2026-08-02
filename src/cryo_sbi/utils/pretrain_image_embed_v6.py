@@ -807,16 +807,6 @@ def pretrain_image_embed(
         f_cov_z, f_med_z, f_p90_z = compute_manifold_overlap(f_z_synth, f_mu_real, k=val_k)
         f_cov_mu, f_med_mu, f_p90_mu = compute_manifold_overlap(f_mu_synth, f_mu_real, k=val_k)
 
-        # ------------------------------------------------------------------
-        # Compute and register sigma_jitter buffer for downstream flow training
-        # ------------------------------------------------------------------
-        sigma_emb = f_mu_synth.std(dim=0)
-        norm_emb  = torch.norm(sigma_emb, p=2)
-        c         = (0.5 * f_p90_mu) / (norm_emb + 1e-8)
-        sigma_jitter = c * sigma_emb
-        # Register on encoder so it is saved in encoder state_dict
-        model.encoder.register_buffer("sigma_jitter", sigma_jitter)
-
         print(f"\n  Final Validation (Sim2Real Overlap):")
         print(f"    Noise-to-Signal Ratio:    {f_nsr:.2f}%")
         print(f"    Using z_synth (stochastic):")
@@ -825,7 +815,25 @@ def pretrain_image_embed(
         print(f"    Using mu_synth (deterministic):")
         print(f"      Coverage (% in manifold): {f_cov_mu:.2f}%")
         print(f"      Distance (Med / p90):     {f_med_mu:.4f} / {f_p90_mu:.4f}")
-        print(f"  ✅ Saved sigma_jitter buffer to encoder checkpoint (mean={sigma_jitter.mean().item():.4f})")
+
+    # ------------------------------------------------------------------
+    # Save dimension-wise embedding standard deviation for downstream jittering
+    # ------------------------------------------------------------------
+    if val_real_tensor is not None and val_synth_tensor is not None:
+        # Use full validation set for stable std estimate
+        sigma_emb = f_mu_synth.std(dim=0)
+    elif last_mu is not None:
+        # Fallback to last mini-batch if no validation set was supplied
+        sigma_emb = last_mu.std(dim=0)
+    else:
+        sigma_emb = None
+
+    if sigma_emb is not None:
+        model.encoder.sigma_emb.copy_(sigma_emb)
+        print(f"  ✅ Saved 'sigma_emb' buffer to encoder checkpoint (mean={sigma_emb.mean().item():.4f})")
+
+    # Save encoder state dict (includes 'sigma_emb' and 'sigma_jitter' buffers)
+    torch.save(model.encoder.state_dict(), save_path)
 
     print("\nQuality assessment:")
 

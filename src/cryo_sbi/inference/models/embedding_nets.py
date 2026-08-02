@@ -565,16 +565,20 @@ class ConvEncoder(nn.Module):
         return x.view(x.size(0), -1)  # flatten
 
 
-
 @add_embedding("SPATIAL_CRYO")
 class SpatialCryoEncoder(nn.Module):
-    def __init__(self, output_dimension: int, D: int = 128, sigma_jitter: Optional[torch.Tensor] = None):
+    """
+    Shared-trunk encoder for cryo-EM images.
+    """
+
+    def __init__(self, output_dimension: int, D: int = 128):
         super().__init__()
         self.D = D
         self.output_dimension = output_dimension
 
-        # Register buffer so load_state_dict recognizes and restores 'sigma_jitter'
-        self.register_buffer("sigma_jitter", sigma_jitter)
+        # Buffers for latent jittering
+        self.register_buffer("sigma_emb", torch.zeros(output_dimension))
+        self.register_buffer("jitter_scale", torch.tensor(0.0))
 
         ndf = 16
         n_stages = int(math.log2(D)) - 2
@@ -641,13 +645,13 @@ class SpatialCryoEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Flow Training Interface - deterministic or jittered if sigma_jitter is set during training.
+        Flow Training Interface - deterministic or jittered if jitter_scale > 0 during training.
         Returns: mu or z [B, output_dim]
         """
         h   = self.trunk(x)
         mu  = self.mu_head(h)
-        if self.training and getattr(self, "sigma_jitter", None) is not None:
-            return mu + torch.randn_like(mu) * self.sigma_jitter
+        if self.training and self.jitter_scale > 0:
+            return mu + torch.randn_like(mu) * (self.jitter_scale * self.sigma_emb)
         return mu
 
 

@@ -183,7 +183,7 @@ def load_model(
 
     with open(train_config) as f:
         train_cfg_dict = json.load(f)
-    add_jitter = train_cfg_dict.get("ADD_JITTER", False)
+    add_jitter_scale = float(train_cfg_dict.get("ADD_JITTER", 0.0))
 
     if pretrained_embedding_path is not None:
         print(f"\n{'='*70}")
@@ -210,22 +210,21 @@ def load_model(
             estimator.embedding.load_state_dict(encoder_state, strict=False)
             print("✅ Pretrained embedding loaded successfully")
 
-            # Handle Jitter Configuration
-            if add_jitter:
-                # Check if sigma_jitter was loaded by load_state_dict or exists in pretrained state
-                if getattr(estimator.embedding, "sigma_jitter", None) is not None:
-                    print(f"  ✅ ADD_JITTER is TRUE: Active with mean sigma = {estimator.embedding.sigma_jitter.mean().item():.4f}")
-                elif "sigma_jitter" in pretrained_state or "encoder.sigma_jitter" in pretrained_state:
-                    j_tensor = pretrained_state.get("sigma_jitter", pretrained_state.get("encoder.sigma_jitter"))
-                    estimator.embedding.register_buffer("sigma_jitter", j_tensor)
-                    print(f"  ✅ ADD_JITTER is TRUE: Registered buffer with mean sigma = {j_tensor.mean().item():.4f}")
+            # Configure Latent Jitter Scale
+            if add_jitter_scale > 0.0:
+                sigma_emb = getattr(estimator.embedding, "sigma_emb", None)
+                if sigma_emb is not None and sigma_emb.abs().sum() > 0:
+                    estimator.embedding.jitter_scale.fill_(add_jitter_scale)
+                    effective_mean_sigma = (add_jitter_scale * sigma_emb).mean().item()
+                    print(f"  ✅ ADD_JITTER = {add_jitter_scale}: Latent jitter active (effective mean sigma = {effective_mean_sigma:.4f})")
                 else:
                     raise ValueError(
-                        "ADD_JITTER is set to true in train_config, but 'sigma_jitter' was not found in the pretrained checkpoint!"
+                        f"ADD_JITTER = {add_jitter_scale} requested in train_config, but 'sigma_emb' buffer was not found or is zero in pretrained encoder checkpoint!"
                     )
             else:
-                estimator.embedding.sigma_jitter = None
-                print("  ℹ️  ADD_JITTER is FALSE: Latent jittering disabled during flow training.")
+                if hasattr(estimator.embedding, "jitter_scale"):
+                    estimator.embedding.jitter_scale.zero_()
+                print("  ℹ️  ADD_JITTER is 0.0: Latent jittering disabled during flow training.")
 
         except Exception as e:
             print(f"❌ Error loading pretrained embedding: {e}")

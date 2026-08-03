@@ -564,57 +564,64 @@ def nle_train_no_saving_with_finetuning(
 
             if is_finetuning_epoch:
                 tq.set_description("Fine-tuning")
-                n_real_imgs = len(val_real_tensor)
-
-                for i in range(0, n_real_imgs, bs):
-                    real_batch = val_real_tensor[i : i + bs]
-
-                    with torch.no_grad():
-                        out = estimator.embedding.forward_inference(real_batch)
-                        z = out[0] if isinstance(out, tuple) else out
-                        conf_logits = predictor(z)["conf"]
-                        assigned_indices = torch.argmax(conf_logits, dim=-1, keepdim=True)
-
-                    finetune_nll = loss(real_batch, assigned_indices)
-                    losses.append(step(finetune_nll))
-
-                    if ema is not None:
-                        ema.update(estimator)
-
             else:
                 tq.set_description("Training")
 
-                for parameters in islice(prior_loader, n_batches_per_epoch):
-                    (
-                        indices, quaternions, shift, defocus,
-                        b_factor, amp, snr,
-                    ) = parameters
+            for parameters in islice(prior_loader, n_batches_per_epoch):
+                (
+                    indices, quaternions, shift, defocus,
+                    b_factor, amp, snr,
+                ) = parameters
 
-                    noisy_images, _ = cryo_em_simulator(
-                        models,
-                        indices.to(device, non_blocking=True),
-                        quaternions.to(device, non_blocking=True),
-                        shift.to(device, non_blocking=True),
-                        defocus.to(device, non_blocking=True),
-                        b_factor.to(device, non_blocking=True),
-                        amp.to(device, non_blocking=True),
-                        snr.to(device, non_blocking=True),
-                        simulation_param,
-                        simulation_param["noise"]
-                    )
+                noisy_images, _ = cryo_em_simulator(
+                    models,
+                    indices.to(device, non_blocking=True),
+                    quaternions.to(device, non_blocking=True),
+                    shift.to(device, non_blocking=True),
+                    defocus.to(device, non_blocking=True),
+                    b_factor.to(device, non_blocking=True),
+                    amp.to(device, non_blocking=True),
+                    snr.to(device, non_blocking=True),
+                    simulation_param,
+                    simulation_param["noise"]
+                )
 
-                    for _indices, _images in zip(
-                        indices.split(bs),
-                        noisy_images.split(bs),
-                    ):
-                        synthetic_nll = loss(
-                            _images.to(device, non_blocking=True),
-                            _indices.to(device, non_blocking=True)
-                        )
-                        losses.append(step(synthetic_nll))
+                for _indices, _images in zip(
+                    indices.split(bs),
+                    noisy_images.split(bs),
+                ):
+                    current_sub_bs = _images.shape[0]
 
-                        if ema is not None:
-                            ema.update(estimator)
+                    if is_finetuning_epoch:
+                        n_synth = current_sub_bs // 2
+                        n_real = current_sub_bs - n_synth
+
+                        synth_imgs = _images[:n_synth].to(device, non_blocking=True)
+                        synth_inds = _indices[:n_synth].to(device, non_blocking=True)
+
+                        real_rand_idx = torch.randint(0, len(val_real_tensor), (n_real,), device=device)
+                        real_imgs = val_real_tensor[real_rand_idx]
+
+                        with torch.no_grad():
+                            out = estimator.embedding.forward_inference(real_imgs)
+                            z = out[0] if isinstance(out, tuple) else out
+                            conf_logits = predictor(z)["conf"]
+                            real_inds = torch.argmax(conf_logits, dim=-1)
+
+                        batch_imgs = torch.cat([synth_imgs, real_imgs], dim=0)
+                        batch_inds = torch.cat([synth_inds, real_inds], dim=0)
+
+                        batch_nll = loss(batch_imgs, batch_inds)
+                    else:
+                        batch_imgs = _images.to(device, non_blocking=True)
+                        batch_inds = _indices.to(device, non_blocking=True)
+
+                        batch_nll = loss(batch_imgs, batch_inds)
+
+                    losses.append(step(batch_nll))
+
+                    if ema is not None:
+                        ema.update(estimator)
 
             losses = torch.stack(losses)
             mean_train_loss = losses.mean().item()

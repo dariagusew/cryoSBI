@@ -5,6 +5,7 @@ import zuko
 import lampe
 import cryo_sbi.inference.models.estimator_models as estimator_models
 from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
+import zuko.flows
 
 
 class NSFFix:
@@ -12,63 +13,59 @@ class NSFFix:
     Wrapper around zuko.flows.NSF that forces spline bin widths to be
     uniformly spaced on a regular grid across [-B, B].
     """
-    def __new__(cls, features: int, context: int = 0, bins: int = 8, verbose: bool = True, **kwargs):
+    def __new__(
+        cls,
+        features: int,
+        context: int = 0,
+        bins: int = 8,
+        verbose: bool = True,
+        **kwargs,
+    ):
         if verbose:
-            print(f"\n[NSFFix Debug] Initializing NSF-FIX:")
-            print(f"  ├─ features: {features}")
-            print(f"  ├─ context:  {context}")
-            print(f"  ├─ bins:     {bins}")
-            print(f"  └─ kwargs:   {kwargs}")
+            print(f"\n[NSFFix] Initializing NSF-FIX:")
+            print(f"  features: {features}")
+            print(f"  context:  {context}")
+            print(f"  bins:     {bins}")
 
-        # 1. Instantiate standard zuko NSF flow
-        flow = zuko.flows.NSF(features=features, context=context, bins=bins, **kwargs)
-
-        # State container for one-time runtime debug printing
-        debug_state = {"triggered": False}
+        flow = zuko.flows.NSF(
+            features=features,
+            context=context,
+            bins=bins,
+            **kwargs,
+        )
 
         params_per_feature = 3 * bins - 1
+        debug_state = {"triggered": False}
 
-        # 2. Function to modify hypernetwork output tensor across ALL features
-        def patch_hyper_forward(original_forward, hyper_module):
-            def wrapped_forward(*args, **kwargs_inner):
-                output = original_forward(*args, **kwargs_inner)
-
-                # Reshape from (..., features * params_per_feature) -> (..., features, params_per_feature)
+        def make_hook():
+            def hook(module, input, output):
                 orig_shape = output.shape
-                output_3d = output.view(*orig_shape[:-1], features, params_per_feature)
+                output_3d = output.reshape(
+                    *orig_shape[:-1], features, params_per_feature
+                ).clone()
 
                 if verbose and not debug_state["triggered"]:
-                    print(f"\n[NSFFix Debug] 🚀 Intercepting Hypernetwork Forward:")
-                    print(f"  ├─ Original Flat Shape: {orig_shape}")
-                    print(f"  ├─ Reshaped 3D Shape:   {output_3d.shape}")
-                    print(f"  ├─ Width Logits Before (All {features} features): min={output_3d[..., :bins].min().item():.4f}, max={output_3d[..., :bins].max().item():.4f}")
-
-                # ZERO OUT WIDTH LOGITS FOR ALL FEATURES SIMULTANEOUSLY
-                output_3d[..., :bins] = 0.0
-
-                if verbose and not debug_state["triggered"]:
-                    print(f"  └─ Width Logits After  (All {features} features): min={output_3d[..., :bins].min().item():.4f}, max={output_3d[..., :bins].max().item():.4f} (Uniform Grid Enforced Across ALL Features ✅)\n")
+                    print(
+                        f"\n[NSFFix] Intercepting hyper output "
+                        f"{tuple(orig_shape)}, freezing first {bins} width logits"
+                    )
                     debug_state["triggered"] = True
 
-                # Return in original flat shape expected by zuko
-                return output_3d.view(orig_shape)
+                # Zero width logits → softmax → uniform widths
+                output_3d[..., :bins] = 0.0
 
-            return wrapped_forward
+                return output_3d.reshape(orig_shape)
 
-        # 3. Intercept `forward` on all hypernetworks
+            return hook
+
         hook_count = 0
-        hooked_names = []
-
         for name, module in flow.named_modules():
             if hasattr(module, "hyper") and isinstance(module.hyper, nn.Module):
-                module.hyper.forward = patch_hyper_forward(module.hyper.forward, module.hyper)
-                hooked_names.append(f"{name}.hyper ({module.hyper.__class__.__name__})")
+                module.hyper.register_forward_hook(make_hook())
                 hook_count += 1
 
         if verbose:
-            print(f"[NSFFix Debug] Successfully patched {hook_count} hypernetwork forward method(s):")
-            for h_name in hooked_names:
-                print(f"  └─ {h_name}")
+            print(f"[NSFFix] Patched {hook_count} hypernetwork(s)")
 
         return flow
 

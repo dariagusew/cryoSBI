@@ -161,8 +161,7 @@ class NLEWithEmbedding(nn.Module):
         output_embedding_dim: int,
         num_transforms: int = 4,
         num_hidden_flow: int = 2,
-        hidden_flow_dim: int = 128,
-        bins: int = 8,
+        hidden_flow_dim: int = 64,
         flow: nn.Module = zuko.flows.NSF,
         num_models: int = 1,
         **kwargs,
@@ -191,10 +190,7 @@ class NLEWithEmbedding(nn.Module):
             1,
             transforms=num_transforms,
             build=flow,
-            hidden_features=[*[hidden_flow_dim] * num_hidden_flow, 128, 64],
-            # consider this to avoid overfitting synthetic data
-            #hidden_features = [hidden_flow_dim] * num_hidden_flow
-            bins=bins,
+            hidden_features = [hidden_flow_dim] * num_hidden_flow,
             **kwargs,
         )
 

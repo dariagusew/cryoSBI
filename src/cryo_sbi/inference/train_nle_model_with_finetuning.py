@@ -86,8 +86,6 @@ def load_real_images_to_gpu(
         imgs_np = np.array(mrc.data[indices], dtype=np.float32)
 
     real_tensor = torch.from_numpy(imgs_np).to(device)
-    if real_tensor.ndim == 3:
-        real_tensor = real_tensor.unsqueeze(1)
 
     mean = real_tensor.mean(dim=(-1, -2), keepdim=True)
     std  = real_tensor.std(dim=(-1, -2), keepdim=True) + 1e-8

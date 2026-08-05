@@ -130,7 +130,7 @@ def estimate_conformations(args):
 
     print(f"Loading checkpoint weights into full model...")
     state_dict = torch.load(args.full_model_ckpt, map_location=device)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     print("✅ Model successfully loaded in eval mode.\n")
 

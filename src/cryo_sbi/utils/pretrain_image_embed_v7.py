@@ -569,8 +569,7 @@ def pretrain_image_embed(
     use_cosine_consistency_loss: bool = False,
 ):
     print("\n" + "=" * 70)
-    print(f"PRETRAINING: {embedding_name}")
-    print("Training mode: Stage 1 only on synthetic images")
+    print(f"TRAINING: {embedding_name}")
 
     if resume_from:
         print(f"Resuming from: {resume_from}")
@@ -712,7 +711,7 @@ def pretrain_image_embed(
     # Stage 1: VIB pretraining on synthetic images
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
-    print("STAGE 1: VIB PRETRAINING ON SYNTHETIC IMAGES")
+    print("VIB and NRE TRAINING ON SYNTHETIC IMAGES")
     print("=" * 70)
 
     model.train()
@@ -855,10 +854,7 @@ def pretrain_image_embed(
                 ep_suffix = save_path_obj.suffix
                 
                 ep_enc_path = save_path_obj.with_name(f"{ep_stem}_epoch{epoch:03d}{ep_suffix}")
-                torch.save(model.encoder.state_dict(), ep_enc_path)
-                
-                ep_full_path = save_path_obj.with_name(f"{ep_stem}_full_model_epoch{epoch:03d}{ep_suffix}")
-                torch.save(model.state_dict(), ep_full_path)
+                torch.save(model.state_dict(), ep_enc_path)
                 print(f"    Saved Checkpoints -> {ep_enc_path.name}")
 
     # ------------------------------------------------------------------
@@ -911,25 +907,6 @@ def pretrain_image_embed(
         print(f"      Coverage (% in manifold): {f_cov_mu:.2f}%")
         print(f"      Distance (Med / p90):     {f_med_mu:.4f} / {f_p90_mu:.4f}")
 
-    # ------------------------------------------------------------------
-    # Save dimension-wise embedding standard deviation for downstream jittering
-    # ------------------------------------------------------------------
-    if val_real_tensor is not None and val_synth_tensor is not None:
-        # Use full validation set for stable std estimate
-        sigma_emb = f_mu_synth.std(dim=0)
-    elif last_mu is not None:
-        # Fallback to last mini-batch if no validation set was supplied
-        sigma_emb = last_mu.std(dim=0)
-    else:
-        sigma_emb = None
-
-    if sigma_emb is not None:
-        model.encoder.sigma_emb.copy_(sigma_emb)
-        print(f"  ✅ Saved 'sigma_emb' buffer to encoder checkpoint (mean={sigma_emb.mean().item():.4f})")
-
-    # Save encoder state dict (includes 'sigma_emb' and 'sigma_jitter' buffers)
-    torch.save(model.encoder.state_dict(), save_path)
-
     print("\nQuality assessment:")
 
     if final_std < 0.01:
@@ -955,15 +932,8 @@ def pretrain_image_embed(
     print("SAVING WEIGHTS")
     print("=" * 70)
 
-    stem   = save_path_obj.stem
-    suffix = save_path_obj.suffix
-
-    torch.save(model.encoder.state_dict(), save_path)
-    print(f"✅ Encoder weights:            {save_path}")
-
-    full_model_path = save_path_obj.with_name(f"{stem}_full_model{suffix}")
-    torch.save(model.state_dict(), full_model_path)
-    print(f"✅ Full model checkpoint:      {full_model_path}")
+    torch.save(model.state_dict(), save_path)
+    print(f"✅ Full model checkpoint:            {save_path}")
 
     history_path = save_path_obj.with_name(f"{stem}_history{suffix}")
     history.update({

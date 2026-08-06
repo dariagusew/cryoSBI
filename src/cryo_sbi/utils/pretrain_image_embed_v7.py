@@ -1,6 +1,6 @@
-# "pretrain_image_embed_v6.py"
+# "pretrain_image_embed_v7.py"
 """
-pretrain_image_embed_v6.py
+pretrain_image_embed_v7.py
 
 VIB pre-training of image encoder on synthetic cryo-EM data.
 
@@ -17,7 +17,7 @@ embedding mu.  Class labels are fed to the NRE head as raw integer
 indices (no one-hot, no learned embedding).
 
 Usage:
-    python pretrain_image_embed_v6.py \
+    python pretrain_image_embed_v7.py \
         --image_config config.json \
         --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
@@ -411,6 +411,9 @@ def _run_vib_epoch(
     use_gaussian_consistency_loss: bool = False,
     randomize_snr: bool = False,
     use_cosine_consistency_loss: bool = False,
+    paired_snr_curriculum: bool = False,
+    snr_range: Optional[Tuple[float, float]] = None,
+    cons_warmup_epochs: int = 10,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
     nre_loss_fn = NRELossCrossClass()
@@ -450,14 +453,20 @@ def _run_vib_epoch(
 
             if weight_cons > 0.0:
                 if randomize_snr:
-                    # 1. Sample a fresh parameter tuple to get an independent random SNR
-                    try:
-                        params_B = next(synthetic_iter)
-                    except StopIteration:
-                        synthetic_iter = iter(synthetic_loader)
-                        params_B = next(synthetic_iter)
+                    if paired_snr_curriculum and snr_range is not None:
+                        snr_min, snr_max = snr_range
+                        snr_target = (snr_min + snr_max) - snr
+                        alpha = min(1.0, epoch / max(1.0, float(cons_warmup_epochs)))
+                        snr_B = (1.0 - alpha) * snr + alpha * snr_target
+                    else:
+                        # 1. Sample a fresh parameter tuple to get an independent random SNR
+                        try:
+                            params_B = next(synthetic_iter)
+                        except StopIteration:
+                            synthetic_iter = iter(synthetic_loader)
+                            params_B = next(synthetic_iter)
 
-                    snr_B = params_B[6]  # 7th element in parameter tuple is SNR
+                        snr_B = params_B[6]  # 7th element in parameter tuple is SNR
                 else:
                     snr_B = snr
 
@@ -514,8 +523,8 @@ def _run_vib_epoch(
                     L_cons = F.mse_loss(mu, mu_B.detach())
 
                 epoch_cons_loss += L_cons.item()
-                # Warmup weight_cons over first 10 epochs
-                current_weight_cons = weight_cons * min(1.0, epoch / 10.0)
+                # Warmup weight_cons over first cons_warmup_epochs
+                current_weight_cons = weight_cons * min(1.0, epoch / max(1.0, float(cons_warmup_epochs)))
                 loss = loss + current_weight_cons * L_cons
 
             loss.backward()
@@ -567,6 +576,8 @@ def pretrain_image_embed(
     use_gaussian_consistency_loss: bool = False,
     randomize_snr: bool = False,
     use_cosine_consistency_loss: bool = False,
+    paired_snr_curriculum: bool = False,
+    cons_warmup_epochs: int = 10,
 ):
     print("\n" + "=" * 70)
     print(f"TRAINING: {embedding_name}")
@@ -591,7 +602,10 @@ def pretrain_image_embed(
     print(f"  {'beta_NRE':10s}: {beta_NRE:.2f} (auxiliary NRE loss on deterministic mu)")
     if weight_cons > 0.0:
         cons_noise_str = "Gaussian" if use_gaussian_consistency_loss else "Config Noise"
-        snr_str = "Randomized" if randomize_snr else "Shared"
+        if randomize_snr:
+            snr_str = f"Paired Inverse Curriculum ({cons_warmup_epochs} eps ramp)" if paired_snr_curriculum else "Randomized"
+        else:
+            snr_str = "Shared"
         cons_metric_str = "Centered Cosine" if use_cosine_consistency_loss else "MSE"
         print(f"  {'cons (' + cons_metric_str + ')':10s}: {weight_cons:.2f} (Consistency Loss Enabled, Noise B: {cons_noise_str}, SNR B: {snr_str})")
     else:
@@ -603,6 +617,7 @@ def pretrain_image_embed(
     with open(image_config_path) as f:
         image_config = json.load(f)
     image_size = image_config["N_PIXELS"]
+    snr_range = tuple(map(float, image_config["SNR"]))
 
     print("\nLoading conformational models...")
     if image_config["MODEL_FILE"].endswith("npy"):
@@ -782,6 +797,9 @@ def pretrain_image_embed(
                 use_gaussian_consistency_loss=use_gaussian_consistency_loss,
                 randomize_snr=randomize_snr,
                 use_cosine_consistency_loss=use_cosine_consistency_loss,
+                paired_snr_curriculum=paired_snr_curriculum,
+                snr_range=snr_range,
+                cons_warmup_epochs=cons_warmup_epochs,
             )
 
             scheduler.step()
@@ -935,6 +953,8 @@ def pretrain_image_embed(
     torch.save(model.state_dict(), save_path)
     print(f"✅ Full model checkpoint:            {save_path}")
 
+    stem = save_path_obj.stem
+    suffix = save_path_obj.suffix
     history_path = save_path_obj.with_name(f"{stem}_history{suffix}")
     history.update({
         "embedding_name": embedding_name,
@@ -952,6 +972,8 @@ def pretrain_image_embed(
         "use_gaussian_consistency_loss": use_gaussian_consistency_loss,
         "randomize_snr":  randomize_snr,
         "use_cosine_consistency_loss": use_cosine_consistency_loss,
+        "paired_snr_curriculum": paired_snr_curriculum,
+        "cons_warmup_epochs": cons_warmup_epochs,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)
@@ -988,6 +1010,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_Gaussian_consistency_loss", action="store_true", default=False,  help="Use Gaussian noise for consistency loss target set B")
     parser.add_argument("--randomize_SNR",                 action="store_true", default=False,  help="Draw a new SNR tensor for consistency loss target set B")
     parser.add_argument("--use_Cosine_consistency_loss",   action="store_true", default=False,  help="Use mean-centered Cosine loss instead of MSE for consistency loss")
+    parser.add_argument("--paired_snr_curriculum",         action="store_true", default=False,  help="Use inverse paired SNR curriculum over warmup epochs for consistency loss Set B")
+    parser.add_argument("--cons_warmup_epochs",            type=int,   default=10,              help="Epochs over which to warm up consistency loss weight and ramp paired SNR curriculum")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -1032,4 +1056,6 @@ if __name__ == "__main__":
         use_gaussian_consistency_loss = args.use_Gaussian_consistency_loss,
         randomize_snr                 = args.randomize_SNR,
         use_cosine_consistency_loss   = args.use_Cosine_consistency_loss,
+        paired_snr_curriculum         = args.paired_snr_curriculum,
+        cons_warmup_epochs            = args.cons_warmup_epochs,
         )

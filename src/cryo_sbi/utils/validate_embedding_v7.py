@@ -576,7 +576,7 @@ def validate_embedding(
     print(f"\nLoading encoder: {embedding_name}  (dim={embedding_dim})...")
     ckpt  = torch.load(encoder_weights_path, map_location=device)
     model = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size).to(device)
-    model.load_state_dict(ckpt)
+    model.load_state_dict(ckpt, strict=False)
     model.eval()
     print(f"✅ Encoder loaded — embedding: z = encoder(d)  (mu_head inside)")
 

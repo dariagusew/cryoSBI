@@ -748,7 +748,7 @@ def pretrain_image_embed(
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.001)
 
-    warmup_epochs = max(1, epochs // 10)
+    warmup_epochs = cons_warmup_epochs 
     warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
     cosine = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])

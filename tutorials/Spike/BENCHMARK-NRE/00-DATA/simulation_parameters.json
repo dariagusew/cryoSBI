@@ -1,0 +1,16 @@
+{
+    "N_PIXELS": 128,
+    "PIXEL_SIZE": 2.0,
+    "MODEL_FILE": "spike-allatom.pt",
+    "TOPOLOGY": "topology-allatom.pt",
+    "SHIFT": 10,
+    "DEFOCUS": [0.39, 2.56],
+    "SNR": [0.01, 0.1],
+    "AMP": 0.1,
+    "B_FACTOR": [0.0, 0.0],
+    "VOLTAGE": 300.0,
+    "SPHERICAL_ABERRATION": 2.7,
+    "NOISE": "GAN-ICE",
+    "ICE_NOISE_PT": "noise_gan_8ch.pt",
+    "DOSE": 40
+}

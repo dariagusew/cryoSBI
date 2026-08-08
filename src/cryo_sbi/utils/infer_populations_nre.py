@@ -1,3 +1,4 @@
+# "infer_populations_nre.py"
 # infer_populations_nre.py
 """
 Standalone population-weight inference using an NRE estimator trained with
@@ -125,6 +126,7 @@ def evaluate_log_ratios(
     image_batch_size: int = 256,
     pair_batch_size: int = 4096,
     normalize_images: bool = False,
+    flip_contrast: bool = False,
 ) -> torch.Tensor:
     """
     Returns log-ratio matrix of shape [N_images, K] using memory-mapped .mrc
@@ -146,6 +148,8 @@ def evaluate_log_ratios(
 
             # Load only this chunk from disk
             imgs_np = mrc.data[start:end].copy()
+            if flip_contrast:
+                imgs_np = -imgs_np
             imgs = torch.from_numpy(imgs_np).float()
 
             if imgs.ndim == 3:
@@ -347,6 +351,7 @@ def main(args):
         image_batch_size=args.batch_size_images,
         pair_batch_size=args.batch_size_pairs,
         normalize_images=args.normalize_images,
+        flip_contrast=args.flip_contrast,
     )
     print(f"Log-ratio matrix shape: {log_ratio_matrix.shape}")
 
@@ -408,6 +413,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_iter_lbfgs",      type=int, default=100,     help="L-BFGS max iterations")
     parser.add_argument("--tol",                 type=float, default=1e-10, help="Convergence tolerance")
     parser.add_argument("--normalize_images",    action="store_true",       help="Per-image mean/std normalize (as in pretrain validation)")
+    parser.add_argument("--flip_contrast",       action="store_true",       help="Flip contrast of mrc images")
 
     args = parser.parse_args()
     main(args)

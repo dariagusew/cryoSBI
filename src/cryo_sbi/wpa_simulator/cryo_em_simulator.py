@@ -105,12 +105,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         simulation_param["sf"] = sf
 
     # check parameters for Empirical noise
-    if simulation_param["noise"] in ["empirical", "mixed"]:
+    if simulation_param["noise"] in ["empirical"]:
        # get path to mrc file
        mrc_file = image_config.get("NOISE_MRC", None)
        # check that noise_mrc is not None 
        if mrc_file == None:
-          raise ValueError("With empirical and mixed noise models you must specify NOISE_MRC")
+          raise ValueError("With empirical noise models you must specify NOISE_MRC")
        # precalculate NPS
        with mrcfile.open(mrc_file) as mrc:
             nps_grid = mrc.data.astype(np.float32)
@@ -121,7 +121,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        simulation_param["nps"] = torch.sqrt(torch.clamp(nps_torch, min=0))
 
     # check parameters for GAN-ICE-learned noise
-    if simulation_param["noise"] in ["GAN-ICE"]:
+    if simulation_param["noise"] in ["GAN-ICE", "mixed"]:
        # get path to checkpoint
        pt_file = image_config.get("ICE_NOISE_PT", None)
        # check that noise_pt is not None
@@ -190,9 +190,9 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
           print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
        
-    if simulation_param["noise"] in ["empirical", "mixed"]:
+    if simulation_param["noise"] in ["empirical"]:
        print(f"  NPS noise file: {mrc_file}")
-    if simulation_param["noise"] in ["GAN-ICE"]:
+    if simulation_param["noise"] in ["GAN-ICE","mixed"]:
        print(f"  Noise GAN generator loaded from: {pt_file.name}  ")
     if isinstance(fluct_file, str):
        print(f"  Adding fluctuations from file: {fluct_file}")
@@ -254,7 +254,7 @@ def cryo_em_simulator(
     # special case of mixed noise
     if simulation_param["mixed_noise"]:
        # random selection of noise model
-       noise_type = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "empirical"])
+       noise_type = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "GAN-ICE", "real"])
 
     # 3. Add noise
     if noise_type == "Gaussian":

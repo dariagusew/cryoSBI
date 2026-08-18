@@ -183,7 +183,7 @@ def open_mrc_robust(filepath, max_size_gb=None):
 # GPU PROCESSING FUNCTIONS
 # ============================================================================
 
-def downsample_gpu(images, target_size):
+def downsample_gpu(images, target_size, method='fourier'):
     """
     Downsample images to target_size x target_size using GPU.
     
@@ -194,6 +194,15 @@ def downsample_gpu(images, target_size):
     Returns:
         Downsampled images as torch.Tensor
     """
+    if method == 'fourier':
+        N, H, W = images.shape
+        if H == target_size and W == target_size:
+            return images
+        fft = torch.fft.fftshift(torch.fft.fft2(images), dim=(-2, -1))
+        start_h = (H - target_size) // 2
+        start_w = (W - target_size) // 2
+        fft_crop = fft[:, start_h:start_h + target_size, start_w:start_w + target_size]
+        return torch.fft.ifft2(torch.fft.ifftshift(fft_crop, dim=(-2, -1))).real * (target_size / H) * (target_size / W)
     
     # Add channel dimension for interpolate
     images_4d = images.unsqueeze(1)  # (N, 1, H, W)
@@ -310,7 +319,8 @@ def process_mrc_stack(
     device='cuda',
     max_size_gb=None,
     stride=1,
-    validate_only=False
+    validate_only=False,
+    downsample_method='fourier'
 ):
     """
     Process MRC particle stack: fix header and downsample.
@@ -495,7 +505,7 @@ def process_mrc_stack(
 
                             # Downsample if needed
                             if ny != target_size or nx != target_size:
-                               batch_tensor = downsample_gpu(batch_tensor, target_size)
+                               batch_tensor = downsample_gpu(batch_tensor, target_size, method=downsample_method)
 
                             # Normalize
                             batch_tensor = normalize_batch_gpu(batch_tensor, method=normalize, 

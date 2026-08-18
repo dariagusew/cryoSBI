@@ -125,6 +125,9 @@ def cl_process_mrc_stack():
                        help='Maximum file size to process in GB (default: no limit)')
     parser.add_argument('--validate', action='store_true',
                        help='Only validate input file without processing')
+    parser.add_argument('--downsample-method', type=str, default='fourier',
+                       choices=['area', 'fourier'],
+                       help='Downsampling method: area or fourier (default: fourier)')
     
     args = parser.parse_args()
     
@@ -164,7 +167,8 @@ def cl_process_mrc_stack():
             device=args.device,
             max_size_gb=args.max_size_gb,
             stride=args.stride,
-            validate_only=args.validate
+            validate_only=args.validate,
+            downsample_method=args.downsample_method
         )
         
         sys.exit(0 if success else 1)

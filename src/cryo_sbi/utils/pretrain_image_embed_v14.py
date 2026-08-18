@@ -1,6 +1,6 @@
-# "pretrain_image_embed_v8.py"
+# "pretrain_image_embed_v11.py"
 """
-pretrain_image_embed_v8.py
+pretrain_image_embed_v11.py
 
 VIB pre-training of image encoder on synthetic cryo-EM data.
 
@@ -17,7 +17,7 @@ embedding mu.  Class labels are fed to the NRE head as raw integer
 indices (no one-hot, no learned embedding).
 
 Usage:
-    python pretrain_image_embed_v8.py \
+    python pretrain_image_embed_v11.py \
         --image_config config.json \
         --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
@@ -30,14 +30,14 @@ import json
 import math
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-
+from geomloss import SamplesLoss
 import mrcfile
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from cryo_sbi.inference.priors import get_image_priors, PriorLoader
@@ -94,7 +94,7 @@ class NREHead(nn.Module):
         n_conformations: int,
         hidden_features: Tuple[int, ...] = (256, 128, 64),
         activation: nn.Module = nn.LeakyReLU,
-        dropout_p: float = 0.0,  # Set to 0.0 when using Spectral Norm + Jitter
+        dropout_p: float = 0.0,
     ):
         super().__init__()
         dims = [n_conformations + x_dim] + list(hidden_features) + [1]
@@ -153,10 +153,81 @@ class NRELossCrossClass(nn.Module):
         loss = loss + (-F.logsigmoid(-log_r_neg).mean())
         return loss
 
+class NRELossHybrid(nn.Module):
+    """
+    NRE loss using simulated images for positive (joint) samples and
+    real images for negative (marginal) samples.
+    Estimates log p(d_sim|theta) - log p(d_real).
+    """
+    def __init__(self):
+        super().__init__()
+
+    def forward(
+        self,
+        nre_head: nn.Module,
+        theta_one_hot_sim: torch.Tensor,
+        mu_sim: torch.Tensor,
+        mu_real: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        nre_head:          The NRE head module (model.nre).
+        theta_one_hot_sim: (N_sim, K) one-hot tensor of labels for simulated data.
+        mu_sim:            (N_sim, D) embeddings from the simulated batch.
+        mu_real:           (N_real, D) embeddings from the real image batch.
+        """
+        # 1. Positive term: log r(theta_sim, mu_sim) from joint samples
+        log_r_pos = nre_head(theta_one_hot_sim, mu_sim)
+        loss_pos = -F.logsigmoid(log_r_pos).mean()
+
+        # 2. Negative term: log r(theta_sim, mu_real) from marginal samples
+        N_sim = theta_one_hot_sim.size(0)
+        N_real = mu_real.size(0)
+
+        # Expand tensors to form all (theta_sim, mu_real) pairs
+        theta_expanded = theta_one_hot_sim.unsqueeze(1).expand(N_sim, N_real, -1)
+        mu_expanded = mu_real.unsqueeze(0).expand(N_sim, N_real, -1)
+
+        # Reshape for batch processing by the NRE head
+        theta_flat = theta_expanded.reshape(N_sim * N_real, -1)
+        mu_flat = mu_expanded.reshape(N_sim * N_real, -1)
+
+        log_r_neg = nre_head(theta_flat, mu_flat)
+        loss_neg = -F.logsigmoid(-log_r_neg).mean()
+
+        return loss_pos + loss_neg
+
+class MrcDataset(Dataset):
+    """
+    Memory-efficient PyTorch Dataset for an MRC file.
+    Uses mrcfile.mmap to read images from disk on-the-fly.
+    """
+    def __init__(self, mrc_path: str):
+        super().__init__()
+        self.mrc_path = mrc_path
+        # Use a persistent memory-map object; will be opened in worker processes
+        self.mrc = mrcfile.mmap(mrc_path, mode='r')
+        self.n_images = self.mrc.data.shape[0]
+
+    def __len__(self) -> int:
+        return self.n_images
+
+    def __getitem__(self, idx: int) -> torch.Tensor:
+        # Slicing the mmap object reads from disk
+        image_np = self.mrc.data[idx].copy().astype(np.float32)
+        image = torch.from_numpy(image_np)
+
+        # Add channel dimension if it's missing
+        if image.ndim == 2:
+            image = image.unsqueeze(0)
+        
+        # Per-image normalization
+        mean = image.mean()
+        std = image.std()
+        image = (image - mean) / (std + 1e-8)
+        
+        return image
+
 class SupervisedContrastiveLoss(nn.Module):
-    """
-    Supervised Contrastive Loss.
-    """
     def __init__(self, temperature: float = 0.1):
         super().__init__()
         self.temperature = temperature
@@ -178,21 +249,23 @@ class SupervisedContrastiveLoss(nn.Module):
         logits = anchor_dot_contrast - logits_max.detach()
 
         logits_mask = torch.ones_like(mask) - torch.eye(batch_size, device=device)
-        mask = mask * logits_mask
+        pos_mask = mask * logits_mask # Mask for positive pairs (excluding self)
 
         exp_logits = torch.exp(logits) * logits_mask
-        log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True))
-
-        sum_pos = (mask * log_prob).sum(1)
-        num_pos = mask.sum(1)
         
+        # Denominator for DCL includes ONLY the negative pairs.
+        # We get the negative mask by inverting the full positive mask (including self-identity).
+        neg_mask = 1. - mask
+        log_prob = logits - torch.log((exp_logits * neg_mask).sum(1, keepdim=True))
+
+        # Compute loss over positive pairs
+        # Note: handle cases with no positive pairs to avoid division by zero
+        num_pos = pos_mask.sum(1)
         num_pos[num_pos == 0] = 1
-        mean_log_prob_pos = sum_pos / num_pos
+        mean_log_prob_pos = (pos_mask * log_prob).sum(1) / num_pos
         
         loss = -mean_log_prob_pos.mean()
-        
         return loss
-
 
 class ImageEmbedPretrainModel(nn.Module):
     def __init__(
@@ -227,21 +300,7 @@ class ImageEmbedPretrainModel(nn.Module):
     def forward(self, x: torch.Tensor, theta: torch.Tensor, noise_factor: float = 0.05):
         mu, log_var, z = self.encoder.forward_vib(x)
         preds = self.predictor(z)
-
-        n_conformations = self.predictor.conf_head.out_features
-        theta_one_hot = F.one_hot(theta, num_classes=n_conformations).float()
-
-        # Inject jitter scaled by batch standard deviation during training
-        if self.training and noise_factor > 0.0:
-            # Compute average standard deviation across latent dimensions
-            batch_std = mu.std(dim=0, keepdim=True).detach()  # detach so loss doesn't shrink std to reduce noise
-            jitter = torch.randn_like(mu) * (noise_factor * batch_std)
-            mu_nre = mu + jitter
-        else:
-            mu_nre = mu
-
-        log_r = self.nre(theta_one_hot, mu_nre)
-        return mu, log_var, z, preds, log_r
+        return mu, log_var, z, preds
 
 # ============================================================================
 # FIXED TARGET NORMALIZER
@@ -419,6 +478,40 @@ def get_synth_embeddings_vib(encoder, images: torch.Tensor, batch_size: int) -> 
 # UTILITIES
 # ============================================================================
 
+def compute_intra_class_jitter(mu: torch.Tensor, labels: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
+    """
+    Computes jitter proportional to the WITHIN-CLASS standard deviation (D_intra).
+    Guarantees noise perturbation never spills into neighboring conformation clusters.
+    
+    mu:     (N, D) latent embeddings
+    labels: (N,) class indices
+    eta:    fraction of intra-class std to use (e.g. 0.15 = 15%)
+    """
+    with torch.no_grad():
+        N, D = mu.shape
+        n_classes = int(labels.max().item()) + 1
+        
+        # 1. Compute mean embedding per conformation class in this batch
+        class_means = torch.zeros(n_classes, D, device=mu.device)
+        class_counts = torch.zeros(n_classes, 1, device=mu.device)
+        
+        class_means.index_add_(0, labels, mu)
+        class_counts.index_add_(0, labels, torch.ones((N, 1), device=mu.device))
+        
+        class_counts = torch.clamp(class_counts, min=1.0)
+        class_means = class_means / class_counts  # (K, D)
+        
+        # 2. Compute residual vectors (distance from each sample to its class mean)
+        mu_centered = mu - class_means[labels]  # (N, D)
+        
+        # 3. Average intra-class standard deviation per latent dimension
+        std_intra = torch.sqrt((mu_centered ** 2).mean(dim=0) + 1e-8)  # (D,)
+        
+        # 4. Generate jitter
+        jitter = torch.randn_like(mu) * (eta * std_intra)
+        
+    return mu + jitter
+
 def check_embedding_health(embeddings: torch.Tensor, device: str) -> tuple:
     with torch.no_grad():
         emb_std = embeddings.std(dim=0).mean().item()
@@ -458,6 +551,9 @@ def _run_vib_epoch(
     optimizer: optim.Optimizer,
     synthetic_iter,
     synthetic_loader: PriorLoader,
+    real_data_loader: Optional[DataLoader],
+    real_data_iter: Optional[iter],
+    use_hybrid_nre: bool,
     models: torch.Tensor,
     simulation_param: dict,
     device: str,
@@ -469,19 +565,29 @@ def _run_vib_epoch(
     epoch: int,
     weight_cons: float,
     beta_NRE: float,
+    beta_OT: float,
     randomize_snr: bool = False,
     snr_range: Optional[Tuple[float, float]] = None,
     nre_warmup_epochs: int = 15,
     consistency_loss_type: str = "mse",
+    jittering_factor: float = 0.0,
+    supcon_temperature: float = 0.1,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
-    nre_loss_fn = NRELossCrossClass()
+    if use_hybrid_nre:
+        nre_loss_fn = NRELossHybrid()
+        assert real_data_loader is not None, "Real data loader is required for hybrid NRE loss."
+    else:
+        nre_loss_fn = NRELossCrossClass()
+    if beta_OT>0.0:
+       sinkhorn = SamplesLoss(loss="sinkhorn", p=2, blur=0.05)
 
     epoch_loss = 0.0
     epoch_pred_loss = 0.0
     epoch_kl_loss = 0.0
     epoch_cons_loss = 0.0
     epoch_nre_loss = 0.0
+    epoch_ot_loss = 0.0
     epoch_ind_losses = {"conf": 0.0, "orient": 0.0, "shift": 0.0, "defocus": 0.0, "bfactor": 0.0, "snr": 0.0}
     n_steps = 0
     last_mu: Optional[torch.Tensor] = None
@@ -518,8 +624,8 @@ def _run_vib_epoch(
                     except StopIteration:
                         synthetic_iter = iter(synthetic_loader)
                         params_B = next(synthetic_iter)
-                    quaternions_B = quaternions 
-                    shift_B    = shift 
+                    quaternions_B = quaternions
+                    shift_B    = shift
                     defocus_B  = params_B[3]
                     b_factor_B = params_B[4]
                     snr_B      = params_B[6]
@@ -557,58 +663,83 @@ def _run_vib_epoch(
                 "snr":         snr[sl].to(device,         non_blocking=True),
             }
 
+            # load batch of real images
+            if use_hybrid_nre or beta_OT>0.0:
+                try:
+                    real_images = next(real_data_iter)
+                except StopIteration:
+                    real_data_iter = iter(real_data_loader)
+                    real_images = next(real_data_iter)
+
+                real_images = real_images.to(device, non_blocking=True)
+                # Get deterministic embedding mu for real images
+                mu_real = model.encoder(real_images)
+
+            # VIB loss
             optimizer.zero_grad()
-            mu, log_var, z, preds, _ = model(noisy_images[sl], targets["indices"])
+            mu, log_var, z, preds = model(noisy_images[sl], targets["indices"])
             loss, L_pred, L_kl, ind_losses = vib_loss(
                 mu, log_var, preds, targets, beta, pred_weights, normalizer
             )
 
-            # auxiliary NRE loss on deterministic mu 
+            # auxiliary NRE loss
             theta_indices = targets["indices"]
             n_conformations = model.predictor.conf_head.out_features
             theta_one_hot = F.one_hot(theta_indices, num_classes=n_conformations).float()
-
-            # jitter mu before feeding to NRE
-            if model.training:
-                with torch.no_grad():
-                    batch_std = mu.std(dim=0, keepdim=True)
-                mu_nre = mu + torch.randn_like(mu) * 0.05 * batch_std
+            
+            if use_hybrid_nre:
+                L_nre = nre_loss_fn(model.nre, theta_one_hot, mu.detach(), mu_real.detach())
             else:
-                mu_nre = mu
-           
-            N = theta_indices.size(0)
-            theta_one_hot_i = theta_one_hot.unsqueeze(1).expand(N, N, -1).reshape(N * N, -1)
-            mu_j = mu_nre.unsqueeze(0).expand(N, N, -1).reshape(N * N, -1)
-           
-            log_r_matrix = model.nre(theta_one_hot_i, mu_j).view(N, N)
-            L_nre = nre_loss_fn(log_r_matrix, targets["indices"])
+                # Original logic: use off-diagonal synthetic samples as negatives
+                if model.training and jittering_factor > 0:
+                    mu_nre = compute_intra_class_jitter(mu, targets["indices"], eta=jittering_factor)
+                else:
+                    mu_nre = mu
+
+                N = theta_indices.size(0)
+                theta_one_hot_i = theta_one_hot.unsqueeze(1).expand(N, N, -1).reshape(N * N, -1)
+                mu_j = mu_nre.unsqueeze(0).expand(N, N, -1).reshape(N * N, -1)
+            
+                log_r_matrix = model.nre(theta_one_hot_i, mu_j).view(N, N)
+                L_nre = nre_loss_fn(log_r_matrix, targets["indices"])
 
             # current weight for NRE loss
             current_beta_NRE = beta_NRE * min(1.0, epoch / max(1.0, float(nre_warmup_epochs))) 
             loss = loss + current_beta_NRE * L_nre
 
+            # optimal transport loss
+            if beta_OT>0.0:
+                L_ot = sinkhorn(mu, mu_real)
+                epoch_ot_loss += L_ot.item()
+                loss = loss + beta_OT * L_ot
+
+            # consistency loss
             if weight_cons > 0.0:
-                mu_B, _, _, _, _ = model(noisy_images_B[sl], targets["indices"])
-                
+                mu_B, _, _ = model.encoder.forward_vib(noisy_images_B[sl])
+
                 if consistency_loss_type == "mse":
                     L_cons = F.mse_loss(mu, mu_B)
                 elif consistency_loss_type == "cosine":
                     L_cons = centered_cosine_consistency_loss(mu, mu_B)
                 elif consistency_loss_type == "supcon":
-                    supcon_loss_fn = SupervisedContrastiveLoss(temperature=0.1)
+                    supcon_loss_fn = SupervisedContrastiveLoss(temperature=supcon_temperature)
                     features = torch.cat([F.normalize(mu, dim=1), F.normalize(mu_B, dim=1)], dim=0)
                     labels = torch.cat([targets["indices"], targets["indices"]], dim=0)
                     L_cons = supcon_loss_fn(features, labels)
+
                 elif consistency_loss_type == "mse_supcon":
-                    # 1. Direct Paired MSE (Denoising Anchor)
+                    # 1. Local Noise Invariance on raw 16-dim mu
                     L_mse = F.mse_loss(mu, mu_B)
-                    # 2. Global Supervised Contrastive (0.1 weighting relative to MSE)
-                    supcon_loss_fn = SupervisedContrastiveLoss(temperature=0.1)
+                    
+                    # 2. Global Supervised Contrastive
+                    supcon_loss_fn = SupervisedContrastiveLoss(temperature=supcon_temperature)
                     features = torch.cat([F.normalize(mu, dim=1), F.normalize(mu_B, dim=1)], dim=0)
                     labels = torch.cat([targets["indices"], targets["indices"]], dim=0)
                     L_supcon = supcon_loss_fn(features, labels)
-                    # combine the two 
-                    L_cons = 0.5 * L_mse + 0.5 * L_supcon
+                    
+                    # Add up mse and supcon 
+                    L_cons = L_mse + L_supcon
+
                 else:
                     raise ValueError(f"Unknown consistency_loss_type: {consistency_loss_type}")
 
@@ -633,8 +764,9 @@ def _run_vib_epoch(
     avg_kl_loss   = epoch_kl_loss   / max(n_steps, 1)
     avg_cons_loss = epoch_cons_loss / max(n_steps, 1)
     avg_nre_loss  = epoch_nre_loss  / max(n_steps, 1)
+    avg_ot_loss   = epoch_ot_loss   / max(n_steps, 1)
     avg_ind_losses = {k: v / max(n_steps, 1) for k, v in epoch_ind_losses.items()}
-    return avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, avg_nre_loss, avg_ind_losses, last_mu, synthetic_iter
+    return avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, avg_nre_loss, avg_ot_loss, avg_ind_losses, last_mu, synthetic_iter, real_data_iter
 
 
 # ============================================================================
@@ -661,9 +793,13 @@ def pretrain_image_embed(
     val_k: int = 3,
     weight_cons: float = 0.0,
     beta_NRE: float = 0.1,
+    beta_OT: float = 0.0,
     randomize_snr: bool = False,
     nre_warmup_epochs: int = 15,
     consistency_loss_type: str = "mse",
+    jittering_factor: float = 0.0,
+    supcon_temperature: float = 0.1,
+    use_real_for_nre_negatives: bool = False,
 ):
     print("\n" + "=" * 70)
     print(f"TRAINING: {embedding_name}")
@@ -685,7 +821,8 @@ def pretrain_image_embed(
     print("\nPrediction loss weights:")
     for key, val in pred_weights.items():
         print(f"  {key:10s}: {val:.2f}")
-    print(f"  {'beta_NRE':10s}: {beta_NRE:.2f} (auxiliary NRE loss on deterministic mu)")
+    nre_negative_source = "real images" if use_real_for_nre_negatives else "synthetic (off-diagonal)"
+    print(f"  {'beta_NRE':10s}: {beta_NRE:.2f} (NRE negatives from: {nre_negative_source})")
     if weight_cons > 0.0:
         snr_str = "Randomized" if randomize_snr else "Shared"
         print(f"  {'cons ('+consistency_loss_type+')':10s}: {weight_cons:.2f} (Consistency Loss Enabled, SNR B: {snr_str})")
@@ -716,10 +853,12 @@ def pretrain_image_embed(
     simulation_param = create_simulation_param(image_config, models, device=device)
 
     # ------------------------------------------------------------------
-    # Fixed Validation Sets Construction (Sim2Real)
+    # Fixed Validation Sets Construction & Real Data Loader
     # ------------------------------------------------------------------
     val_real_tensor = None
     val_synth_tensor = None
+    real_data_loader = None
+
     if real_data_mrc is not None:
         print(f"\nBuilding static validation sets for Manifold Coverage (Size={val_size})...")
         
@@ -739,9 +878,24 @@ def pretrain_image_embed(
             mu_r = val_real_tensor.mean(dim=(-1, -2), keepdim=True)
             std_r = val_real_tensor.std(dim=(-1, -2), keepdim=True)
             val_real_tensor = (val_real_tensor - mu_r) / (std_r + 1e-8)
+
+            if use_real_for_nre_negatives or beta_OT>0.0:
+                print(f"  -> Building memory-efficient DataLoader for Hybrid NRE training...")
+                real_dataset = MrcDataset(real_data_mrc)
+                real_data_loader = DataLoader(
+                    real_dataset, 
+                    batch_size=batch_size, 
+                    shuffle=True, 
+                    num_workers=0, 
+                    pin_memory=True, 
+                    drop_last=True
+                )
+                print(f"  ✅ Created Hybrid NRE DataLoader with {len(real_dataset)} images.")
             
         except Exception as e:
             print(f"  ❌ Failed to load real images: {e}")
+            if use_real_for_nre_negatives or beta_OT>0.0:
+                raise ValueError("Could not load real images, which are required for --use_real_for_nre_negatives.")
             val_real_tensor = None
             
         if val_real_tensor is not None:
@@ -772,13 +926,15 @@ def pretrain_image_embed(
                     
             val_synth_tensor = torch.cat(synth_imgs_list, dim=0)[:actual_val_size]
             print("  ✅ Validation sets successfully fixed on device.")
+    elif use_real_for_nre_negatives or beta_OT>0.0:
+         raise ValueError("--real_data_mrc must be provided when --use_real_for_nre_negatives is set.")
     else:
         print("\n⚠️ No --real_data_mrc provided. Skipping Sim2Real manifold validation.")
 
     # ------------------------------------------------------------------
     # Fixed target normalization
     # ------------------------------------------------------------------
-    print("Building fixed target normalizer from prior ranges...")
+    print("\nBuilding fixed target normalizer from prior ranges...")
     normalizer = FixedTargetNormalizer(image_config).to(device)
 
     for key in ("shift", "defocus", "bfactor", "snr"):
@@ -839,6 +995,7 @@ def pretrain_image_embed(
     print(f"  Embedding dim:     {embedding_dim}")
     print(f"  Beta (KL weight):  {beta}")
     print(f"  Beta NRE:          {beta_NRE}")
+    print(f"  Beta OT:           {beta_OT}")
     print(f"  Epochs:            {epochs}")
     print(f"  Mini-batch size:   {batch_size}")
     print(f"  Simulation batch:  {simulation_batch_size}")
@@ -849,7 +1006,7 @@ def pretrain_image_embed(
 
     history: Dict = {
         "loss": [], "pred_loss": [], "kl_loss": [], "cons_loss": [], "nre_loss": [],
-        "emb_std": [], "emb_dist": [],
+        "ot_loss": [], "emb_std": [], "emb_dist": [],
         "val_coverage_pct": [], "val_med_dist": [], "val_p90_dist": [],
         "val_mu_coverage_pct": [], "val_mu_med_dist": [], "val_mu_p90_dist": [],
         "val_nsr": [],
@@ -857,13 +1014,18 @@ def pretrain_image_embed(
     last_mu: Optional[torch.Tensor] = None
     save_path_obj = Path(save_path)
 
+    real_data_iter = iter(real_data_loader) if real_data_loader else None
+
     with tqdm(range(epochs), desc="Stage 1: VIB pretraining") as tq:
         for epoch in tq:
-            avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, avg_nre_loss, avg_ind_losses, last_mu, synthetic_iter = _run_vib_epoch(
+            avg_loss, avg_pred_loss, avg_kl_loss, avg_cons_loss, avg_nre_loss, avg_ot_loss, avg_ind_losses, last_mu, synthetic_iter, real_data_iter = _run_vib_epoch(
                 model=model,
                 optimizer=optimizer,
                 synthetic_iter=synthetic_iter,
                 synthetic_loader=synthetic_loader,
+                real_data_loader=real_data_loader,
+                real_data_iter=real_data_iter,
+                use_hybrid_nre=use_real_for_nre_negatives,
                 models=models,
                 simulation_param=simulation_param,
                 device=device,
@@ -875,10 +1037,13 @@ def pretrain_image_embed(
                 epoch=epoch,
                 weight_cons=weight_cons,
                 beta_NRE=beta_NRE,
+                beta_OT=beta_OT,
                 randomize_snr=randomize_snr,
                 snr_range=snr_range,
                 nre_warmup_epochs=nre_warmup_epochs,
                 consistency_loss_type=consistency_loss_type,
+                jittering_factor=jittering_factor,
+                supcon_temperature=supcon_temperature,
             )
 
             scheduler.step()
@@ -888,6 +1053,7 @@ def pretrain_image_embed(
             history["kl_loss"].append(avg_kl_loss)
             history["cons_loss"].append(avg_cons_loss)
             history["nre_loss"].append(avg_nre_loss)
+            history["ot_loss"].append(avg_ot_loss)
 
             postfix_dict = {
                 "loss": f"{avg_loss:.4f}",
@@ -897,6 +1063,8 @@ def pretrain_image_embed(
             }
             if weight_cons > 0.0:
                 postfix_dict["cons"] = f"{avg_cons_loss:.4f}"
+            if beta_OT > 0.0:
+                postfix_dict["ot"] = f"{avg_ot_loss:.4f}"
             tq.set_postfix(postfix_dict)
 
             if epoch % check_frequency == 0 and last_mu is not None:
@@ -911,6 +1079,8 @@ def pretrain_image_embed(
                 print(f"    NRE loss:       {avg_nre_loss:.6f}")
                 if weight_cons > 0.0:
                     print(f"    Cons loss:      {avg_cons_loss:.6f}")
+                if beta_OT > 0.0:
+                    print(f"    Ot loss:      {avg_ot_loss:.6f}")
                 print(f"    Unscaled Predictor Losses:")
                 print(f"      conf:    {avg_ind_losses['conf']:.6f}")
                 print(f"      orient:  {avg_ind_losses['orient']:.6f}")
@@ -958,8 +1128,12 @@ def pretrain_image_embed(
     # Final embedding health check
     # ------------------------------------------------------------------
     print("\nComputing final embedding statistics...")
-    with torch.no_grad():
-        final_emb_std, final_emb_dist = check_embedding_health(last_mu, device)
+    if last_mu is not None:
+        with torch.no_grad():
+            final_emb_std, final_emb_dist = check_embedding_health(last_mu, device)
+    else:
+        final_emb_std, final_emb_dist = 0.0, 0.0
+
 
     # ------------------------------------------------------------------
     # Summary
@@ -972,6 +1146,7 @@ def pretrain_image_embed(
     final_pred_loss = history["pred_loss"][-1]
     final_kl_loss   = history["kl_loss"][-1]
     final_nre_loss  = history["nre_loss"][-1]
+    final_ot_loss   = history["ot_loss"][-1]
     final_std       = history["emb_std"][-1] if history["emb_std"] else final_emb_std
     final_dist      = history["emb_dist"][-1] if history["emb_dist"] else final_emb_dist
 
@@ -983,6 +1158,8 @@ def pretrain_image_embed(
     print(f"  NRE loss:       {final_nre_loss:.6f}")
     if weight_cons > 0.0:
         print(f"  Cons loss:      {history['cons_loss'][-1]:.6f}")
+    if beta_OT > 0.0:
+        print(f"  Ot loss:      {history['ot_loss'][-1]:.6f}")
     print(f"  Embedding std:  {final_std:.6f}")
     print(f"  Embedding dist: {final_dist:.6f}")
 
@@ -1046,11 +1223,13 @@ def pretrain_image_embed(
         "nre_head_params": params["nre_head"],
         "beta":           beta,
         "beta_NRE":       beta_NRE,
+        "beta_OT":        beta_OT,
         "pred_weights":   pred_weights,
         "weight_cons":    weight_cons,
         "randomize_snr":  randomize_snr,
         "nre_warmup_epochs": nre_warmup_epochs,
         "consistency_loss_type": consistency_loss_type,
+        "use_real_for_nre_negatives": use_real_for_nre_negatives,
         "resumed_from":   resume_from,
     })
     torch.save(history, history_path)
@@ -1083,14 +1262,17 @@ if __name__ == "__main__":
     parser.add_argument("--device",                        default="cuda",                      help="Compute device (cuda / cpu)")
     parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
     parser.add_argument("--beta_NRE",                      type=float, default=0.1,             help="Auxiliary NRE loss weight (gamma fixed to 1.0)")
+    parser.add_argument("--beta_OT",                       type=float, default=0.0,             help="Optimal transport loss weight")
     parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
     parser.add_argument("--randomize_SNR",                 action="store_true", default=False,  help="Draw a new SNR tensor for consistency loss target set B")
     parser.add_argument("--nre_warmup_epochs",             type=int,   default=15,              help="Epochs over which to warm up NRE loss weight")
     parser.add_argument("--consistency_loss_type",         default="mse", choices=["mse", "cosine", "supcon", "mse_supcon"], help="Type of consistency loss to use")
+    parser.add_argument("--jittering_factor",              type=float, default=0.0,             help="NRE jittering factor")
+    parser.add_argument("--supcon_temperature",            type=float, default=0.1,             help="SupCon temperature")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
-    parser.add_argument("--weight_orient",  type=float, default=0.1,  help="Orientation prediction loss weight")
-    parser.add_argument("--weight_shift",   type=float, default=0.1,  help="Shift prediction loss weight")
+    parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
+    parser.add_argument("--weight_shift",   type=float, default=0.0,  help="Shift prediction loss weight")
     parser.add_argument("--weight_defocus", type=float, default=0.0,  help="Defocus prediction loss weight")
     parser.add_argument("--weight_bfactor", type=float, default=0.0,  help="B-factor prediction loss weight")
     parser.add_argument("--weight_snr",     type=float, default=0.0,  help="SNR prediction loss weight")
@@ -1098,6 +1280,9 @@ if __name__ == "__main__":
     parser.add_argument("--real_data_mrc",  default=None, help="Path to real .mrc images for Sim2Real validation")
     parser.add_argument("--val_size",       type=int, default=3000, help="Number of images in fixed validation set")
     parser.add_argument("--val_k",          type=int, default=3, help="k value for Synthetic Manifold Radius check")
+
+    parser.add_argument("--use_real_for_nre_negatives", action="store_true", default=False,
+                        help="Use real images for NRE negative samples instead of synthetic ones.")
 
     args = parser.parse_args()
 
@@ -1128,7 +1313,11 @@ if __name__ == "__main__":
         val_k                         = args.val_k,
         weight_cons                   = args.beta_cons, 
         beta_NRE                      = args.beta_NRE,
+        beta_OT                       = args.beta_OT,
         randomize_snr                 = args.randomize_SNR,
         nre_warmup_epochs             = args.nre_warmup_epochs,
         consistency_loss_type         = args.consistency_loss_type,
+        jittering_factor              = args.jittering_factor,
+        supcon_temperature            = args.supcon_temperature,
+        use_real_for_nre_negatives    = args.use_real_for_nre_negatives,
         )

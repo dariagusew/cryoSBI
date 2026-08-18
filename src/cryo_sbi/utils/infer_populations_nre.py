@@ -1,17 +1,19 @@
-# "infer_populations_nre.py"
 # infer_populations_nre.py
 """
-Standalone population-weight inference using an NRE estimator trained with
-cross-class negatives.
+Standalone population-weight inference using a Neural Ratio Estimator.
 
-The full-model checkpoint from pretrain_image_embed_v6.py is expected to
-contain:
-    encoder.*   : the deterministic image encoder
-    nre.*       : the auxiliary NRE head
+This script is designed to work with models from pretrain_image_embed_v11.py
+and pretrain_image_embed_v12.py. It expects the checkpoint to contain:
+    encoder.*   : the image encoder
+    nre.*       : the NRE head
 
-The NRE head outputs r_tilde(d,X) = p(d|X) / p(d|X'!=X).  This script
-converts it to the true marginal likelihood ratio:
-    r(d,X) = p(d|X) / p(d) = K * r_tilde / (1 + (K-1) * r_tilde)
+If the NRE was trained with cross-class negatives (default), it outputs
+r_tilde(d,X) = p(d|X) / p(d|X'!=X). This script converts it to the true
+marginal likelihood ratio using a correction:
+    r(d,X) = p(d|X) / p(d)
+
+If the NRE was trained with real images as negatives (hybrid NRE), the
+correction should be skipped via a command-line flag.
 """
 
 import argparse
@@ -31,34 +33,44 @@ from cryo_sbi.inference.models.embedding_nets import EMBEDDING_NETS
 
 
 # ============================================================================
-# NRE HEAD (same architecture as in pretrain_image_embed_v6.py)
+# NRE HEAD (same architecture as in pretrain scripts)
 # ============================================================================
+
 
 class NREHead(nn.Module):
     """
-    Auxiliary Neural Ratio Estimation head operating on the deterministic
-    embedding mu. Class labels are passed as raw integer indices.
+    Neural Ratio Estimation head operating on the deterministic
+    embedding mu with Spectral Normalization for Lipschitz smoothness.
     """
     def __init__(
         self,
         x_dim: int,
+        n_conformations: int,
         hidden_features: Tuple[int, ...] = (256, 128, 64),
         activation: nn.Module = nn.LeakyReLU,
+        dropout_p: float = 0.0,
     ):
         super().__init__()
-        dims = [1 + x_dim] + list(hidden_features) + [1]
+        dims = [n_conformations + x_dim] + list(hidden_features) + [1]
         layers = []
         for i in range(len(dims) - 1):
-            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            linear = nn.Linear(dims[i], dims[i + 1])
+
+            # Apply Spectral Normalization to all hidden layers
             if i < len(dims) - 2:
+                layers.append(nn.utils.spectral_norm(linear))
                 layers.append(activation())
+                layers.append(nn.Dropout(p=dropout_p))
+            else:
+                # Output layer: plain linear (or spectral_norm if you want strict output bounding)
+                layers.append(linear)
+
         self.net = nn.Sequential(*layers)
 
-    def forward(self, theta: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        # theta: (B,) long tensor of class indices
-        # x:     (B, D)
-        theta_f = theta.float().unsqueeze(-1)  # (B, 1), no embedding
-        h = torch.cat([theta_f, x], dim=-1)
+    def forward(self, theta_one_hot: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+        # theta_one_hot: (B, K) one-hot float tensor
+        # x:             (B, D)
+        h = torch.cat([theta_one_hot, x], dim=-1)
         return self.net(h).squeeze(-1)
 
 
@@ -68,19 +80,21 @@ class NREInferenceModel(nn.Module):
         self.encoder = encoder
         self.nre = nre
 
-    def forward(self, images: torch.Tensor, theta: torch.Tensor) -> torch.Tensor:
+    def forward(self, images: torch.Tensor, theta_one_hot: torch.Tensor) -> torch.Tensor:
         # images: (B, 1, H, W) or (B, H, W)
-        # theta:  (B,) long
+        # theta_one_hot:  (B, K) float
         if images.ndim == 3:
             images = images.unsqueeze(1)
+        # At inference, we always use the deterministic `mu` from the encoder
         out = self.encoder.forward_inference(images)
         mu = out[0] if isinstance(out, tuple) else out
-        return self.nre(theta, mu)
+        return self.nre(theta_one_hot, mu)
 
 
 # ============================================================================
 # CONVERSION  r_tilde  ->  true likelihood ratio
 # ============================================================================
+
 
 def log_ratio_from_log_rtilde(log_r_tilde: torch.Tensor, K: int) -> torch.Tensor:
     """
@@ -88,30 +102,20 @@ def log_ratio_from_log_rtilde(log_r_tilde: torch.Tensor, K: int) -> torch.Tensor
             log r     = log p(d|X) - log p(d)
     using:
         r = K * r_tilde / (r_tilde + K - 1)
+        
+    Numerically stable for all float32/float64 inputs without arbitrary clamping thresholds.
     """
-    K = float(K)
-    logK = math.log(K)
+    logK = math.log(float(K))
+    logK_minus_1 = torch.tensor(math.log(float(K) - 1.0), dtype=log_r_tilde.dtype, device=log_r_tilde.device)
 
-    # Clamp to a safe range for float32 exp()
-    x = torch.clamp(log_r_tilde, -20.0, 40.0)
-
-    log_num = logK + x
-    log_den = torch.log((K - 1.0) + torch.exp(x))
-    log_ratio = log_num - log_den
-
-    # Asymptotic corrections outside the clamped range
-    log_ratio = torch.where(
-        log_r_tilde > 40.0,
-        torch.tensor(logK, dtype=log_ratio.dtype, device=log_ratio.device),
-        log_ratio,
-    )
-    log_ratio = torch.where(
-        log_r_tilde < -20.0,
-        torch.tensor(logK - math.log(K - 1.0), dtype=log_ratio.dtype, device=log_ratio.device)
-        + log_r_tilde,
-        log_ratio,
-    )
+    # log_den = log((K - 1) + exp(log_r_tilde)) computed via C++ LogSumExp kernel
+    log_den = torch.logaddexp(logK_minus_1, log_r_tilde)
+    
+    # log r = log(K) + log_r_tilde - log_den
+    log_ratio = logK + log_r_tilde - log_den
+    
     return log_ratio
+
 
 # ============================================================================
 # LIKELIHOOD MATRIX EVALUATION (memory-mapped images)
@@ -127,6 +131,7 @@ def evaluate_log_ratios(
     pair_batch_size: int = 4096,
     normalize_images: bool = False,
     flip_contrast: bool = False,
+    skip_rtilde_correction: bool = False,  # <-- NEW PARAMETER
 ) -> torch.Tensor:
     """
     Returns log-ratio matrix of shape [N_images, K] using memory-mapped .mrc
@@ -172,17 +177,27 @@ def evaluate_log_ratios(
             theta_rep = theta_all.unsqueeze(0).expand(B, -1).reshape(-1)
 
             # Evaluate NRE head in pair-batches to keep GPU memory bounded
-            log_r_tilde = torch.empty(B * K, dtype=torch.float32, device="cpu")
+            log_r_raw = torch.empty(B * K, dtype=torch.float32, device="cpu")
             for p_start in range(0, B * K, pair_batch_size):
                 p_end = min(p_start + pair_batch_size, B * K)
-                batch_theta = theta_rep[p_start:p_end]
+                batch_theta_indices = theta_rep[p_start:p_end]
+                batch_theta_one_hot = F.one_hot(batch_theta_indices, num_classes=K).float()
                 batch_mu = mu_rep[p_start:p_end].to(device)
-                log_r_tilde[p_start:p_end] = model.nre(batch_theta, batch_mu).cpu().float()
+                log_r_raw[p_start:p_end] = model.nre(batch_theta_one_hot, batch_mu).cpu().float()
 
-            log_r_tilde = log_r_tilde.view(B, K)
-            log_ratio_chunk = log_ratio_from_log_rtilde(log_r_tilde, K)
+            log_r_raw = log_r_raw.view(B, K)
+
+            if not skip_rtilde_correction:
+                # This is for models trained with NRELossCrossClass
+                log_ratio_chunk = log_ratio_from_log_rtilde(log_r_raw, K)
+            else:
+                # This is for models trained with NRELossHybrid
+                print("Skipping r-tilde correction.", end='\r')
+                log_ratio_chunk = log_r_raw
+
             log_ratio_rows.append(log_ratio_chunk.cpu())
 
+    print() # Newline after the tqdm progress bar and potential print statements
     return torch.cat(log_ratio_rows, dim=0)  # [N_images, K]
 
 
@@ -210,7 +225,7 @@ class WeightOptimizer:
         else:
             self.w0 = torch.tensor(w0, dtype=torch.float64, device=device)
 
-        self.theta = torch.tensor(theta, dtype=torch.float64, device=device)
+        self.theta = torch.tensor(theta, dtype=torch.float64, device=self.device)
 
     def compute_loss(self, w: torch.Tensor) -> torch.Tensor:
         eps = 1e-15
@@ -247,11 +262,11 @@ class WeightOptimizer:
             losses.append(loss.item())
 
             if verbose and iteration % 100 == 0:
-                print(f"Iter {iteration}: Loss = {loss.item():.8f}")
+               print(f"Iter {iteration}: Loss = {loss.item():.8f}")
 
             if iteration > 10 and abs(losses[-1] - losses[-2]) < tol:
                 if verbose:
-                    print(f"Converged at iteration {iteration}")
+                 print(f"Converged at iteration {iteration}")
                 break
 
         with torch.no_grad():
@@ -332,7 +347,7 @@ def main(args):
     # Build encoder and NRE head
     print(f"Building encoder: {embedding_name}, dim={embedding_dim}")
     encoder = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size)
-    nre = NREHead(x_dim=embedding_dim)
+    nre = NREHead(x_dim=embedding_dim, n_conformations=K)
     inf_model = NREInferenceModel(encoder, nre).to(device)
 
     # Load full-model checkpoint
@@ -340,6 +355,13 @@ def main(args):
     ckpt = torch.load(args.full_model, map_location=device)
     inf_model.load_state_dict(ckpt, strict=False)
     inf_model.eval()
+
+    if args.skip_rtilde_correction:
+        print("\nIMPORTANT: Will skip r-tilde correction. NRE output is assumed to be the true log-ratio.")
+        print("           (This is for models trained with --use_real_for_nre_negatives)\n")
+    else:
+        print("\nUsing standard r-tilde correction for NRE output.")
+        print("           (This is for models trained with cross-class synthetic negatives)\n")
 
     # Evaluate log p(d|X) - log p(d) for all images and classes
     print("Evaluating NRE log-ratio matrix...")
@@ -352,6 +374,7 @@ def main(args):
         pair_batch_size=args.batch_size_pairs,
         normalize_images=args.normalize_images,
         flip_contrast=args.flip_contrast,
+        skip_rtilde_correction=args.skip_rtilde_correction, # <-- Pass flag
     )
     print(f"Log-ratio matrix shape: {log_ratio_matrix.shape}")
 
@@ -414,6 +437,9 @@ if __name__ == "__main__":
     parser.add_argument("--tol",                 type=float, default=1e-10, help="Convergence tolerance")
     parser.add_argument("--normalize_images",    action="store_true",       help="Per-image mean/std normalize (as in pretrain validation)")
     parser.add_argument("--flip_contrast",       action="store_true",       help="Flip contrast of mrc images")
+    
+    parser.add_argument("--skip_rtilde_correction", action="store_true",
+                        help="Skip the r-tilde correction. Use this if the model was trained with real negatives (hybrid NRE).")
 
     args = parser.parse_args()
     main(args)

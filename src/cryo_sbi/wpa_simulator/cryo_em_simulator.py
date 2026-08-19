@@ -251,13 +251,31 @@ def cryo_em_simulator(
     # detach and clone the clean image
     image_clean = image.detach().clone()
 
-    # special case of mixed noise
-    if simulation_param["mixed_noise"]:
-       # random selection of noise model
-       noise_type = random.choice(["Gaussian", "Poisson", "Poisson-MTF", "GAN-ICE", "real"])
-
     # 3. Add noise
-    if noise_type == "Gaussian":
+    if noise_type == "mixed":
+       mixed_types = ["Gaussian", "Poisson", "Poisson-MTF", "GAN-ICE", "real"]
+       batch_noise_types = random.choices(mixed_types, k=image.shape[0])
+       noisy_image = torch.empty_like(image)
+       for n_type in set(batch_noise_types):
+           indices = [i for i, t in enumerate(batch_noise_types) if t == n_type]
+           sub_image = image[indices]
+           sub_snr = snr[indices]
+           if n_type == "Gaussian":
+              sub_noisy = add_Gaussian_noise(sub_image, sub_snr, simulation_param["mask"])
+           elif n_type in ["Poisson", "Poisson-MTF"]:
+              mtf = simulation_param["mtf"] if n_type == "Poisson-MTF" else None
+              nps = simulation_param["nps-e"] if n_type == "Poisson-MTF" else None
+              sf = simulation_param["sf"].expand(sub_snr.shape[0], 1, 1) if n_type == "Poisson-MTF" else torch.ones_like(sub_snr)
+              target_snr = sf * sub_snr
+              sub_noisy = add_Poisson_noise(sub_image, target_snr, simulation_param, mtf, nps)
+           elif n_type == "GAN-ICE":
+              sub_noisy = add_GAN_ICE_noise(sub_image, simulation_param["noise_generator_ice"], sub_snr, simulation_param["mask"])
+           elif n_type == "real":
+              sub_noisy = add_real_noise(sub_image, sub_snr, simulation_param["noise_dataloader"], simulation_param["mask"])
+           noisy_image[indices] = sub_noisy
+       image = noisy_image
+
+    elif noise_type == "Gaussian":
        image = add_Gaussian_noise(image, snr, simulation_param["mask"])
 
     elif noise_type in ["Poisson", "Poisson-MTF"]:

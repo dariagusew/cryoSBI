@@ -77,26 +77,30 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     # readout error
     simulation_param["readout_std"] = image_config.get("READOUT_STD", 1.0)
 
-    # noise model
-    simulation_param["noise"] = image_config.get("NOISE", "Gaussian")
-    # special case of mixed noise
-    if simulation_param["noise"] == "mixed":
-       simulation_param["mixed_noise"] = True
+    # noise model (can be a string or a list of strings)
+    noise_cfg = image_config.get("NOISE", "Gaussian")
+    if isinstance(noise_cfg, str):
+        noise_list = [noise_cfg]
+    elif isinstance(noise_cfg, (list, tuple)):
+        noise_list = list(noise_cfg)
     else:
-       simulation_param["mixed_noise"] = False
+        raise ValueError("NOISE parameter must be a string or a list of strings")
 
-    # check if noise model is supported
-    if simulation_param["noise"] not in ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "mixed", "GAN-ICE", "real"]:
-       raise ValueError("Unsupported noise model, only: Gaussian, Poisson, Poisson-MTF, empirical, mixed, GAN-ICE, real")
+    supported_noise_models = ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "GAN-ICE", "real"]
+    for n in noise_list:
+        if n not in supported_noise_models:
+            raise ValueError(f"Unsupported noise model '{n}', only: {', '.join(supported_noise_models)}")
+
+    simulation_param["noise"] = noise_list
 
     # check parameters for Poisson noise
-    if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
+    if any(n in ["Poisson", "Poisson-MTF"] for n in noise_list):
        # Dose must be positive
        if (simulation_param["dose"] <= 0):
-          raise ValueError("With Poisson and mixed noise models DOSE must be specified and positive")
+          raise ValueError("With Poisson noise models DOSE must be specified and positive")
 
     # prepare Poisson-MTF noise
-    if simulation_param["noise"] in ["Poisson-MTF", "mixed"]:
+    if any(n == "Poisson-MTF" for n in noise_list):
         # Pre-compute useful stuff
         mtf, nps, sf = get_mtf_nps_grids(simulation_param)
         # Update the dictionary with the new values.
@@ -105,7 +109,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         simulation_param["sf"] = sf
 
     # check parameters for Empirical noise
-    if simulation_param["noise"] in ["empirical"]:
+    if any(n == "empirical" for n in noise_list):
        # get path to mrc file
        mrc_file = image_config.get("NOISE_MRC", None)
        # check that noise_mrc is not None 
@@ -121,7 +125,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        simulation_param["nps"] = torch.sqrt(torch.clamp(nps_torch, min=0))
 
     # check parameters for GAN-ICE-learned noise
-    if simulation_param["noise"] in ["GAN-ICE", "mixed"]:
+    if any(n == "GAN-ICE" for n in noise_list):
        # get path to checkpoint
        pt_file = image_config.get("ICE_NOISE_PT", None)
        # check that noise_pt is not None
@@ -135,12 +139,12 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        simulation_param["noise_generator_ice"] = NoiseGeneratorICE(pt_file=pt_file, device=device)
 
     # check parameters for real noise
-    if simulation_param["noise"] in ["real", "mixed"]:
+    if any(n == "real" for n in noise_list):
         # get path to mrc file
         mrc_noise_file = image_config.get("MRC_NOISE_FILE", None)
         # check that MRC_NOISE_FILE is not None
         if mrc_noise_file == None:
-            raise ValueError("With real and mixed noise models you must specify MRC_NOISE_FILE")
+            raise ValueError("With real noise models you must specify MRC_NOISE_FILE")
         # Store the MRC file path and verify it exists
         import os
         if not os.path.exists(mrc_noise_file):
@@ -180,19 +184,22 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
         print(f"  Topology file: {topology_path}")
     else:
         print(f"  Sigma: fixed ({sigma_val:.1f} Å)")
-    print(f"  Noise model: {simulation_param['noise']}")
+    if len(noise_list) == 1:
+        print(f"  Noise model: {noise_list[0]}")
+    else:
+        print(f"  Noise models (mixed): {', '.join(noise_list)}")
        
-    if simulation_param["noise"] in ["Poisson", "Poisson-MTF", "mixed"]:
+    if any(n in ["Poisson", "Poisson-MTF"] for n in noise_list):
        print(f"  Dose: {simulation_param['dose']:.1f} e/Å²")
        print(f"  QDE(0): {simulation_param['qe']:.3f}")
-       if simulation_param["noise"] in ["Poisson-MTF", "mixed"]:
+       if any(n == "Poisson-MTF" for n in noise_list):
           print(f"  QDE(Nyq): {simulation_param['qe_n']:.3f}")
           print(f"  MTF(Nyq): {simulation_param['mtf_n']:.3f}")
        print(f"  Readout std: {simulation_param['readout_std']:.1f} e")
        
-    if simulation_param["noise"] in ["empirical"]:
+    if any(n == "empirical" for n in noise_list):
        print(f"  NPS noise file: {mrc_file}")
-    if simulation_param["noise"] in ["GAN-ICE","mixed"]:
+    if any(n == "GAN-ICE" for n in noise_list):
        print(f"  Noise GAN generator loaded from: {pt_file.name}  ")
     if isinstance(fluct_file, str):
        print(f"  Adding fluctuations from file: {fluct_file}")
@@ -227,7 +234,7 @@ def cryo_em_simulator(
         amp (torch.Tensor): The amplitude contrast of the CTF.
         snr (torch.Tensor): The signal-to-noise ratio of the simulated image.
         simulation_param  (dict): Dictionary of simulation parameters.
-        noise_type (str): noise type
+        noise_type (str or list): noise type(s) to sample from per batch image
 
     Returns:
         torch.Tensor: A tensor of the simulated (noisy) cryo-EM image.
@@ -252,58 +259,35 @@ def cryo_em_simulator(
     image_clean = image.detach().clone()
 
     # 3. Add noise
-    if noise_type == "mixed":
-       mixed_types = ["Gaussian", "Poisson", "Poisson-MTF", "GAN-ICE", "real"]
-       batch_noise_types = random.choices(mixed_types, k=image.shape[0])
-       noisy_image = torch.empty_like(image)
-       for n_type in set(batch_noise_types):
-           indices = [i for i, t in enumerate(batch_noise_types) if t == n_type]
-           sub_image = image[indices]
-           sub_snr = snr[indices]
-           if n_type == "Gaussian":
-              sub_noisy = add_Gaussian_noise(sub_image, sub_snr, simulation_param["mask"])
-           elif n_type in ["Poisson", "Poisson-MTF"]:
-              mtf = simulation_param["mtf"] if n_type == "Poisson-MTF" else None
-              nps = simulation_param["nps-e"] if n_type == "Poisson-MTF" else None
-              sf = simulation_param["sf"].expand(sub_snr.shape[0], 1, 1) if n_type == "Poisson-MTF" else torch.ones_like(sub_snr)
-              target_snr = sf * sub_snr
-              sub_noisy = add_Poisson_noise(sub_image, target_snr, simulation_param, mtf, nps)
-           elif n_type == "GAN-ICE":
-              sub_noisy = add_GAN_ICE_noise(sub_image, simulation_param["noise_generator_ice"], sub_snr, simulation_param["mask"])
-           elif n_type == "real":
-              sub_noisy = add_real_noise(sub_image, sub_snr, simulation_param["noise_dataloader"], simulation_param["mask"])
-           noisy_image[indices] = sub_noisy
-       image = noisy_image
+    noise_types = [noise_type] if isinstance(noise_type, str) else list(noise_type)
+    batch_noise_types = random.choices(noise_types, k=image.shape[0])
+    noisy_image = torch.empty_like(image)
+    for n_type in set(batch_noise_types):
+        indices = [i for i, t in enumerate(batch_noise_types) if t == n_type]
+        sub_image = image[indices]
+        sub_snr = snr[indices]
 
-    elif noise_type == "Gaussian":
-       image = add_Gaussian_noise(image, snr, simulation_param["mask"])
+        if n_type == "Gaussian":
+            sub_noisy = add_Gaussian_noise(sub_image, sub_snr, simulation_param["mask"])
 
-    elif noise_type in ["Poisson", "Poisson-MTF"]:
-       # Prepare useful tensors
-       mtf = None # MTF grid
-       nps = None # NPS grid
-       sf = torch.ones_like(snr) # scaling factor target SNR
+        elif n_type in ["Poisson", "Poisson-MTF"]:
+            mtf = simulation_param["mtf"] if n_type == "Poisson-MTF" else None
+            nps = simulation_param["nps-e"] if n_type == "Poisson-MTF" else None
+            sf = simulation_param["sf"].expand(sub_snr.shape[0], 1, 1) if n_type == "Poisson-MTF" else torch.ones_like(sub_snr)
+            target_snr = sf * sub_snr
+            sub_noisy = add_Poisson_noise(sub_image, target_snr, simulation_param, mtf, nps)
 
-       # Get pre-calculated values for noise model Poisson-MTF 
-       if noise_type == "Poisson-MTF":
-          mtf = simulation_param["mtf"]
-          nps = simulation_param["nps-e"]
-          sf = simulation_param["sf"].expand(snr.shape[0], 1, 1)
+        elif n_type == "GAN-ICE":
+            sub_noisy = add_GAN_ICE_noise(sub_image, simulation_param["noise_generator_ice"], sub_snr, simulation_param["mask"])
 
-       # Define target snr to account for MTF/NPS:
-       target_snr = sf * snr
+        elif n_type == "real":
+            sub_noisy = add_real_noise(sub_image, sub_snr, simulation_param["noise_dataloader"], simulation_param["mask"])
 
-       # Add Poisson + (optional MTF/DQE) + detector noise
-       image = add_Poisson_noise(image, target_snr, simulation_param, mtf, nps)
+        else:
+            sub_noisy = add_noise_from_nps(sub_image, sub_snr, simulation_param["nps"], simulation_param["mask"])
 
-    elif noise_type == "GAN-ICE":
-       image = add_GAN_ICE_noise(image, simulation_param["noise_generator_ice"], snr, simulation_param["mask"])
-
-    elif noise_type == "real":
-        image = add_real_noise(image, snr, simulation_param["noise_dataloader"], simulation_param["mask"])
-
-    else:
-       image = add_noise_from_nps(image, snr, simulation_param["nps"], simulation_param["mask"])
+        noisy_image[indices] = sub_noisy
+    image = noisy_image
 
     # 4. Normalize noisy and clean images
     image = gaussian_normalize_image(image)

@@ -571,14 +571,10 @@ class SpatialCryoEncoder(nn.Module):
     Shared-trunk encoder for cryo-EM images.
     """
 
-    def __init__(self, output_dimension: int, D: int = 128):
+    def __init__(self, output_dimension: int, D: int = 128, dropout: float = 0.0):
         super().__init__()
         self.D = D
         self.output_dimension = output_dimension
-
-        # Buffers for latent jittering
-        self.register_buffer("sigma_emb", torch.zeros(output_dimension))
-        self.register_buffer("jitter_scale", torch.tensor(0.0))
 
         ndf = 16
         n_stages = int(math.log2(D)) - 2
@@ -595,6 +591,7 @@ class SpatialCryoEncoder(nn.Module):
                           kernel_size=4, stride=2, padding=1, bias=False),
                 nn.BatchNorm2d(out_channels),
                 nn.LeakyReLU(0.2, inplace=True),
+                nn.Dropout2d(p=dropout),
             ])
             in_channels = out_channels
 
@@ -609,6 +606,8 @@ class SpatialCryoEncoder(nn.Module):
         # Normalization on the shared trunk output
         self.output_norm = nn.LayerNorm(output_dimension)
 
+        self.trunk_dropout = nn.Dropout(p=dropout)
+
         # ---- Two small heads on the shared representation ----
         self.mu_head     = nn.Linear(output_dimension, output_dimension)
         self.log_var_head = nn.Linear(output_dimension, output_dimension)
@@ -621,6 +620,7 @@ class SpatialCryoEncoder(nn.Module):
         h = self.trunk_conv(x)          # [B, output_dim, 1, 1]
         h = h.view(h.size(0), -1)       # [B, output_dim]
         h = self.output_norm(h)         # [B, output_dim]
+        h = self.trunk_dropout(h)       # [B, output_dim]
         return h
 
     def forward_inference(self, x: torch.Tensor) -> torch.Tensor:
@@ -645,15 +645,12 @@ class SpatialCryoEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Flow Training Interface - deterministic or jittered if jitter_scale > 0 during training.
+        Flow Training Interface - deterministic
         Returns: mu or z [B, output_dim]
         """
         h   = self.trunk(x)
         mu  = self.mu_head(h)
-        if self.training and self.jitter_scale > 0:
-            return mu + torch.randn_like(mu) * (self.jitter_scale * self.sigma_emb)
         return mu
-
 
 @add_embedding("SPATIAL_CRYO_FFT_FILTER")
 class SpatialCryoFFTEncoder(nn.Module):

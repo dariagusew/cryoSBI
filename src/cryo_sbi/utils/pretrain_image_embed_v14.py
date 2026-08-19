@@ -274,13 +274,14 @@ class ImageEmbedPretrainModel(nn.Module):
         embedding_dim: int,
         image_size: int,
         n_conformations: int,
+        dropout: float,
     ):
         super().__init__()
         self.embedding_name = embedding_name
         self.embedding_dim  = embedding_dim
         self.image_size     = image_size
 
-        self.encoder   = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size)
+        self.encoder   = EMBEDDING_NETS[embedding_name](embedding_dim, D=image_size, dropout=dropout)
         self.predictor = FullParamPredictor(embedding_dim, n_conformations)
         self.nre       = NREHead(x_dim=embedding_dim, n_conformations=n_conformations)
 
@@ -800,6 +801,7 @@ def pretrain_image_embed(
     jittering_factor: float = 0.0,
     supcon_temperature: float = 0.1,
     use_real_for_nre_negatives: bool = False,
+    dropout: float = 0.0,
 ):
     print("\n" + "=" * 70)
     print(f"TRAINING: {embedding_name}")
@@ -948,7 +950,7 @@ def pretrain_image_embed(
     print(f"\nBuilding model with {embedding_name}...")
     try:
         model = ImageEmbedPretrainModel(
-            embedding_name, embedding_dim, image_size, n_conformations
+            embedding_name, embedding_dim, image_size, n_conformations, dropout
         ).to(device)
     except ValueError as e:
         print(f"\n❌ Error: {e}")
@@ -1269,6 +1271,7 @@ if __name__ == "__main__":
     parser.add_argument("--consistency_loss_type",         default="mse", choices=["mse", "cosine", "supcon", "mse_supcon"], help="Type of consistency loss to use")
     parser.add_argument("--jittering_factor",              type=float, default=0.0,             help="NRE jittering factor")
     parser.add_argument("--supcon_temperature",            type=float, default=0.1,             help="SupCon temperature")
+    parser.add_argument("--dropout",                       type=float, default=0.0,             help="Embedding dropout")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -1320,4 +1323,5 @@ if __name__ == "__main__":
         jittering_factor              = args.jittering_factor,
         supcon_temperature            = args.supcon_temperature,
         use_real_for_nre_negatives    = args.use_real_for_nre_negatives,
+        dropout                       = args.dropout,
         )

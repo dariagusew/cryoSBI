@@ -627,7 +627,7 @@ def _run_vib_epoch(
            indices_B, quaternions_B, shift_B, defocus_B, b_factor_B, amp_B, snr_B = parameters_B
            
            # === k-GROUPED BATCH
-           num_groups_per_minibatch = 8
+           num_groups_per_minibatch = 4
            group_size = batch_size // num_groups_per_minibatch
            total_groups = quaternions_B.size(0) // group_size
 

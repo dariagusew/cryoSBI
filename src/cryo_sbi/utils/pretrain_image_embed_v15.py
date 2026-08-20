@@ -692,7 +692,7 @@ def _run_vib_epoch(
             theta_one_hot = F.one_hot(theta_indices, num_classes=n_conformations).float()
             
             if use_hybrid_nre:
-                L_nre = nre_loss_fn(model.nre, theta_one_hot, mu.detach(), mu_real.detach())
+                L_nre = nre_loss_fn(model.nre, theta_one_hot, mu, mu_real.detach())
             else:
                 # Original logic: use off-diagonal synthetic samples as negatives
                 if model.training and jittering_factor > 0:

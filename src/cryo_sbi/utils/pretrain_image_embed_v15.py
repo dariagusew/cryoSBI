@@ -626,11 +626,19 @@ def _run_vib_epoch(
            
            indices_B, quaternions_B, shift_B, defocus_B, b_factor_B, amp_B, snr_B = parameters_B
            
-           # === BATCH-UNIFORM POSES
-           N = quaternions_B.size(0)
-           quaternions_B = quaternions_B[0:1].repeat(N, 1)  # All share R_0
-           shift_B       = shift_B[0:1].repeat(N, 1)        # All share S_0
-           
+           # === k-GROUPED BATCH
+           num_groups_per_minibatch = 8
+           group_size = batch_size // num_groups_per_minibatch
+           total_groups = quaternions_B.size(0) // group_size
+
+           # Pick total_groups distinct poses out of the pool
+           selected_quats  = quaternions_B[::group_size][:total_groups]
+           selected_shifts = shift_B[::group_size][:total_groups]
+
+           # Repeat each pose
+           quaternions_B = selected_quats.repeat_interleave(group_size, dim=0)
+           shift_B       = selected_shifts.repeat_interleave(group_size, dim=0)
+
            # Generate Set B 
            with torch.no_grad():
                 noisy_images_B, _ = cryo_em_simulator(

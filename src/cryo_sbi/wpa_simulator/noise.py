@@ -39,6 +39,81 @@ def add_Gaussian_noise(
     return image_noise
 
 
+def add_Colored_noise(
+    image: torch.Tensor,
+    snr: torch.Tensor,
+    mask: torch.Tensor,
+    apix: float = 1.0,
+) -> torch.Tensor:
+    """
+    Adds Gaussian colored noise to images based on a fitted radial NPS model.
+    NPS parameters are sampled from a distribution for each image.
+
+    NPS(s) = A * exp(-B * s^2) + C,  where s is in Å⁻¹.
+
+    SNR definition: SNR = signal_variance / noise_variance
+    Therefore: noise_std = signal_std / sqrt(SNR)
+
+    Args:
+        image (torch.Tensor): Image tensor of shape (batch, height, width).
+        snr (torch.Tensor): Signal-to-noise ratio for each image in the batch.
+        mask (torch.Tensor): Signal mask, shape (height, width).
+        apix (float): Pixel size in Angstroms. Default 1.0.
+
+    Returns:
+        torch.Tensor: Noisy image with the same shape as the input.
+    """
+    batch_size, image_size, _ = image.shape
+
+    # Ice Noise Power Spectrum (NPS) Model Parameters (Mean and StdDev)
+    # Fitted to NPS(s) = A * exp(-B * s^2) + C
+    NPS_PARAM_A_MEAN, NPS_PARAM_A_STD = 9.466959e-01, 6.080222e-02
+    NPS_PARAM_B_MEAN, NPS_PARAM_B_STD = 6.632189e+02, 3.336727e+01
+    NPS_PARAM_C_MEAN, NPS_PARAM_C_STD = 9.623375e-01, 4.853994e-04
+
+    # Sample NPS parameters for each image in the batch from a Gaussian distribution
+    A = torch.randn(batch_size, 1, 1, device=image.device) * NPS_PARAM_A_STD + NPS_PARAM_A_MEAN
+    B = torch.randn(batch_size, 1, 1, device=image.device) * NPS_PARAM_B_STD + NPS_PARAM_B_MEAN
+    C = torch.randn(batch_size, 1, 1, device=image.device) * NPS_PARAM_C_STD + NPS_PARAM_C_MEAN
+
+    # Calculate signal standard deviation within mask
+    signal_std = torch.std(image[:, mask], dim=[-1])  # (batch,)
+
+    # Calculate noise standard deviation from power SNR
+    # SNR = σ²_signal / σ²_noise → σ_noise = σ_signal / sqrt(SNR) [batch, 1, 1]
+    noise_std = signal_std.reshape(-1, 1, 1) / torch.sqrt(snr)
+
+    # Create the noise-shaping filter in Fourier space from the NPS model.
+    freqs = torch.fft.fftfreq(image_size, d=apix, device=image.device)
+    fx, fy = freqs.view(1, -1), freqs.view(-1, 1)
+    radial_freq = torch.sqrt(fx**2 + fy**2)
+
+    # NPS is calculated per-image using the sampled parameters, enabling batch-wise variation
+    nps = A * torch.exp(-B * (radial_freq**2)) + C
+    fourier_filter = torch.sqrt(torch.clamp(nps, min=0.0))
+
+    # Generate white noise and "color" it by applying the filter.
+    F_white = torch.fft.fft2(torch.randn_like(image))
+    F_colored = F_white * fourier_filter
+    colored_noise = torch.fft.ifft2(F_colored).real
+
+    # Set mean to zero - should be already close
+    colored_noise = colored_noise - colored_noise.mean(dim=(-2, -1), keepdim=True)
+
+    # Rescale the generated noise to match the target standard deviation.
+    current_noise_std = torch.std(colored_noise, dim=(-2, -1), keepdim=True)
+    # Avoid division by zero for near-zero standard deviations.
+    safe_noise_std = torch.where(
+        current_noise_std < 1e-12,
+        torch.ones_like(current_noise_std),
+        current_noise_std,
+    )
+    scaled_noise = colored_noise * noise_std / safe_noise_std
+
+    # Add the scaled, colored noise to the original image.
+    return image + scaled_noise
+
+
 def add_Poisson_noise(
     image: torch.Tensor,
     target_snr: torch.Tensor,

@@ -7,7 +7,7 @@ from pathlib import Path
 from cryo_sbi.wpa_simulator.ctf import apply_ctf
 from cryo_sbi.wpa_simulator.detector import get_mtf_nps_grids 
 from cryo_sbi.wpa_simulator.image_generation import project_density
-from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Poisson_noise, add_GAN_ICE_noise
+from cryo_sbi.wpa_simulator.noise import add_Gaussian_noise, add_Colored_noise, add_Poisson_noise, add_GAN_ICE_noise
 from cryo_sbi.wpa_simulator.noise import add_noise_from_nps, add_real_noise, MRCNoiseDataLoader
 from cryo_sbi.wpa_simulator.noise_generator_ice import NoiseGeneratorICE
 from cryo_sbi.wpa_simulator.image_tools import gaussian_normalize_image
@@ -86,7 +86,7 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     else:
         raise ValueError("NOISE parameter must be a string or a list of strings")
 
-    supported_noise_models = ["Gaussian", "Poisson", "Poisson-MTF", "empirical", "GAN-ICE", "real"]
+    supported_noise_models = ["Gaussian", "Colored", "Poisson", "Poisson-MTF", "empirical", "GAN-ICE", "real"]
     for n in noise_list:
         if n not in supported_noise_models:
             raise ValueError(f"Unsupported noise model '{n}', only: {', '.join(supported_noise_models)}")
@@ -269,6 +269,9 @@ def cryo_em_simulator(
 
         if n_type == "Gaussian":
             sub_noisy = add_Gaussian_noise(sub_image, sub_snr, simulation_param["mask"])
+
+        elif n_type == "Colored":
+            sub_noisy = add_Colored_noise(sub_image, sub_snr, simulation_param["mask"], simulation_param["pixel_size"])
 
         elif n_type in ["Poisson", "Poisson-MTF"]:
             mtf = simulation_param["mtf"] if n_type == "Poisson-MTF" else None

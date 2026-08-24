@@ -564,11 +564,11 @@ def _run_vib_epoch(
     pred_weights: Dict[str, float],
     normalizer: FixedTargetNormalizer,
     epoch: int,
-    weight_cons: float,
+    beta_cons: float,
     beta_NRE: float,
     beta_OT: float,
     snr_range: Optional[Tuple[float, float]] = None,
-    nre_warmup_epochs: int = 15,
+    warmup_epochs: int = 15,
     jittering_factor: float = 0.0,
     supcon_temperature: float = 0.1,
 ) -> tuple:
@@ -616,7 +616,7 @@ def _run_vib_epoch(
                 simulation_param["noise"],
             )
 
-        if weight_cons > 0.0:    
+        if beta_cons > 0.0:
            # 2. Second set of images for SupCon only 
            try:
                parameters_B = next(synthetic_iter)
@@ -708,17 +708,19 @@ def _run_vib_epoch(
                 L_nre = nre_loss_fn(log_r_matrix, targets["indices"])
 
             # current weight for NRE loss
-            current_beta_NRE = beta_NRE * min(1.0, epoch / max(1.0, float(nre_warmup_epochs))) 
+            current_beta_NRE = beta_NRE * min(1.0, epoch / max(1.0, float(warmup_epochs)))
             loss = loss + current_beta_NRE * L_nre
 
             # optimal transport loss
             if beta_OT>0.0:
                 L_ot = sinkhorn(mu, mu_real)
                 epoch_ot_loss += L_ot.item()
-                loss = loss + beta_OT * L_ot
+                # current weight for OT loss
+                current_beta_OT = beta_OT * min(1.0, epoch / max(1.0, float(warmup_epochs)))
+                loss = loss + current_beta_OT * L_ot
 
             # consistency loss
-            if weight_cons > 0.0:
+            if beta_cons > 0.0:
                 mu_B = model.encoder(noisy_images_B[sl])
 
                 supcon_loss_fn = SupervisedContrastiveLoss(temperature=supcon_temperature)
@@ -727,7 +729,7 @@ def _run_vib_epoch(
                 L_cons = supcon_loss_fn(features, labels)
 
                 epoch_cons_loss += L_cons.item()
-                loss = loss + weight_cons * L_cons
+                loss = loss + beta_cons * L_cons
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -763,7 +765,7 @@ def pretrain_image_embed(
     device: str = "cuda",
     embedding_dim: int = 16,
     epochs: int = 100,
-    batch_size: int = 256,
+    batch_size: int = 512,
     lr: float = 2e-4,
     simulation_batch_size: int = 1024,
     save_path: str = "pretrained_image_embed.pt",
@@ -774,10 +776,10 @@ def pretrain_image_embed(
     real_data_mrc: Optional[str] = None,
     val_size: int = 3000,
     val_k: int = 3,
-    weight_cons: float = 0.0,
+    beta_cons: float = 0.5,
     beta_NRE: float = 0.1,
     beta_OT: float = 0.0,
-    nre_warmup_epochs: int = 15,
+    warmup_epochs: int = 15,
     jittering_factor: float = 0.0,
     supcon_temperature: float = 0.1,
     use_real_for_nre_negatives: bool = False,
@@ -805,7 +807,7 @@ def pretrain_image_embed(
         print(f"  {key:10s}: {val:.2f}")
     nre_negative_source = "real images" if use_real_for_nre_negatives else "synthetic (off-diagonal)"
     print(f"  {'beta_NRE':10s}: {beta_NRE:.2f} (NRE negatives from: {nre_negative_source})")
-    print(f"  {'cons':10s}: {weight_cons:.2f}")
+    print(f"  {'cons':10s}: {beta_cons:.2f}")
 
     # ------------------------------------------------------------------
     # Config and conformational models
@@ -963,10 +965,11 @@ def pretrain_image_embed(
 
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.001)
 
-    warmup_epochs = 5
-    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
-    cosine = CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs, eta_min=1e-6)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+    # fixed 5 epochs warmup for learning rate
+    we = 5
+    warmup = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=we)
+    cosine = CosineAnnealingLR(optimizer, T_max=epochs - we, eta_min=1e-6)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[we])
 
     print("\nTraining configuration:")
     print(f"  Embedding:         {embedding_name}")
@@ -1013,11 +1016,11 @@ def pretrain_image_embed(
                 pred_weights=pred_weights,
                 normalizer=normalizer,
                 epoch=epoch,
-                weight_cons=weight_cons,
+                beta_cons=beta_cons,
                 beta_NRE=beta_NRE,
                 beta_OT=beta_OT,
                 snr_range=snr_range,
-                nre_warmup_epochs=nre_warmup_epochs,
+                warmup_epochs=warmup_epochs,
                 jittering_factor=jittering_factor,
                 supcon_temperature=supcon_temperature,
             )
@@ -1037,7 +1040,7 @@ def pretrain_image_embed(
                 "kl":   f"{avg_kl_loss:.4f}",
                 "nre":  f"{avg_nre_loss:.4f}",
             }
-            if weight_cons > 0.0:
+            if beta_cons > 0.0:
                 postfix_dict["cons"] = f"{avg_cons_loss:.4f}"
             if beta_OT > 0.0:
                 postfix_dict["ot"] = f"{avg_ot_loss:.4f}"
@@ -1053,7 +1056,7 @@ def pretrain_image_embed(
                 print(f"    Pred loss:      {avg_pred_loss:.6f}")
                 print(f"    KL loss:        {avg_kl_loss:.6f}")
                 print(f"    NRE loss:       {avg_nre_loss:.6f}")
-                if weight_cons > 0.0:
+                if beta_cons > 0.0:
                     print(f"    Cons loss:      {avg_cons_loss:.6f}")
                 if beta_OT > 0.0:
                     print(f"    Ot loss:      {avg_ot_loss:.6f}")
@@ -1132,7 +1135,7 @@ def pretrain_image_embed(
     print(f"  Pred loss:      {final_pred_loss:.6f}")
     print(f"  KL loss:        {final_kl_loss:.6f}")
     print(f"  NRE loss:       {final_nre_loss:.6f}")
-    if weight_cons > 0.0:
+    if beta_cons > 0.0:
         print(f"  Cons loss:      {history['cons_loss'][-1]:.6f}")
     if beta_OT > 0.0:
         print(f"  Ot loss:      {history['ot_loss'][-1]:.6f}")
@@ -1201,8 +1204,8 @@ def pretrain_image_embed(
         "beta_NRE":       beta_NRE,
         "beta_OT":        beta_OT,
         "pred_weights":   pred_weights,
-        "weight_cons":    weight_cons,
-        "nre_warmup_epochs": nre_warmup_epochs,
+        "beta_cons":    beta_cons,
+        "warmup_epochs": warmup_epochs,
         "use_real_for_nre_negatives": use_real_for_nre_negatives,
         "resumed_from":   resume_from,
     })
@@ -1226,7 +1229,7 @@ if __name__ == "__main__":
     parser.add_argument("--embedding",                     default="SPATIAL_CRYO",              help="Embedding architecture name")
     parser.add_argument("--embedding_dim",                 type=int,   default=16,              help="Encoder output dimension")
     parser.add_argument("--epochs",                        type=int,   default=100,             help="Stage 1 epochs")
-    parser.add_argument("--batch_size",                    type=int,   default=256,             help="Mini-batch size")
+    parser.add_argument("--batch_size",                    type=int,   default=512,             help="Mini-batch size")
     parser.add_argument("--lr",                            type=float, default=2e-4,            help="Stage 1 learning rate")
     parser.add_argument("--simulation_batch_size",         type=int,   default=1024,            help="Images generated per simulator call")
     parser.add_argument("--n_batches_per_epoch",           type=int,   default=100,             help="Simulation calls per epoch")
@@ -1235,10 +1238,10 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from",                   default=None,                        help="Checkpoint path to resume from")
     parser.add_argument("--device",                        default="cuda",                      help="Compute device (cuda / cpu)")
     parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
-    parser.add_argument("--beta_NRE",                      type=float, default=0.1,             help="Auxiliary NRE loss weight (gamma fixed to 1.0)")
-    parser.add_argument("--beta_OT",                       type=float, default=0.0,             help="Optimal transport loss weight")
-    parser.add_argument("--beta_cons",                     type=float, default=0.0,             help="Noise consistency loss weight")
-    parser.add_argument("--nre_warmup_epochs",             type=int,   default=15,              help="Epochs over which to warm up NRE loss weight")
+    parser.add_argument("--beta_NRE",                      type=float, default=0.1,             help="Auxiliary NRE loss weight")
+    parser.add_argument("--beta_OT",                       type=float, default=0.0,             help="Auxiliary Optimal transport loss weight")
+    parser.add_argument("--beta_cons",                     type=float, default=0.5,             help="Noise consistency loss weight")
+    parser.add_argument("--warmup_epochs",                 type=int,   default=15,              help="Epochs over which to warm up NRE/OT loss weight")
     parser.add_argument("--jittering_factor",              type=float, default=0.0,             help="NRE jittering factor")
     parser.add_argument("--supcon_temperature",            type=float, default=0.1,             help="SupCon temperature")
     parser.add_argument("--dropout",                       type=float, default=0.0,             help="Embedding dropout")
@@ -1284,10 +1287,10 @@ if __name__ == "__main__":
         real_data_mrc                 = args.real_data_mrc,
         val_size                      = args.val_size,
         val_k                         = args.val_k,
-        weight_cons                   = args.beta_cons, 
+        beta_cons                     = args.beta_cons,
         beta_NRE                      = args.beta_NRE,
         beta_OT                       = args.beta_OT,
-        nre_warmup_epochs             = args.nre_warmup_epochs,
+        warmup_epochs                 = args.warmup_epochs,
         jittering_factor              = args.jittering_factor,
         supcon_temperature            = args.supcon_temperature,
         use_real_for_nre_negatives    = args.use_real_for_nre_negatives,

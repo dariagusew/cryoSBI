@@ -215,7 +215,7 @@ class WeightOptimizer:
     ):
         self.device = device
         self.log_p = torch.tensor(log_p, dtype=torch.float64, device=device)
-        self.log_p = self.log_p - self.log_p.max()  # global max for stability
+        self.log_p = self.log_p - self.log_p.max(dim=0, keepdim=True).values  # per-image max across conformations for stability
         self.n_j, self.n_i = self.log_p.shape
 
         if w0 is None:
@@ -227,15 +227,16 @@ class WeightOptimizer:
 
         self.theta = torch.tensor(theta, dtype=torch.float64, device=self.device)
 
-    def compute_loss(self, w: torch.Tensor) -> torch.Tensor:
-        eps = 1e-15
-        log_w = torch.log(w + eps)
+    def compute_loss(self, z: torch.Tensor) -> torch.Tensor:
+        log_w = F.log_softmax(z, dim=0)
         log_terms = log_w.unsqueeze(1) + self.log_p
         term1 = -torch.logsumexp(log_terms, dim=0).sum() / self.n_i
 
         if self.theta > 0:
-            log_w0 = torch.log(self.w0 + eps)
-            term2 = self.theta * torch.sum(w * (log_w - log_w0)) / self.n_j
+            w = torch.softmax(z, dim=0)
+            log_w0 = torch.log(self.w0)
+            safe_log_w = torch.where(w > 0, log_w, torch.zeros_like(log_w))
+            term2 = self.theta * torch.sum(w * (safe_log_w - log_w0)) / self.n_j
         else:
             term2 = torch.tensor(0.0, dtype=torch.float64, device=self.device)
 
@@ -255,10 +256,11 @@ class WeightOptimizer:
         losses = []
         for iteration in range(max_iter):
             optimizer.zero_grad()
-            w = torch.softmax(z, dim=0)
-            loss = self.compute_loss(w)
+            loss = self.compute_loss(z)
             loss.backward()
             optimizer.step()
+            with torch.no_grad():
+                z.sub_(z.mean())
             losses.append(loss.item())
 
             if verbose and iteration % 100 == 0:
@@ -297,12 +299,13 @@ class WeightOptimizerLBFGS(WeightOptimizer):
         for iteration in range(max_iter):
             def closure():
                 optimizer.zero_grad()
-                w = torch.softmax(z, dim=0)
-                loss = self.compute_loss(w)
+                loss = self.compute_loss(z)
                 loss.backward()
                 return loss
 
             loss = optimizer.step(closure)
+            with torch.no_grad():
+                z.sub_(z.mean())
             losses.append(loss.item())
 
             if verbose:

@@ -50,6 +50,11 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     else:
         raise ValueError("Either TOPOLOGY or SIGMA must be specified in image_config")
 
+    # Ensure sigma has shape [num_models, 2, natoms]
+    if simulation_param["sigma"].ndim == 2:
+        # Old format: [2, natoms] - expand to [num_models, 2, natoms]
+        simulation_param["sigma"] = simulation_param["sigma"].unsqueeze(0).expand(models.shape[0], -1, -1)
+
     simulation_param["num_pixels"] = torch.tensor(
         image_config["N_PIXELS"], dtype=torch.float32, device=device
     )
@@ -162,16 +167,6 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
     pixel_size = simulation_param["pixel_size"].item()
     simulation_param["k2"] = make_fft_k2_grid(num_pixels, pixel_size, device) 
 
-    # add fluctuations
-    fluct_file = image_config.get("ADD_FLUCTUATIONS", None)
-    if isinstance(fluct_file, str):
-       # load tensor on device
-       simulation_param["fluctuations"] = torch.load(fluct_file, map_location=device)
-       # divide by sqrt(3)
-       simulation_param["fluctuations"] = simulation_param["fluctuations"] / np.sqrt(3.0)
-    else:
-       simulation_param["fluctuations"] = None
-
     # Log configuration
     print("\nImage simulation parameters:")
     print(f"  Number of atoms: {natoms:,}")
@@ -201,8 +196,6 @@ def create_simulation_param(image_config: dict, models: torch.Tensor, device: st
        print(f"  NPS noise file: {mrc_file}")
     if any(n == "GAN-ICE" for n in noise_list):
        print(f"  Noise GAN generator loaded from: {pt_file.name}  ")
-    if isinstance(fluct_file, str):
-       print(f"  Adding fluctuations from file: {fluct_file}")
 
     print("="*70)
     
@@ -248,8 +241,7 @@ def cryo_em_simulator(
         simulation_param["sigma"],
         shift,
         simulation_param["num_pixels"], 
-        simulation_param["pixel_size"],
-        simulation_param["fluctuations"]
+        simulation_param["pixel_size"]
     )
 
     # 2. Add CTF

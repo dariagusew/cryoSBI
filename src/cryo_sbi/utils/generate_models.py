@@ -242,7 +242,8 @@ def get_calvados_topology(resnames):
         'CYS': (17.2, 39.0), 'GLN': (21.6, 54.0), 'GLU': (21.6, 54.0), 'GLY': (8.8, 23.0),
         'HIS': (25.0, 55.5), 'ILE': (19.0, 41.0), 'LEU': (18.8, 44.0), 'LYS': (21.2, 56.5),
         'MET': (22.8, 56.0), 'PHE': (29.0, 62.5), 'PRO': (17.2, 35.0), 'SER': (14.0, 32.0),
-        'THR': (16.8, 36.0), 'TRP': (38.6, 75.5), 'TYR': (31.0, 65.0), 'VAL': (17.0, 36.5)
+        'THR': (16.8, 36.0), 'TRP': (38.6, 75.5), 'TYR': (31.0, 65.0), 'VAL': (17.0, 36.5),
+        'HSD': (25.0, 55.5)
     }
     # Transform scattering factors from reciprocal space to real space via Fourier transform
     # see comments above 
@@ -343,6 +344,25 @@ def get_martini_topology(resnames, beadnames):
 
     return topo
 
+def _get_positions_and_topology(atoms, topo_type):
+    """Helper function to extract positions and topology for a single model."""
+    if topo_type == "allatom":
+        pos = atoms.positions
+        atypes = [at.type for at in atoms]
+        topo = get_allatom_topology(atypes)
+    elif topo_type in ["allatom_com", "calvados3"]:
+        pos = np.array([r.atoms.select_atoms("not type H").center_of_mass() for r in atoms.residues])
+        resnames = [r.resname for r in atoms.residues]
+        topo = get_calvados_topology(resnames)
+    elif topo_type == "martini3":
+        pos = atoms.positions
+        resnames = [at.residue.resname for at in atoms]
+        beadnames = [at.name for at in atoms]
+        topo = get_martini_topology(resnames, beadnames)
+    else:
+        raise ValueError(f"Unknown topo_type: {topo_type}")
+
+    return pos, topo
 
 def models_to_tensor_topology(
         pdb_files,
@@ -351,89 +371,81 @@ def models_to_tensor_topology(
         output_topology
     ):
     """
-    Converts different model files in pdb format to a torch tensor and create topology.
+    Converts PDB files with potentially different numbers of atoms to a padded
+    torch tensor for models and topology.
+
     Parameters
     ----------
     pdb_files : list
-        A list of PDB files to convert to a torch tensor.
+        A list of PDB files to convert.
     output_models : str
-        The path to the output file for the models. Must be a .pt file.
+        The path to the output .pt file for the models.
     topo_type : str
-        The type of topology ('allatom', 'oneatom', 'calvados3', 'martini3').
+        The type of topology ('allatom', 'allatom_com', 'calvados3', 'martini3').
     output_topology : str
-        The path to the output topology file. Must be a .pt file.
-    Returns
-    -------
-    None
+        The path to the output .pt file for the topology.
     """
-    
-    # Initialize lists to store models data
-    pos_list = []
-    at_list = []
- 
-    # Loop through all PDB files to extract atomic information
-    for pdb in pdb_files:
+    if not pdb_files:
+        print("Warning: No PDB files provided. Exiting.")
+        return
 
-        # Create MDAnalysis Universe object from PDB file
-        u = mda.Universe(pdb)
-        # Select all heavy atoms / coarse-grained beads
+    # --- Single Pass to Read Data and Find Max Size ---
+    pos_list = []
+    topo_list = []
+    max_ps = 0
+
+    for pdb_file in pdb_files:
+        # Create MDAnalysis Universe and select atoms
+        u = mda.Universe(pdb_file)
         atoms = u.select_atoms("not type H")
 
-        # Get positions
-        if topo_type in ["allatom", "calvados3", "martini3"]:
-           # Extract atom positions as numpy array with shape [natoms, 3]
-           pos = atoms.positions
+        # Get positions and topology for the current model
+        pos, topo = _get_positions_and_topology(atoms, topo_type)
 
-        elif(topo_type=="allatom_com"):
-           # Compute positions of residues COM [nres, 3]
-           pos = np.array([r.atoms.select_atoms("not type H").center_of_mass() for r in atoms.residues])
+        n_ps = pos.shape[0]
+        print(f"Reading {pdb_file}: found {n_ps} particles")
 
-        # Transpose and append positions to the list
-        pos_list.append(pos.T)
-        # Append atoms to the list
-        at_list.append(atoms)
+        # Append unpadded data to lists
+        pos_list.append(pos)
+        topo_list.append(topo)
 
-    # Validate that all models have the same number of atoms
-    n_atoms = len(pos_list[0])
-    for i, pos in enumerate(pos_list):
-        if len(pos) != n_atoms:
-            raise ValueError(
-                f"Model {i} has {len(pos)} atoms, but model 0 has {n_atoms} atoms. "
-                "All models must have the same number of atoms."
-            )
+        # Update the maximum number of particles found so far
+        max_ps = max(max_ps, n_ps)
 
-    # Convert list of numpy arrays to torch tensor [n_models, 3, n_atoms]
-    model = torch.tensor(np.array(pos_list), dtype=torch.float32)
+    # --- Pad and Stack Data After Reading All Files ---
+    padded_pos_list = []
+    padded_topo_list = []
 
-    # Center models by subtracting the geometric center of each model
-    # Calculate center: mean along atoms dimension (dim=2), keep dims for broadcasting
-    center = model.mean(dim=2, keepdim=True)  # Shape: [n_models, 3, 1]
-    model = model - center  # Broadcast subtraction across all atoms
+    for pos, topo in zip(pos_list, topo_list):
+        n_ps = pos.shape[0]
+        if n_ps < max_ps:
+            # Pad positions with NaN
+            pos_padding = np.full((max_ps - n_ps, 3), np.nan)
+            padded_pos = np.vstack([pos, pos_padding])
 
-    # Save the tensor to the specified output file
+            # Pad topology with NaN
+            topo_padding = torch.full((2, max_ps - n_ps), np.nan, dtype=torch.float32)
+            padded_topo = torch.cat([topo, topo_padding], dim=1)
+
+            print(f"  - padding to {max_ps} particles with {max_ps-n_ps} entries")
+        else:
+            padded_pos = pos
+            padded_topo = topo
+
+        padded_pos_list.append(padded_pos.T) # Transpose for [3, N] shape
+        padded_topo_list.append(padded_topo)
+
+    # Convert lists to final tensors
+    model = torch.tensor(np.array(padded_pos_list), dtype=torch.float32)
+    topo_stacked = torch.stack(padded_topo_list, dim=0)
+
+    # Center models by subtracting the geometric center (ignoring NaNs)
+    center = torch.nanmean(model, dim=2, keepdim=True)
+    model = model - center
+
+    # Save tensors to output files
     torch.save(model, output_models)
-    print(f"Saved {len(pdb_files)} models to {output_models} with shape {model.shape}")
+    print(f"\nSaved {len(pdb_files)} models to {output_models} with shape {model.shape}")
 
-    # Prepare topology
-    if(topo_type=="allatom"):
-       # list of atom types
-       atypes = [at.type for at in at_list[0]]
-       # get topo
-       topo = get_allatom_topology(atypes)
- 
-    elif(topo_type=="allatom_com" or topo_type=="calvados3"):
-       # list of residue names
-       resnames = [r.resname for r in at_list[0].residues]
-       # get topo
-       topo = get_calvados_topology(resnames)
-
-    elif(topo_type=="martini3"):
-       # lists of residue and bead names
-       resnames = [at.residue.resname for at in at_list[0]]
-       beadnames = [at.name for at in at_list[0]]
-       # get topo
-       topo = get_martini_topology(resnames, beadnames)
-
-    # Save the tensor to the specified output file
-    torch.save(topo, output_topology)
-    print(f"Saved topology to {output_topology} in {topo_type.upper()} format") 
+    torch.save(topo_stacked, output_topology)
+    print(f"Saved topology to {output_topology} in {topo_type.upper()} format with shape {topo_stacked.shape}")

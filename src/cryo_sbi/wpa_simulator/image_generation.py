@@ -1,5 +1,4 @@
 import numpy as np
-from typing import Tuple, Optional
 import torch
 
 def gen_rot_matrix(quats: torch.Tensor) -> torch.Tensor:
@@ -50,7 +49,6 @@ def project_density(
     shift: torch.Tensor,
     num_pixels: torch.Tensor,
     pixel_size: torch.Tensor,
-    fluctuations: Optional[torch.Tensor] = None,
     atom_batch_size: int = 1024
 ) -> torch.Tensor:
     """
@@ -64,7 +62,7 @@ def project_density(
         models (torch.Tensor): Models
         index (torch.Tensor): Index of selected models
         quats (torch.Tensor): Quaternions of shape (num_batch, 4) defining rotations
-        sigma (torch.Tensor): Parameters of Gaussian kernel of shape (2, num_atoms)
+        sigma (torch.Tensor): Parameters of Gaussian kernel of shape (n_models, 2, num_atoms)
         shift (torch.Tensor): 2D shift to apply of shape (num_batch, 2)
         num_pixels (torch.Tensor): Number of pixels along one image dimension
         pixel_size (torch.Tensor): Pixel size in Angstrom
@@ -76,13 +74,13 @@ def project_density(
     """
     # Convert index to integer 
     index = index.round().long()
-    # Get coordinates of selected models
+    # Get coordinates and sigmas of selected models
     coords = models[index.flatten()]
+    sigmas = sigma[index.flatten()]
 
     num_batch, _, num_atoms = coords.shape
     device, dtype = coords.device, coords.dtype
-    max_num_model = models.shape[0]-1
- 
+
     # Convert num_pixels to int
     num_pixels = int(num_pixels.item())
 
@@ -101,13 +99,6 @@ def project_density(
     # Apply shift to all x and y coordinates
     coords_rot[:, :2, :] = coords_rot[:, :2, :] + shift.unsqueeze(-1)
 
-    # Add fluctuations
-    if fluctuations is not None:
-       # select models based on index and reshape to enable broadcast
-       f = fluctuations[index.flatten()].unsqueeze(1)
-       # add noise - f is already divided by sqrt(3) when rmsf tensor is loaded
-       coords_rot = coords_rot + f * torch.randn_like(coords_rot)
-
     # Initialize the final image tensor with zeros
     final_image = torch.zeros((num_batch, num_pixels, num_pixels), device=device, dtype=dtype)
 
@@ -119,22 +110,26 @@ def project_density(
         
         # Slice the rotated coordinates and sigma for the current batch
         coords_rot_batch = coords_rot[:, :, start_idx:end_idx]
-        sigma_batch = sigma[:, start_idx:end_idx]
+        sigma_batch = sigmas[:, :, start_idx:end_idx]
 
         # Compute Gaussian in x direction for the batch
-        # Shape: (num_batch, num_pixels, atom_batch_size)
+        # Shape: (batch_size, atom_batch_size, num_pixels)
         dx_batch = grid.unsqueeze(0).unsqueeze(-1) - coords_rot_batch[:, 0, :].unsqueeze(1)
-        gauss_x_batch = sigma_batch[0, :].view(1, 1, -1) * torch.exp(sigma_batch[1, :].view(1, 1, -1) * dx_batch ** 2)
+        amplitude_x = sigma_batch[:, 0, :].unsqueeze(1)  # Shape: (batch_size, 1, atom_batch_size)
+        width_x = sigma_batch[:, 1, :].unsqueeze(1)      # Shape: (batch_size, 1, atom_batch_size)
+        gauss_x_batch = amplitude_x * torch.exp(width_x * dx_batch ** 2)
 
         # Compute Gaussian in y direction for the batch
-        # Shape: (num_batch, atom_batch_size, num_pixels)
+        # Shape: (batch_size, atom_batch_size, num_pixels)
         dy_batch = grid.unsqueeze(0).unsqueeze(0) - coords_rot_batch[:, 1, :].unsqueeze(-1)
-        gauss_y_batch = sigma_batch[0, :].view(1, -1, 1) * torch.exp(sigma_batch[1, :].view(1, -1, 1) * dy_batch ** 2)
+        amplitude_y = sigma_batch[:, 0, :].unsqueeze(-1)  # Shape: (batch_size, atom_batch_size, 1)
+        width_y = sigma_batch[:, 1, :].unsqueeze(-1)      # Shape: (batch_size, atom_batch_size, 1)
+        gauss_y_batch = amplitude_y * torch.exp(width_y * dy_batch ** 2)
 
         # Matrix multiplication to get 2D projection for this batch
         image_batch = torch.bmm(gauss_x_batch, gauss_y_batch)
         
-        # Accumulate the result
-        final_image += image_batch
+        # Accumulate the result, set nan to zero for missing atoms in that model
+        final_image += torch.nan_to_num(image_batch, nan=0.0)
 
     return final_image

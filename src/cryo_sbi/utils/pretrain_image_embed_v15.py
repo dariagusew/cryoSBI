@@ -68,9 +68,6 @@ class FullParamPredictor(nn.Module):
         self.conf_head    = nn.Linear(hidden_dim, n_conformations)
         self.orient_head  = nn.Linear(hidden_dim, 4)
         self.shift_head   = nn.Linear(hidden_dim, 2)
-        self.defocus_head = nn.Linear(hidden_dim, 1)
-        self.bfactor_head = nn.Linear(hidden_dim, 1)
-        self.snr_head     = nn.Linear(hidden_dim, 1)
 
     def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
         h = self.trunk(z)
@@ -78,9 +75,6 @@ class FullParamPredictor(nn.Module):
             "conf":    self.conf_head(h),
             "orient":  self.orient_head(h),
             "shift":   self.shift_head(h),
-            "defocus": self.defocus_head(h).squeeze(-1),
-            "bfactor": self.bfactor_head(h).squeeze(-1),
-            "snr":     self.snr_head(h).squeeze(-1),
         }
 
 class NREHead(nn.Module):
@@ -294,7 +288,7 @@ class ImageEmbedPretrainModel(nn.Module):
 
         print(f"  Encoder:   {embedding_name}  (D={image_size}, output_dim={embedding_dim})")
         print(f"    mu_head inside; log_var_head inside (training only)")
-        print(f"  Predictor: z -> (X={n_conformations} classes, orient, shift, defocus, bfactor, snr)")
+        print(f"  Predictor: z -> (X={n_conformations} classes, orient, shift)")
         print(f"  NRE head:  theta (one-hot) + mu (dim={embedding_dim}) -> log r")
 
 
@@ -321,15 +315,6 @@ class FixedTargetNormalizer(nn.Module):
         max_shift = float(image_config["SHIFT"])
         shift_std = max_shift / math.sqrt(3.0)
         _register("shift", [0.0, 0.0], [shift_std, shift_std])
-
-        dmin, dmax = map(float, image_config["DEFOCUS"])
-        _register("defocus", (dmin + dmax) / 2.0, (dmax - dmin) / math.sqrt(12.0))
-
-        bmin, bmax = map(float, image_config["B_FACTOR"])
-        _register("bfactor", (bmin + bmax) / 2.0, (bmax - bmin) / math.sqrt(12.0))
-
-        snr_min, snr_max = map(float, image_config["SNR"])
-        _register("snr", (snr_min + snr_max) / 2.0, (snr_max - snr_min) / math.sqrt(12.0))
 
     def normalize(self, key: str, x: torch.Tensor) -> torch.Tensor:
         mean = getattr(self, f"{key}_mean").to(x.device)
@@ -381,18 +366,6 @@ def vib_loss(
         preds["shift"],
         normalizer.normalize("shift", targets["shift"].float()),
     )
-    L_defocus = F.mse_loss(
-        preds["defocus"],
-        normalizer.normalize("defocus", targets["defocus"].float().reshape(-1)),
-    )
-    L_bfactor = F.mse_loss(
-        preds["bfactor"],
-        normalizer.normalize("bfactor", targets["b_factor"].float().reshape(-1)),
-    )
-    L_snr = F.mse_loss(
-        preds["snr"],
-        normalizer.normalize("snr", targets["snr"].float().reshape(-1)),
-    )
 
     total_weight = sum(pred_weights.values())
 
@@ -400,9 +373,6 @@ def vib_loss(
           pred_weights["conf"]    * L_conf
         + pred_weights["orient"]  * L_orient
         + pred_weights["shift"]   * L_shift
-        + pred_weights["defocus"] * L_defocus
-        + pred_weights["bfactor"] * L_bfactor
-        + pred_weights["snr"]     * L_snr
     ) / total_weight
 
     L_kl = -0.5 * (1.0 + log_var - mu.pow(2) - log_var.exp()).mean(dim=-1).mean()
@@ -411,9 +381,6 @@ def vib_loss(
         "conf":    L_conf,
         "orient":  L_orient,
         "shift":   L_shift,
-        "defocus": L_defocus,
-        "bfactor": L_bfactor,
-        "snr":     L_snr,
     }
 
     return L_pred + beta * L_kl, L_pred, L_kl, ind_losses
@@ -587,7 +554,7 @@ def _run_vib_epoch(
     epoch_cons_loss = 0.0
     epoch_nre_loss = 0.0
     epoch_ot_loss = 0.0
-    epoch_ind_losses = {"conf": 0.0, "orient": 0.0, "shift": 0.0, "defocus": 0.0, "bfactor": 0.0, "snr": 0.0}
+    epoch_ind_losses = {"conf": 0.0, "orient": 0.0, "shift": 0.0}
     n_steps = 0
     last_mu: Optional[torch.Tensor] = None
 
@@ -662,9 +629,6 @@ def _run_vib_epoch(
                 "indices":     indices[sl].squeeze(-1).round().long().to(device, non_blocking=True),
                 "quaternions": quaternions[sl].to(device, non_blocking=True),
                 "shift":       shift[sl].to(device,       non_blocking=True),
-                "defocus":     defocus[sl].to(device,     non_blocking=True),
-                "b_factor":    b_factor[sl].to(device,    non_blocking=True),
-                "snr":         snr[sl].to(device,         non_blocking=True),
             }
 
             # load batch of real images
@@ -797,9 +761,6 @@ def pretrain_image_embed(
             "conf":    1.0,
             "orient":  0.0,
             "shift":   0.0,
-            "defocus": 0.0,
-            "bfactor": 0.0,
-            "snr":     0.0,
         }
 
     print("\nPrediction loss weights:")
@@ -917,7 +878,7 @@ def pretrain_image_embed(
     print("\nBuilding fixed target normalizer from prior ranges...")
     normalizer = FixedTargetNormalizer(image_config).to(device)
 
-    for key in ("shift", "defocus", "bfactor", "snr"):
+    for key in ("shift"):
         mean = getattr(normalizer, f"{key}_mean")
         std  = getattr(normalizer, f"{key}_std")
         print(f"  {key:8s}: mean={mean.tolist()}, std={std.tolist()}")
@@ -1064,9 +1025,6 @@ def pretrain_image_embed(
                 print(f"      conf:    {avg_ind_losses['conf']:.6f}")
                 print(f"      orient:  {avg_ind_losses['orient']:.6f}")
                 print(f"      shift:   {avg_ind_losses['shift']:.6f}")
-                print(f"      defocus: {avg_ind_losses['defocus']:.6f}")
-                print(f"      bfactor: {avg_ind_losses['bfactor']:.6f}")
-                print(f"      snr:     {avg_ind_losses['snr']:.6f}")
                 print(f"    Embedding std:  {emb_std:.6f}")
                 print(f"    Embedding dist: {emb_dist:.6f}")
 
@@ -1249,9 +1207,6 @@ if __name__ == "__main__":
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
     parser.add_argument("--weight_shift",   type=float, default=0.0,  help="Shift prediction loss weight")
-    parser.add_argument("--weight_defocus", type=float, default=0.0,  help="Defocus prediction loss weight")
-    parser.add_argument("--weight_bfactor", type=float, default=0.0,  help="B-factor prediction loss weight")
-    parser.add_argument("--weight_snr",     type=float, default=0.0,  help="SNR prediction loss weight")
     
     parser.add_argument("--real_data_mrc",  default=None, help="Path to real .mrc images for Sim2Real validation")
     parser.add_argument("--val_size",       type=int, default=3000, help="Number of images in fixed validation set")
@@ -1280,9 +1235,6 @@ if __name__ == "__main__":
             "conf":    args.weight_conf,
             "orient":  args.weight_orient,
             "shift":   args.weight_shift,
-            "defocus": args.weight_defocus,
-            "bfactor": args.weight_bfactor,
-            "snr":     args.weight_snr,
         },
         real_data_mrc                 = args.real_data_mrc,
         val_size                      = args.val_size,

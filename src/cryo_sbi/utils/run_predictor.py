@@ -54,9 +54,6 @@ class FullParamPredictor(nn.Module):
         self.conf_head    = nn.Linear(hidden_dim, n_conformations)
         self.orient_head  = nn.Linear(hidden_dim, 4)
         self.shift_head   = nn.Linear(hidden_dim, 2)
-        self.defocus_head = nn.Linear(hidden_dim, 1)
-        self.bfactor_head = nn.Linear(hidden_dim, 1)
-        self.snr_head     = nn.Linear(hidden_dim, 1)
 
     def forward(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
         h = self.trunk(z)
@@ -64,9 +61,6 @@ class FullParamPredictor(nn.Module):
             "conf":    self.conf_head(h),
             "orient":  self.orient_head(h),
             "shift":   self.shift_head(h),
-            "defocus": self.defocus_head(h).squeeze(-1),
-            "bfactor": self.bfactor_head(h).squeeze(-1),
-            "snr":     self.snr_head(h).squeeze(-1),
         }
 
 

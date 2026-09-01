@@ -878,7 +878,7 @@ def pretrain_image_embed(
     print("\nBuilding fixed target normalizer from prior ranges...")
     normalizer = FixedTargetNormalizer(image_config).to(device)
 
-    for key in ("shift"):
+    for key in ["shift"]:
         mean = getattr(normalizer, f"{key}_mean")
         std  = getattr(normalizer, f"{key}_std")
         print(f"  {key:8s}: mean={mean.tolist()}, std={std.tolist()}")

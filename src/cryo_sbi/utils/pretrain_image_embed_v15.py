@@ -1,6 +1,6 @@
-# "pretrain_image_embed_v11.py"
+# "pretrain_image_embed_v15.py"
 """
-pretrain_image_embed_v11.py
+pretrain_image_embed_v15.py
 
 VIB pre-training of image encoder on synthetic cryo-EM data.
 
@@ -17,7 +17,7 @@ embedding mu.  Class labels are fed to the NRE head as raw integer
 indices (no one-hot, no learned embedding).
 
 Usage:
-    python pretrain_image_embed_v11.py \
+    python pretrain_image_embed_v15.py \
         --image_config config.json \
         --embedding SPATIAL_CRYO \
         --embedding_dim 16 \
@@ -446,40 +446,6 @@ def get_synth_embeddings_vib(encoder, images: torch.Tensor, batch_size: int) -> 
 # UTILITIES
 # ============================================================================
 
-def compute_intra_class_jitter(mu: torch.Tensor, labels: torch.Tensor, eta: float = 0.0) -> torch.Tensor:
-    """
-    Computes jitter proportional to the WITHIN-CLASS standard deviation (D_intra).
-    Guarantees noise perturbation never spills into neighboring conformation clusters.
-    
-    mu:     (N, D) latent embeddings
-    labels: (N,) class indices
-    eta:    fraction of intra-class std to use (e.g. 0.15 = 15%)
-    """
-    with torch.no_grad():
-        N, D = mu.shape
-        n_classes = int(labels.max().item()) + 1
-        
-        # 1. Compute mean embedding per conformation class in this batch
-        class_means = torch.zeros(n_classes, D, device=mu.device)
-        class_counts = torch.zeros(n_classes, 1, device=mu.device)
-        
-        class_means.index_add_(0, labels, mu)
-        class_counts.index_add_(0, labels, torch.ones((N, 1), device=mu.device))
-        
-        class_counts = torch.clamp(class_counts, min=1.0)
-        class_means = class_means / class_counts  # (K, D)
-        
-        # 2. Compute residual vectors (distance from each sample to its class mean)
-        mu_centered = mu - class_means[labels]  # (N, D)
-        
-        # 3. Average intra-class standard deviation per latent dimension
-        std_intra = torch.sqrt((mu_centered ** 2).mean(dim=0) + 1e-8)  # (D,)
-        
-        # 4. Generate jitter
-        jitter = torch.randn_like(mu) * (eta * std_intra)
-        
-    return mu + jitter
-
 def check_embedding_health(embeddings: torch.Tensor, device: str) -> tuple:
     with torch.no_grad():
         emb_std = embeddings.std(dim=0).mean().item()
@@ -536,7 +502,7 @@ def _run_vib_epoch(
     beta_OT: float,
     snr_range: Optional[Tuple[float, float]] = None,
     warmup_epochs: int = 15,
-    jittering_factor: float = 0.0,
+    add_nre_jittering: bool = False,
     supcon_temperature: float = 0.1,
 ) -> tuple:
     """Single VIB epoch on synthetic images."""
@@ -659,8 +625,8 @@ def _run_vib_epoch(
                 L_nre = nre_loss_fn(model.nre, theta_one_hot, mu, mu_real.detach())
             else:
                 # Original logic: use off-diagonal synthetic samples as negatives
-                if model.training and jittering_factor > 0:
-                    mu_nre = compute_intra_class_jitter(mu, targets["indices"], eta=jittering_factor)
+                if model.training and add_nre_jittering:
+                    mu_nre = z
                 else:
                     mu_nre = mu
 
@@ -744,7 +710,7 @@ def pretrain_image_embed(
     beta_NRE: float = 0.1,
     beta_OT: float = 0.0,
     warmup_epochs: int = 15,
-    jittering_factor: float = 0.0,
+    add_nre_jittering: bool = False,
     supcon_temperature: float = 0.1,
     use_real_for_nre_negatives: bool = False,
     dropout: float = 0.0,
@@ -982,7 +948,7 @@ def pretrain_image_embed(
                 beta_OT=beta_OT,
                 snr_range=snr_range,
                 warmup_epochs=warmup_epochs,
-                jittering_factor=jittering_factor,
+                add_nre_jittering=add_nre_jittering,
                 supcon_temperature=supcon_temperature,
             )
 
@@ -1198,11 +1164,11 @@ if __name__ == "__main__":
     parser.add_argument("--beta",                          type=float, default=1e-5,            help="KL weight")
     parser.add_argument("--beta_NRE",                      type=float, default=0.1,             help="Auxiliary NRE loss weight")
     parser.add_argument("--beta_OT",                       type=float, default=0.0,             help="Auxiliary Optimal transport loss weight")
-    parser.add_argument("--beta_cons",                     type=float, default=0.5,             help="Noise consistency loss weight")
+    parser.add_argument("--beta_cons",                     type=float, default=0.1,             help="Noise consistency loss weight")
     parser.add_argument("--warmup_epochs",                 type=int,   default=15,              help="Epochs over which to warm up NRE/OT loss weight")
-    parser.add_argument("--jittering_factor",              type=float, default=0.0,             help="NRE jittering factor")
     parser.add_argument("--supcon_temperature",            type=float, default=0.1,             help="SupCon temperature")
     parser.add_argument("--dropout",                       type=float, default=0.0,             help="Embedding dropout")
+    parser.add_argument("--add_nre_jittering",             action="store_true", default=False,  help="Add jittering to NRE estimator")
 
     parser.add_argument("--weight_conf",    type=float, default=1.0,  help="Conformation prediction loss weight")
     parser.add_argument("--weight_orient",  type=float, default=0.0,  help="Orientation prediction loss weight")
@@ -1243,7 +1209,7 @@ if __name__ == "__main__":
         beta_NRE                      = args.beta_NRE,
         beta_OT                       = args.beta_OT,
         warmup_epochs                 = args.warmup_epochs,
-        jittering_factor              = args.jittering_factor,
+        add_nre_jittering             = args.add_nre_jittering,
         supcon_temperature            = args.supcon_temperature,
         use_real_for_nre_negatives    = args.use_real_for_nre_negatives,
         dropout                       = args.dropout,

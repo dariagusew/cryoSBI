@@ -147,14 +147,33 @@ class NRELossCrossClass(nn.Module):
         loss = loss + (-F.logsigmoid(-log_r_neg).mean())
         return loss
 
+
 class NRELossHybrid(nn.Module):
     """
-    NRE loss using simulated images for positive (joint) samples and
-    real images for negative (marginal) samples.
-    Estimates log p(d_sim|theta) - log p(d_real).
+    Hybrid NRE Loss
+
+    Estimates:
+        r(X, d) = p_sim(d | X) / p_mix(d)
+    where:
+        p_mix(d) = (1 - alpha) * p_sim(d) + alpha * p_real(d)
+
+    Key Properties:
+    1. Positive pairs: On-diagonal joint samples (X_i, d_sim_i).
+    2. Synthetic negative pairs: ALL off-diagonal pairs (X_i, d_sim_j with i != j).
+       - No class masking is applied, making p_sim(d) an UNBIASED marginal draw.
+    3. Real negative pairs: (X_i, d_real_k) sampled from experimental images.
+    4. Downstream Likelihood Ratio:
+       r(X_a, d_real) / r(X_b, d_real) = p_sim(d_real | X_a) / p_sim(d_real | X_b)
+       The denominator cancels out during population maximization without bias.
     """
-    def __init__(self):
+    def __init__(self, real_neg_weight: float = 0.5):
+        """
+        Args:
+            real_neg_weight (float): Alpha in [0, 1]. Weight given to real-image negatives
+                                     relative to synthetic off-diagonal negatives.
+        """
         super().__init__()
+        self.alpha = float(real_neg_weight)
 
     def forward(
         self,
@@ -164,31 +183,61 @@ class NRELossHybrid(nn.Module):
         mu_real: torch.Tensor
     ) -> torch.Tensor:
         """
-        nre_head:          The NRE head module (model.nre).
-        theta_one_hot_sim: (N_sim, K) one-hot tensor of labels for simulated data.
-        mu_sim:            (N_sim, D) embeddings from the simulated batch.
-        mu_real:           (N_real, D) embeddings from the real image batch.
-        """
-        # 1. Positive term: log r(theta_sim, mu_sim) from joint samples
-        log_r_pos = nre_head(theta_one_hot_sim, mu_sim)
-        loss_pos = -F.logsigmoid(log_r_pos).mean()
+        Args:
+            nre_head:          nn.Module that accepts (theta_one_hot, mu) and returns log_r (logits).
+            theta_one_hot_sim: (N_sim, K) one-hot or discrete representation of simulated X.
+            mu_sim:            (N_sim, D) latent image embeddings from simulator.
+            mu_real:           (N_real, D) latent image embeddings from experimental dataset.
 
-        # 2. Negative term: log r(theta_sim, mu_real) from marginal samples
+        Returns:
+            torch.Tensor: Scalar loss value.
+        """
         N_sim = theta_one_hot_sim.size(0)
         N_real = mu_real.size(0)
+        device = mu_sim.device
 
-        # Expand tensors to form all (theta_sim, mu_real) pairs
-        theta_expanded = theta_one_hot_sim.unsqueeze(1).expand(N_sim, N_real, -1)
-        mu_expanded = mu_real.unsqueeze(0).expand(N_sim, N_real, -1)
+        # ------------------------------------------------------------------
+        # 1. POSITIVE TERM: Joint pairs (X_i, d_sim_i) on the diagonal
+        # ------------------------------------------------------------------
+        log_r_pos = nre_head(theta_one_hot_sim, mu_sim)  # (N_sim, 1) or (N_sim,)
+        loss_pos = -F.logsigmoid(log_r_pos).mean()
 
-        # Reshape for batch processing by the NRE head
-        theta_flat = theta_expanded.reshape(N_sim * N_real, -1)
-        mu_flat = mu_expanded.reshape(N_sim * N_real, -1)
+        # ------------------------------------------------------------------
+        # 2a. SYNTHETIC NEGATIVE TERM: Off-diagonal pairs (X_i, d_sim_j with i != j)
+        # ------------------------------------------------------------------
+        # Expand theta_sim and mu_sim to evaluate all N_sim x N_sim pairs
+        theta_sim_exp = theta_one_hot_sim.unsqueeze(1).expand(N_sim, N_sim, -1)
+        mu_sim_exp = mu_sim.unsqueeze(0).expand(N_sim, N_sim, -1)
 
-        log_r_neg = nre_head(theta_flat, mu_flat)
-        loss_neg = -F.logsigmoid(-log_r_neg).mean()
+        # Off-diagonal mask (exclude ONLY the exact joint pairs on the diagonal)
+        diag_mask = torch.eye(N_sim, dtype=torch.bool, device=device)
+        off_diag_mask = ~diag_mask
+
+        theta_neg_sim = theta_sim_exp[off_diag_mask]
+        mu_neg_sim = mu_sim_exp[off_diag_mask]
+
+        log_r_neg_sim = nre_head(theta_neg_sim, mu_neg_sim)
+        loss_neg_sim = -F.logsigmoid(-log_r_neg_sim).mean()
+
+        # ------------------------------------------------------------------
+        # 2b. REAL NEGATIVE TERM: All pairs of (X_i, d_real_k)
+        # ------------------------------------------------------------------
+        theta_real_exp = theta_one_hot_sim.unsqueeze(1).expand(N_sim, N_real, -1)
+        mu_real_exp = mu_real.unsqueeze(0).expand(N_sim, N_real, -1)
+
+        theta_neg_real = theta_real_exp.reshape(N_sim * N_real, -1)
+        mu_neg_real = mu_real_exp.reshape(N_sim * N_real, -1)
+
+        log_r_neg_real = nre_head(theta_neg_real, mu_neg_real)
+        loss_neg_real = -F.logsigmoid(-log_r_neg_real).mean()
+
+        # ------------------------------------------------------------------
+        # 3. HYBRID NEGATIVE COMBINATION
+        # ------------------------------------------------------------------
+        loss_neg = (1.0 - self.alpha) * loss_neg_sim + self.alpha * loss_neg_real
 
         return loss_pos + loss_neg
+
 
 class MrcDataset(Dataset):
     """
@@ -622,7 +671,7 @@ def _run_vib_epoch(
             theta_one_hot = F.one_hot(theta_indices, num_classes=n_conformations).float()
             
             if use_hybrid_nre:
-                L_nre = nre_loss_fn(model.nre, theta_one_hot, mu, mu_real.detach())
+                L_nre = nre_loss_fn(model.nre, theta_one_hot, mu, mu_real)
             else:
                 # Original logic: use off-diagonal synthetic samples as negatives
                 if model.training and add_nre_jittering:

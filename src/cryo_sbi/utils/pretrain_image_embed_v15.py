@@ -636,6 +636,17 @@ def _run_vib_epoch(
                     simulation_param["noise"],
                 )
 
+        # load batch of real images
+        if use_hybrid_nre or beta_OT>0.0:
+           try:
+               real_images = next(real_data_iter)
+           except StopIteration:
+               real_data_iter = iter(real_data_loader)
+               real_images = next(real_data_iter)
+
+           real_images = real_images.to(device, non_blocking=True)
+
+        # loop on mini-batches
         n_full = (len(noisy_images) // batch_size) * batch_size
         for i in range(0, n_full, batch_size):
             sl = slice(i, i + batch_size)
@@ -646,17 +657,10 @@ def _run_vib_epoch(
                 "shift":       shift[sl].to(device,       non_blocking=True),
             }
 
-            # load batch of real images
+            # encode mini-batch of real images
             if use_hybrid_nre or beta_OT>0.0:
-                try:
-                    real_images = next(real_data_iter)
-                except StopIteration:
-                    real_data_iter = iter(real_data_loader)
-                    real_images = next(real_data_iter)
-
-                real_images = real_images.to(device, non_blocking=True)
-                # Get deterministic embedding mu for real images
-                mu_real = model.encoder(real_images)
+               # Get deterministic embedding mu for real images
+               mu_real = model.encoder(real_images[sl])
 
             # VIB loss
             optimizer.zero_grad()
@@ -839,11 +843,11 @@ def pretrain_image_embed(
                 print(f"  -> Building memory-efficient DataLoader for Hybrid NRE training...")
                 real_dataset = MrcDataset(real_data_mrc)
                 real_data_loader = DataLoader(
-                    real_dataset, 
-                    batch_size=batch_size, 
-                    shuffle=True, 
-                    num_workers=0, 
-                    pin_memory=True, 
+                    real_dataset,
+                    batch_size=simulation_batch_size,
+                    shuffle=True,
+                    num_workers=0,
+                    pin_memory=True,
                     drop_last=True
                 )
                 print(f"  ✅ Created Hybrid NRE DataLoader with {len(real_dataset)} images.")

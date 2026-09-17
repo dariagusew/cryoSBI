@@ -368,7 +368,8 @@ def models_to_tensor_topology(
         pdb_files,
         output_models,
         topo_type,
-        output_topology
+        output_topology,
+        aligned: bool = False
     ):
     """
     Converts PDB files with potentially different numbers of atoms to a padded
@@ -440,8 +441,12 @@ def models_to_tensor_topology(
     topo_stacked = torch.stack(padded_topo_list, dim=0)
 
     # Center models by subtracting the geometric center (ignoring NaNs)
-    center = torch.nanmean(model, dim=2, keepdim=True)
-    model = model - center
+    if aligned:
+        center = torch.nanmean(model[0], dim=1, keepdim=True)
+        model = model - center
+    else:
+        center = torch.nanmean(model, dim=2, keepdim=True)
+        model = model - center
 
     # Save tensors to output files
     torch.save(model, output_models)

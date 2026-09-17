@@ -86,6 +86,14 @@ def cl_models_to_tensor_topology():
         help="Output topology file path (Optional, default topology.pt)."
     )
 
+    cl_parser.add_argument(
+            "--aligned",
+            action="store",
+            type=str,
+            required=False,
+            default="False",
+        )
+
     
     args = cl_parser.parse_args()
     
@@ -94,7 +102,8 @@ def cl_models_to_tensor_topology():
         pdb_files=args.pdb_files,
         output_models=args.output_models,
         topo_type=args.topo_type,
-        output_topology=args.output_topology
+        output_topology=args.output_topology,
+        aligned=args.aligned
     )
 
 

@@ -92,7 +92,16 @@ def project_density(
 
     # Generate rotation matrices
     rot_matrix = gen_rot_matrix(quats)
-    
+
+    #  # Compute center
+    # center = torch.nanmean(coords, dim=2, keepdim=True)
+    # # Translate to zero
+    # coords_centered = coords - center
+    # # Apply rotation to centered coordinates
+    # coords_rot = torch.bmm(rot_matrix, coords_centered)
+    # # Translate back to original center
+    # coords_rot = coords_rot + center
+
     # Apply rotation to all coordinates
     coords_rot = torch.bmm(rot_matrix, coords)
     
